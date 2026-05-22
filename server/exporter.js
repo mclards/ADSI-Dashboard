@@ -18,6 +18,7 @@ const {
   queryEnergy5minRange,
   queryEnergy5minRangeAll,
   sumEnergy5minByInverterRange,
+  queryAlarmsRangeArchiveAware,
   getCounterBaselinesForDate,
   getCounterStateAll,
   // v2.10.4 — yield-friendly chunked source helpers used by exports.
@@ -1680,10 +1681,15 @@ async function exportAlarms({ startTs, endTs, inverter, format, minAlarmDuration
   // can run between the range scan and the mapping phase on long windows.
   await yieldToEventLoop();
 
-  const _alarmCols = `id, ts, inverter, unit, alarm_code, alarm_value, severity, cleared_ts, acknowledged, updated_ts, stop_reason_id`;
-  const raw = inverter && inverter !== 'all'
-    ? db.prepare(`SELECT ${_alarmCols} FROM alarms WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts ASC`).all(Number(inverter),s,e)
-    : db.prepare(`SELECT ${_alarmCols} FROM alarms WHERE ts BETWEEN ? AND ? ORDER BY ts ASC`).all(s,e);
+  // Archive-aware (v2.11.0-beta.10): merge hot + every overlapping monthly
+  // archive shard so past-month exports include alarms migrated out of
+  // hot by the retention pruner. Limit lifted to 20000 because exports
+  // routinely span long windows; the archive reader sorts DESC internally
+  // so we re-sort to ASC here to keep the historical CSV ordering.
+  const invSel = inverter && inverter !== 'all' ? Number(inverter) : null;
+  const raw = queryAlarmsRangeArchiveAware(s, e, { inverter: invSel, limit: 20000 })
+    .slice()
+    .sort((a, b) => Number(a?.ts || 0) - Number(b?.ts || 0));
 
   // T1.2 fix: yield after the scan so the mapping loop below doesn't chain
   // directly onto the .all() without an event-loop turn.

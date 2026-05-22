@@ -152,10 +152,44 @@ function recordShutdownReasonSync(reason, options = {}) {
 //                  the prior run crashed, BSOD'd, or lost power with no
 //                  chance to record a reason. This is the smoking-gun
 //                  signal the banner highlights in red.
+// Returns true if the given OS pid is currently alive (any owner). On Windows,
+// `process.kill(pid, 0)` with signal 0 is a probe that never delivers a signal
+// — it just checks existence. ESRCH means "no such process"; EPERM means the
+// process exists but we lack permission to signal it (still alive, treat as
+// alive). Best-effort: any other failure is treated as "unknown" → not alive,
+// so we don't accidentally suppress the unexpected-shutdown classifier on a
+// genuine crash.
+function _isPidAliveSync(pid) {
+  const p = Number(pid);
+  if (!Number.isFinite(p) || p <= 0 || p === process.pid) return false;
+  try {
+    process.kill(p, 0);
+    return true;
+  } catch (err) {
+    return err && err.code === "EPERM";
+  }
+}
+
 function readLastShutdownSync() {
   _ensureDirSync();
   const sentinel = _readJsonSync(PATHS.sentinel);
   const current = _readJsonSync(PATHS.current);
+
+  // Concurrent-instance guard: if the existing sentinel's PID is still alive,
+  // another lifecycle-owning process (typically the dashboard) is still
+  // running. A standalone-calibrator launch that shares this lifecycle dir
+  // must NOT misclassify the dashboard as "unexpected" — its current.json
+  // simply hasn't been written yet because it hasn't shut down. Bail out
+  // without mutating sentinel/prev so the live process keeps ownership.
+  if (sentinel && !current && _isPidAliveSync(sentinel.pid)) {
+    return {
+      classification: "concurrent-instance",
+      priorReason: null,
+      sentinelWasPresent: true,
+      concurrentPid: Number(sentinel.pid) || null,
+      checkedAt: Date.now(),
+    };
+  }
 
   let classification;
   let priorReason = null;

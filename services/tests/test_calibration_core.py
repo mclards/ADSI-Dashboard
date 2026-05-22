@@ -221,6 +221,68 @@ class TestReadLiveForCalibrationSync(unittest.TestCase):
         self.assertEqual(result["state_blocked"], 0)
         self.assertEqual(result["state_grid_fault"], 0)
 
+    def test_idc_negative_signed(self):
+        """Idc (input reg 30010, addr 9) is Int16 signed per PDF pg 4.
+
+        Regression for 2026-05-21: an idle inverter (DC contactor open) reads
+        a small negative DC current from sensor zero-offset, e.g. -18 A which
+        encodes to 0xFFEE on the wire. Before the fix the value was decoded
+        as u16 → 65518, making the operator believe the Ipv reading had
+        exploded after a 1961 → 1962 F_E_Ipv write.
+        """
+        regs1 = [0] * 19
+        regs2 = [0] * 13
+        # -18 A as two's-complement u16 = 0xFFEE
+        regs1[9] = 0xFFEE
+        response1 = FakeModbusResponse(registers=regs1)
+        response2 = FakeModbusResponse(registers=regs2)
+        self.client.read_input_registers_returns[(0, 19, 1)] = response1
+        self.client.read_input_registers_returns[(64, 13, 1)] = response2
+
+        result = _read_live_for_calibration_sync(self.client, self.lock, slave=1)
+
+        self.assertEqual(result["idc_a"], -18)
+        # Boundary cases — full signed Int16 range must round-trip.
+        for raw, expected in [
+            (0x0000, 0),
+            (0x0001, 1),
+            (0x7FFF, 32767),
+            (0x8000, -32768),
+            (0xFFFF, -1),
+        ]:
+            regs1[9] = raw
+            response1 = FakeModbusResponse(registers=list(regs1))
+            self.client.read_input_registers_returns[(0, 19, 1)] = response1
+            result = _read_live_for_calibration_sync(self.client, self.lock, slave=1)
+            self.assertEqual(result["idc_a"], expected,
+                             f"idc raw 0x{raw:04X} should decode to {expected}")
+
+    def test_pac_negative_signed(self):
+        """Pac (input reg 30019, addr 18) is Int16 signed per PDF pg 5.
+
+        Pac is reported in tens of W (raw * 10 = real W). A slightly negative
+        Pac at idle (sensor noise) must NOT decode as a giant positive W.
+        Regression paired with test_idc_negative_signed.
+        """
+        regs1 = [0] * 19
+        regs2 = [0] * 13
+        # Pac raw -5 (= 0xFFFB) → -50 W after × 10
+        regs1[18] = 0xFFFB
+        response1 = FakeModbusResponse(registers=regs1)
+        response2 = FakeModbusResponse(registers=regs2)
+        self.client.read_input_registers_returns[(0, 19, 1)] = response1
+        self.client.read_input_registers_returns[(64, 13, 1)] = response2
+
+        result = _read_live_for_calibration_sync(self.client, self.lock, slave=1)
+
+        self.assertEqual(result["pac_w"], -50)
+        # Max-negative Int16 must scale to -327680 W, not +327670.
+        regs1[18] = 0x8000
+        response1 = FakeModbusResponse(registers=list(regs1))
+        self.client.read_input_registers_returns[(0, 19, 1)] = response1
+        result = _read_live_for_calibration_sync(self.client, self.lock, slave=1)
+        self.assertEqual(result["pac_w"], -32768 * 10)
+
     def test_qac_negative_signed(self):
         """Qac as signed Int16 (negative value)."""
         regs1 = [0] * 19

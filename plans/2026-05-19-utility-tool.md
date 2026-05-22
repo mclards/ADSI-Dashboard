@@ -1,7 +1,12 @@
 # Plan — "Utility Tool" (rename + read-only setting tabs + TCP fleet scan)
 
 **Date:** 2026-05-19
-**Status:** APPROVED-DIRECTION — awaiting build authorization (no code yet)
+**Status:** IMPLEMENTED (Phases A–D) — 2026-05-19; verification in progress
+(450/450 pytest green incl. golden; full Node smoke running). No git commit
+(operator reviews). Enum reflection was dropped (x86 StackOverflow in the
+AssemblyResolve delegate); booleans decode from name-encoded polarity, the
+3 multi-value enums in B/C/D/I use a small curated table in
+calibration_decoder.py.
 **Author:** Engr. M. (analysis assistance: Claude)
 **Relation:** Branding-supersedes `plans/2026-05-12-inverter-calibration-tool.md`.
 The calibration scale-factor write path (offsets 81–94), session lockdown,

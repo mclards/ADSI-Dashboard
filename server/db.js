@@ -164,6 +164,22 @@ const ARCHIVE_READING_TABLE_DDL = `
   alarm     INTEGER DEFAULT 0,
   online    INTEGER DEFAULT 1
 `;
+// Mirrors the hot `alarms` table column-for-column (minus AUTOINCREMENT —
+// archives preserve the hot id so dedup keys stay stable across migrations).
+// See ensureArchiveSchema() for the index pair that matches the hot DB.
+const ARCHIVE_ALARM_TABLE_DDL = `
+  id             INTEGER PRIMARY KEY,
+  ts             INTEGER NOT NULL,
+  inverter       INTEGER NOT NULL,
+  unit           INTEGER NOT NULL,
+  alarm_code     TEXT,
+  alarm_value    INTEGER,
+  severity       TEXT DEFAULT 'fault',
+  cleared_ts     INTEGER,
+  acknowledged   INTEGER DEFAULT 0,
+  updated_ts     INTEGER NOT NULL DEFAULT 0,
+  stop_reason_id INTEGER
+`;
 
 fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
 
@@ -1140,6 +1156,44 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_scl_inv_ts ON serial_change_log(inverter_ip, acted_at_ms DESC);
   CREATE INDEX IF NOT EXISTS idx_scl_outcome ON serial_change_log(outcome, acted_at_ms DESC);
+
+  -- v2.11.x firmware-version homogeneity. Firmware strings ride the SAME
+  -- FC11 Report-Slave-ID payload the serial feature already reads -- this
+  -- is a projection of the existing serial fleet scan, never a second
+  -- Modbus sweep.  Invariant the operator audits: every node runs the
+  -- same firmware.  inverter_firmware_state is the current snapshot
+  -- (one row per (inverter_ip, slave), upserted each scan);
+  -- firmware_drift_log appends when a node's (model|main|aux) tuple
+  -- changes between scans (the post-board-swap signature -- dual of the
+  -- serial-relocation guard).  Node owns all writes (Python read-only).
+  CREATE TABLE IF NOT EXISTS inverter_firmware_state (
+    inverter_ip     TEXT NOT NULL,
+    slave           INTEGER NOT NULL,
+    inverter_id     INTEGER NOT NULL DEFAULT 0,
+    model_code      TEXT,
+    firmware_main   TEXT,
+    firmware_aux    TEXT,
+    canonical_match INTEGER,   -- 1 ok / 0 drift / NULL unknown-this-scan
+    first_seen_ms   INTEGER NOT NULL,
+    last_seen_ms    INTEGER NOT NULL,
+    PRIMARY KEY (inverter_ip, slave)
+  );
+  CREATE INDEX IF NOT EXISTS idx_ifs_inv ON inverter_firmware_state(inverter_ip);
+
+  CREATE TABLE IF NOT EXISTS firmware_drift_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    inverter_id     INTEGER NOT NULL DEFAULT 0,
+    inverter_ip     TEXT NOT NULL,
+    slave           INTEGER NOT NULL,
+    old_tuple       TEXT,
+    new_tuple       TEXT,
+    detected_at_ms  INTEGER NOT NULL,
+    scan_by         TEXT,
+    note            TEXT,
+    updated_ts      INTEGER NOT NULL
+                    DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
+  );
+  CREATE INDEX IF NOT EXISTS idx_fdl_inv_ts ON firmware_drift_log(inverter_ip, detected_at_ms DESC);
 
   -- v2.11.x Slice κ.3: critical-pattern auto-block ledger.
   --
@@ -3840,23 +3894,26 @@ function ensureArchiveSchema(archiveDb) {
     );
     CREATE INDEX IF NOT EXISTS idx_ae5_ts ON energy_5min(ts);
     CREATE INDEX IF NOT EXISTS idx_ae5_inv_ts ON energy_5min(inverter, ts);
+
+    CREATE TABLE IF NOT EXISTS alarms (
+      ${ARCHIVE_ALARM_TABLE_DDL}
+    );
+    CREATE INDEX IF NOT EXISTS idx_aa_ts     ON alarms(ts);
+    CREATE INDEX IF NOT EXISTS idx_aa_inv_ts ON alarms(inverter, ts);
   `);
 }
 
 function createArchiveEntry(filePath) {
   const existed = fs.existsSync(filePath);
   const archiveDb = new Database(filePath);
-  if (!existed) {
-    // New file — run full schema setup
-    ensureArchiveSchema(archiveDb);
-  } else {
-    // Existing file — only set pragmas, trust schema is already created
-    archiveDb.pragma("journal_mode = WAL");
-    archiveDb.pragma("synchronous = NORMAL");
-    archiveDb.pragma("busy_timeout = 1000");   // Low timeout: archive DBs written only during migration; fail fast
-    archiveDb.pragma("temp_store = memory");
-    archiveDb.pragma("cache_size = -8000");    // 8 MB per archive DB (was 64 MB default)
-  }
+  // Always run ensureArchiveSchema — it's idempotent (`CREATE TABLE IF NOT
+  // EXISTS` + `CREATE INDEX IF NOT EXISTS`) and ensures pre-existing
+  // archive DBs gain new tables added by later versions (e.g. the
+  // `alarms` shard added in v2.11.0-beta.10 for alarm-history archiving).
+  // Cost is a single PRAGMA + a few existence checks per LRU miss —
+  // negligible vs the open syscall itself.
+  ensureArchiveSchema(archiveDb);
+  void existed; // retained for documentation of the prior fast-path
   const entry = {
     db: archiveDb,
     insertReading: archiveDb.prepare(`
@@ -3899,12 +3956,40 @@ function createArchiveEntry(filePath) {
         WHERE inverter=? AND ts BETWEEN ? AND ?
         GROUP BY inverter`,
     ),
+    // ─── Alarms shard (v2.11.0-beta.10) ────────────────────────────────
+    // Mirrors stmts.getAlarmsRange / its by-inverter sibling so the
+    // archive-aware reader can merge hot + archive results with a
+    // stable column projection. Range queries are ORDER BY ts DESC
+    // because that's what the alarm-log UI consumes.
+    insertAlarm: archiveDb.prepare(`
+      INSERT OR IGNORE INTO alarms
+      (id, ts, inverter, unit, alarm_code, alarm_value, severity,
+       cleared_ts, acknowledged, updated_ts, stop_reason_id)
+      VALUES (@id, @ts, @inverter, @unit, @alarm_code, @alarm_value,
+              @severity, @cleared_ts, @acknowledged, @updated_ts,
+              @stop_reason_id)
+    `),
+    selectAlarmsRangeAll: archiveDb.prepare(
+      `SELECT id, ts, inverter, unit, alarm_code, alarm_value, severity, cleared_ts, acknowledged, updated_ts, stop_reason_id
+         FROM alarms
+        WHERE ts BETWEEN ? AND ?
+        ORDER BY ts DESC`,
+    ),
+    selectAlarmsRangeByInv: archiveDb.prepare(
+      `SELECT id, ts, inverter, unit, alarm_code, alarm_value, severity, cleared_ts, acknowledged, updated_ts, stop_reason_id
+         FROM alarms
+        WHERE inverter=? AND ts BETWEEN ? AND ?
+        ORDER BY ts DESC`,
+    ),
   };
   entry.insertReadingsTx = archiveDb.transaction((rows) => {
     for (const row of rows || []) entry.insertReading.run(row);
   });
   entry.insertEnergyTx = archiveDb.transaction((rows) => {
     for (const row of rows || []) entry.insertEnergy5.run(row);
+  });
+  entry.insertAlarmsTx = archiveDb.transaction((rows) => {
+    for (const row of rows || []) entry.insertAlarm.run(row);
   });
   return entry;
 }
@@ -4494,6 +4579,105 @@ function queryReadingsRange(inverter, startTs, endTs) {
   return Array.from(out.values()).sort(sortReadingsAsc);
 }
 
+// ─── Alarms: archive-aware range reader (v2.11.0-beta.10) ──────────────────
+// Mirrors queryReadingsRangeAll but for the alarms table. Hot DB is queried
+// first, then every monthly archive that overlaps [s,e]. Results merge by
+// natural key (id alone is stable because the hot id is preserved when the
+// row migrates to archive — see ARCHIVE_ALARM_TABLE_DDL "INTEGER PRIMARY
+// KEY" without AUTOINCREMENT and the INSERT OR IGNORE archive write).
+// Sort is ts DESC (newest first — what the alarm-log UI consumes) and the
+// caller-supplied limit is applied AFTER the merge so an old-and-new union
+// still respects the response cap.
+function alarmsNaturalKey(row) {
+  return Number(row?.id || 0);
+}
+function sortAlarmsDesc(a, b) {
+  return (
+    Number(b?.ts || 0) - Number(a?.ts || 0) ||
+    Number(b?.id || 0) - Number(a?.id || 0)
+  );
+}
+// Look up a single alarm row by id, checking hot DB first, then iterating
+// every monthly archive shard until found. The hot id is preserved when
+// the row migrates to archive (INSERT OR IGNORE + INTEGER PRIMARY KEY
+// without AUTOINCREMENT on archive side; hot side uses AUTOINCREMENT so
+// new inserts never reuse a migrated id). Returns null when nothing found.
+// Used by the alarm-drilldown endpoint (/api/alarms/:alarm_id/stop-reason)
+// so clicking on a past-date row in the alarm-log table still resolves to
+// the originating row even after it has been pruned from hot.
+function findAlarmByIdArchiveAware(alarmId) {
+  const id = Math.trunc(Number(alarmId || 0));
+  if (!(id > 0)) return null;
+  const hot = db
+    .prepare(
+      `SELECT id, ts, inverter, unit, alarm_code, alarm_value, severity, cleared_ts, acknowledged, updated_ts, stop_reason_id
+         FROM alarms WHERE id = ?`,
+    )
+    .get(id);
+  if (hot) return hot;
+  // Newest archives first — drilldowns are usually on recent rows.
+  let monthKeys = [];
+  try {
+    monthKeys = fs
+      .readdirSync(ARCHIVE_DIR)
+      .filter((name) => /^\d{4}-\d{2}\.db$/.test(name))
+      .map((name) => name.replace(/\.db$/i, ""))
+      .sort()
+      .reverse();
+  } catch (_) {
+    return null;
+  }
+  for (const monthKey of monthKeys) {
+    const entry = getArchiveEntry(monthKey, false);
+    if (!entry) continue;
+    const row = entry.db
+      .prepare(
+        `SELECT id, ts, inverter, unit, alarm_code, alarm_value, severity, cleared_ts, acknowledged, updated_ts, stop_reason_id
+           FROM alarms WHERE id = ?`,
+      )
+      .get(id);
+    if (row) return row;
+  }
+  return null;
+}
+
+function queryAlarmsRangeArchiveAware(startTs, endTs, { inverter, limit } = {}) {
+  const s = Number(startTs || 0);
+  const e = Number(endTs || 0);
+  if (!(e >= s)) return [];
+  const invNum = Math.trunc(Number(inverter || 0));
+  const hasInv = Number.isFinite(invNum) && invNum > 0;
+  const cap = Math.max(1, Math.min(20000, Math.trunc(Number(limit) || 2000)));
+  const out = new Map();
+  // Hot first so the newest rows seed the map; archive rows then fill in
+  // older months without overwriting (pushUniqueRows is first-write-wins).
+  pushUniqueRows(
+    out,
+    hasInv
+      ? db
+          .prepare(
+            `SELECT id, ts, inverter, unit, alarm_code, alarm_value, severity, cleared_ts, acknowledged, updated_ts, stop_reason_id
+               FROM alarms WHERE inverter=? AND ts BETWEEN ? AND ?
+               ORDER BY ts DESC LIMIT ?`,
+          )
+          .all(invNum, s, e, cap)
+      : stmts.getAlarmsRange.all(s, e),
+    alarmsNaturalKey,
+  );
+  for (const monthKey of iterateMonthKeys(s, e)) {
+    const entry = getArchiveEntry(monthKey, false);
+    if (!entry) continue;
+    pushUniqueRows(
+      out,
+      hasInv
+        ? entry.selectAlarmsRangeByInv.all(invNum, s, e)
+        : entry.selectAlarmsRangeAll.all(s, e),
+      alarmsNaturalKey,
+    );
+  }
+  return Array.from(out.values()).sort(sortAlarmsDesc).slice(0, cap);
+}
+
 // Archive-aware distinct-bucket count over a HALF-OPEN [startTs, endTs)
 // window. Used by the counter-baseline crash detector so a day whose
 // readings have already been rotated into a month archive is not mistaken
@@ -4718,11 +4902,15 @@ function rebuildDailyReadingsSummaryForDate(dayInput) {
 }
 const deleteReadingById = db.prepare(`DELETE FROM readings WHERE id=?`);
 const deleteEnergy5ById = db.prepare(`DELETE FROM energy_5min WHERE id=?`);
+const deleteAlarmById = db.prepare(`DELETE FROM alarms WHERE id=?`);
 const deleteReadingsBatchTx = db.transaction((ids) => {
   for (const id of ids || []) deleteReadingById.run(id);
 });
 const deleteEnergyBatchTx = db.transaction((ids) => {
   for (const id of ids || []) deleteEnergy5ById.run(id);
+});
+const deleteAlarmsBatchTx = db.transaction((ids) => {
+  for (const id of ids || []) deleteAlarmById.run(id);
 });
 const selectOldReadingsBatch = db.prepare(`
   SELECT id, ts, inverter, unit, pac, kwh, alarm, online
@@ -4738,6 +4926,20 @@ const selectOldEnergyBatch = db.prepare(`
    ORDER BY ts ASC, id ASC
    LIMIT ?
 `);
+// v2.11.0-beta.10 — only CLEARED alarms (cleared_ts IS NOT NULL) are eligible
+// for archival. Active (unresolved) alarms always stay in the hot DB regardless
+// of age so the alarm-log UI surfaces them immediately. This matches the
+// previous DELETE filter at pruneOldData(); the only behavioural change is
+// that the rows now end up in `db/archive/<YYYY-MM>.db` instead of being
+// permanently lost.
+const selectOldAlarmsBatch = db.prepare(`
+  SELECT id, ts, inverter, unit, alarm_code, alarm_value, severity,
+         cleared_ts, acknowledged, updated_ts, stop_reason_id
+    FROM alarms
+   WHERE ts < ? AND cleared_ts IS NOT NULL
+   ORDER BY ts ASC, id ASC
+   LIMIT ?
+`);
 
 function archiveRowsByMonth(rows, type) {
   const groups = new Map();
@@ -4750,7 +4952,9 @@ function archiveRowsByMonth(rows, type) {
     const entry = getArchiveEntry(monthKey, true);
     if (!entry) throw new Error(`Archive DB open failed for month ${monthKey}`);
     if (type === "readings") entry.insertReadingsTx(groupedRows);
-    else entry.insertEnergyTx(groupedRows);
+    else if (type === "energy") entry.insertEnergyTx(groupedRows);
+    else if (type === "alarms") entry.insertAlarmsTx(groupedRows);
+    else throw new Error(`Unknown archive row type: ${type}`);
   }
 }
 
@@ -4826,7 +5030,7 @@ function _yieldEventLoop() {
 
 async function archiveTelemetryBeforeCutoff(cutoffTs) {
   const cutoff = Number(cutoffTs || 0);
-  const stats = { readings: 0, energy5: 0 };
+  const stats = { readings: 0, energy5: 0, alarms: 0 };
   if (!(cutoff > 0)) return stats;
 
   while (true) {
@@ -4847,6 +5051,22 @@ async function archiveTelemetryBeforeCutoff(cutoffTs) {
     await _yieldEventLoop();
   }
 
+  // v2.11.0-beta.10 — alarms archive shard. Replaces the unconditional
+  // DELETE that pruneOldData() used to run (was permanently losing the
+  // alarm log on operator-tightened retention like `retainDays=1`).
+  // Active alarms (cleared_ts IS NULL) are NEVER pulled — they stay in
+  // hot for the live alarm-log table. Only CLEARED rows older than the
+  // cutoff migrate; the archive-aware /api/alarms reader re-merges them
+  // for past-date queries.
+  while (true) {
+    const rows = selectOldAlarmsBatch.all(cutoff, ARCHIVE_BATCH_SIZE);
+    if (!rows.length) break;
+    archiveRowsByMonth(rows, "alarms");
+    deleteAlarmsBatchTx(rows.map((row) => Number(row.id || 0)).filter((id) => id > 0));
+    stats.alarms += rows.length;
+    await _yieldEventLoop();
+  }
+
   return stats;
 }
 
@@ -4862,7 +5082,13 @@ async function pruneOldData(options = {}) {
     const archiveBefore = getArchiveDirStats();
     const archived = await archiveTelemetryBeforeCutoff(cutoff);
     await _yieldEventLoop();
-    db.prepare("DELETE FROM alarms WHERE ts < ? AND cleared_ts IS NOT NULL").run(cutoff);
+    // v2.11.0-beta.10 — cleared alarms older than `cutoff` are now MIGRATED
+    // (not deleted) by archiveTelemetryBeforeCutoff above. The previous
+    // unconditional `DELETE FROM alarms ...` here was the source of the
+    // 2026-05-22 "can't access past alarms" report: with retainDays=1, the
+    // alarm log evaporated daily because there was no archive shard to
+    // catch it. Active alarms (cleared_ts IS NULL) still stay hot
+    // indefinitely — pruner never touches them.
     await _yieldEventLoop();
     db.prepare("DELETE FROM audit_log WHERE ts < ?").run(auditCutoff);
     await _yieldEventLoop();
@@ -5914,6 +6140,8 @@ module.exports = {
   sumEnergy5minByInverterRange,
   countDistinctReadingBuckets,
   getLatestReadingDate,
+  queryAlarmsRangeArchiveAware,
+  findAlarmByIdArchiveAware,
   archiveReadingsRows,
   archiveEnergyRows,
   getDailyReadingsSummaryRows,

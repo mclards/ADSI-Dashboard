@@ -38,6 +38,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from drivers.modbus_tcp import create_client, read_input, read_holding, write_single
 from .shared_data import shared
+from . import firmware_buslock
 
 # RS485-USB fleet bridge removed in v2.11.x (field calibration moved to the
 # standalone Inverter Calibration Tool). Kept as a None sentinel so the
@@ -768,6 +769,31 @@ async def safe_read(func, client, addr, count, unit, ip):
 def is_write_pending(ip):
     evt = write_pending.get(ip)
     return bool(evt and evt.is_set())
+
+
+# ── Cross-process firmware-flash bus lock ────────────────────────────────
+# While the standalone calibrator flashes an inverter's firmware over the
+# same transparent TCP->RTU gateway, a second Modbus master (this poller)
+# interleaving frames makes the DSP reject the flash ("error code 2").
+# When the calibrator has published a claim for `ip` we skip ALL Modbus to
+# it for the cycle — exactly like the proven is_write_pending() backoff.
+# FAIL-OPEN: any marker problem -> firmware_buslock.active_ips() == {} ->
+# polling continues unchanged. The set is re-read at most every 2 s so 27
+# poll tasks don't hammer the file.
+_fw_active_cache = {"ts": 0.0, "ips": set()}
+_FW_ACTIVE_CACHE_TTL_S = 2.0
+
+
+def firmware_flash_active(ip):
+    now = time.time()
+    c = _fw_active_cache
+    if now - c["ts"] >= _FW_ACTIVE_CACHE_TTL_S:
+        try:
+            c["ips"] = firmware_buslock.active_ips()
+        except Exception:
+            c["ips"] = set()          # fail-open — never silence polling
+        c["ts"] = now
+    return ip in c["ips"]
 
 
 def compute_write_wait_timeout(ip, step_count=1):
@@ -1597,6 +1623,13 @@ async def slow_poll_inverter(ip):
             await asyncio.sleep(0.5)
             continue
 
+        # Skip the whole slow-poll cycle (incl. unit detection probes)
+        # while a firmware flash holds this inverter — see
+        # firmware_flash_active() / poll_inverter().
+        if firmware_flash_active(ip):
+            await asyncio.sleep(min(slow_interval, 2.0))
+            continue
+
         # ── Discover units ──
         units = await detect_units_async(ip)
 
@@ -1653,6 +1686,19 @@ async def poll_inverter(ip):
             await asyncio.sleep(0.5)
             continue
 
+        # ── Firmware-flash backoff (BEFORE unit detection) ──
+        # detect_units_async() issues Modbus probe reads. On a COLD engine
+        # start while a calibrator flash is already in progress (calibrator
+        # opened first, dashboard second), this is the FIRST bus traffic to
+        # the inverter and would collide with the flash. slow_poll_inverter
+        # already guards before its detect; poll_inverter must too. The
+        # per-unit guard further down still covers a flash that begins
+        # mid-cycle. FAIL-OPEN: no/*bad marker -> firmware_flash_active()
+        # is False -> polling proceeds exactly as before.
+        if firmware_flash_active(ip):
+            await asyncio.sleep(min(interval, 1.0))
+            continue
+
         # ── Discover units ──
         units = await detect_units_async(ip)
         print(f"[POLL] {ip}  units: {units}")
@@ -1697,6 +1743,13 @@ async def poll_inverter(ip):
                 client = clients.get(ip)
                 if not client:
                     break
+
+                # Firmware flash in progress for this inverter — back off
+                # the bus entirely this cycle so the calibrator is the sole
+                # Modbus master (mirrors the is_write_pending skip below).
+                if firmware_flash_active(ip):
+                    await asyncio.sleep(min(interval, 1.0))
+                    continue
 
                 out     = []
                 inv_num = inverter_number_from_ip(ip)
@@ -4204,6 +4257,82 @@ async def api_calibration_lockdown(req: Request):
     return {"ok": True, "state": dict(_calibration_lockdown)}
 
 
+@app.post("/calibration/config-write")
+async def api_calibration_config_write(req: Request):
+    """Write ONE L2 config-block field (Utility Tool tabs B/C/D/I).
+
+    Body: {
+      ip:         str,
+      slave:      int,
+      field:      str,            # name from cfg_trif_map.FIELDS
+      value:      any,            # natural value (e.g. 5000 W, 60.00 Hz)
+      verify_delay_s?: float,
+    }
+
+    Mirror of /calibration/write but for the broader L2 config offsets
+    (B/C/D/I groups). Field lookup + encoding via cfg_block_write; lock +
+    sentinel + verify cycle via calibration_io.write_cfg_field_with_lock.
+    Auth + audit are owned by the Node proxy layer.
+    """
+    try:
+        body = await req.json()
+    except Exception:
+        raise HTTPException(400, "invalid JSON")
+    ip = str(body.get("ip") or "").strip()
+    slave = int(body.get("slave") or 0)
+    field_name = str(body.get("field") or "").strip()
+    if not ip:
+        raise HTTPException(400, "ip required")
+    if slave <= 0:
+        raise HTTPException(400, "slave required")
+    if not field_name:
+        raise HTTPException(400, "field required")
+    if "value" not in body:
+        raise HTTPException(400, "value required")
+
+    client = clients.get(ip)
+    if not client:
+        raise HTTPException(503, f"no client for {ip}")
+    lock = thread_locks.get(ip)
+    if lock is None:
+        raise HTTPException(503, f"no lock for {ip}")
+
+    if firmware_flash_active(ip):
+        return {"ok": False, "error": "firmware_flash_in_progress", "ip": ip}
+
+    try:
+        from services import cfg_trif_map as _cfg_map
+    except Exception as exc:
+        raise HTTPException(500, f"cfg_trif_map unavailable: {exc}")
+    field_meta = None
+    for f in (getattr(_cfg_map, "FIELDS", None) or []):
+        if str(f.get("field") or "") == field_name:
+            field_meta = f
+            break
+    if field_meta is None:
+        raise HTTPException(400, f"unknown field '{field_name}'")
+
+    from services.calibration_io import write_cfg_field_with_lock
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(
+            executor,
+            lambda: write_cfg_field_with_lock(
+                client, lock, slave, field_meta, body["value"],
+                verify_delay_s=float(body.get("verify_delay_s") or 1.0),
+                # In-lock TOCTOU close: if a firmware flash claims the
+                # bus marker between the pre-check and the lock, refuse.
+                is_flash_active=lambda: firmware_flash_active(ip),
+            ),
+        )
+    except Exception as exc:
+        raise HTTPException(500, f"executor_error: {exc}")
+    result["ip"] = ip
+    result["slave"] = slave
+    result["read_at_ms"] = int(time.time() * 1000)
+    return result
+
+
 @app.post("/calibration/consign")
 async def api_calibration_consign(req: Request):
     """Drive APC setpoint (opcode 0x0003) to specified percent for calibration consign.
@@ -4258,6 +4387,25 @@ async def api_calibration_preflight(ip: str, slave: int):
         executor,
         lambda: preflight_read_with_lock(client, lock, int(slave)),
     )
+
+
+@app.get("/calibration/cfg-map")
+async def api_calibration_cfg_map():
+    """Return the STATIC Utility Tool field map (offsets, kinds, groups,
+    labels, units). No transport, no Modbus — lets the dashboard render
+    the Utility Tool tab layout even before a successful Read."""
+    try:
+        try:
+            from services import cfg_trif_map as _m  # type: ignore
+        except Exception:
+            import cfg_trif_map as _m                # type: ignore
+        return {
+            "ok": True,
+            "fields": list(_m.FIELDS),
+            "group_titles": dict(_m.GROUP_TITLES),
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 @app.get("/calibration/full-config/{ip}/{slave}")
@@ -4319,6 +4467,91 @@ async def api_calibration_full_config(ip: str, slave: int):
         "regs_hex":   " ".join(f"{v & 0xFFFF:04X}" for v in raw["regs"]),
         "read_at_ms": int(time.time() * 1000),
     }
+
+
+@app.get("/calibration/scan/{ip}/{slave}")
+async def api_calibration_scan(ip: str, slave: int):
+    """Read-only fleet-scan probe — TCP only, TRANSIENT socket.
+
+    Mirrors the calibrator_app.py endpoint of the same name so the
+    Utility Tool's "Fleet Scan" tab can iterate ipconfig and decode the
+    full 177-register config block per node REGARDLESS of whether that
+    inverter is currently in the dashboard poller's rotation. Opens a
+    SHORT-LIVED Modbus-TCP client, reads, decodes, closes — deliberately
+    does NOT touch `clients`/`thread_locks` (the shared poller state) so
+    an active poll on a different inverter is never disturbed and there
+    is no per-IP lock contention with the poller.
+
+    Read-only FC03 only. Never writes. Treats firmware-flash-in-progress
+    as a hard stop (same fail-open semantics as the regular poll).
+    Returns {ok, ip, slave, decoded, read_at_ms} | {ok:false, error}.
+    """
+    # Firmware-flash bus lock: if this IP is being flashed, refuse the
+    # scan so we don't compete with the calibrator on the RS-485 bus.
+    # fail-open: active_ips() returns {} on any marker problem.
+    try:
+        active_fw_ips = firmware_buslock.active_ips()
+    except Exception:
+        active_fw_ips = set()
+    if str(ip) in active_fw_ips:
+        return {"ok": False, "error": "firmware_flash_in_progress"}
+
+    loop = asyncio.get_running_loop()
+
+    def _scan(addr: str, s: int):
+        # Same CHUNK ceiling the comm-board / EKI gateway uses (~49 reg max
+        # per FC03 response regardless of the protocol's 125-reg ceiling).
+        CHUNK = 48
+        client = None
+        try:
+            client = create_client(addr, port=502, timeout=3.0)
+            try:
+                opened = bool(client.connect())
+            except Exception:
+                opened = False
+            if not opened and hasattr(client, "is_socket_open"):
+                opened = bool(client.is_socket_open())
+            if not opened:
+                return {"ok": False, "error": f"unreachable:{addr}"}
+            base = _calib_dec.CONFIG_BLOCK_BASE
+            total = _calib_dec.CONFIG_BLOCK_LENGTH
+            out: list[int] = []
+            offset = 0
+            while offset < total:
+                need = min(CHUNK, total - offset)
+                r = client.read_holding_registers(
+                    address=base + offset, count=need, unit=int(s))
+                if r is None or r.isError():
+                    return {"ok": False, "error": f"modbus_error@{offset}"}
+                got = list(r.registers) if hasattr(r, "registers") else []
+                if len(got) < need:
+                    return {"ok": False,
+                            "error": f"short_frame@{offset}: {len(got)}/{need}"}
+                out.extend(got)
+                offset += need
+            return {"ok": True, "regs": out}
+        except Exception as exc:
+            return {"ok": False, "error": f"exception: {exc}"}
+        finally:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+
+    try:
+        raw = await loop.run_in_executor(executor, _scan, str(ip), int(slave))
+        if not raw.get("ok"):
+            return raw
+        return {
+            "ok": True,
+            "ip": str(ip),
+            "slave": int(slave),
+            "decoded": _calib_dec.decode_config_block(raw["regs"]),
+            "read_at_ms": int(time.time() * 1000),
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 from fastapi import WebSocket, WebSocketDisconnect

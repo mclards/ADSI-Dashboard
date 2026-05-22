@@ -237,6 +237,26 @@ function recordEarlyExitMarker(reason, initiator, extra) {
   }
 }
 
+// Counterpart to recordEarlyExitMarker for the "tentative" markers we write
+// *before* a confirm-exit dialog (mainWin / calibratorWin close handlers).
+// The dialog is synchronous and blocks the renderer thread for as long as
+// the user takes to decide. If the OS / Task Manager terminates the process
+// while the dialog is up, we want a graceful marker already on disk so the
+// next boot does not false-flag "Unexpected prior shutdown". But if the
+// user clicks Cancel the app keeps running, and a *later* genuine crash
+// must still be detectable as unexpected — so we have to rescind the
+// tentative marker on cancel, both on disk and via the _shutdownReasonRecorded
+// flag, so subsequent shutdown paths can write the authoritative reason.
+function rescindEarlyExitMarker() {
+  try {
+    const cur = _shutdownReason && _shutdownReason.PATHS && _shutdownReason.PATHS.current;
+    if (cur && fs.existsSync(cur)) {
+      try { fs.unlinkSync(cur); } catch (_) { /* best-effort */ }
+    }
+  } catch (_) { /* ignore */ }
+  _shutdownReasonRecorded = false;
+}
+
 // Classify the PRIOR run's shutdown. This writes a fresh boot-sentinel for
 // THIS run as a side-effect, so it must happen exactly once at startup AND
 // only after we've confirmed this process is the singleton primary —
@@ -252,9 +272,26 @@ let _lastShutdownSnapshot = null;
 // is the precise place to assert ownership for the process-exit fallback.
 let _ownsLifecycleMarkers = false;
 function _initShutdownSnapshot() {
-  _ownsLifecycleMarkers = true;
   try {
     _lastShutdownSnapshot = _shutdownReason.readLastShutdownSync();
+    // Defer ownership until AFTER the classifier runs: if another lifecycle-
+    // owning process (e.g. the dashboard) is still alive, readLastShutdownSync
+    // returns "concurrent-instance" and we explicitly decline ownership so
+    // this process's exit fallback won't plant a `current.json` that masks
+    // a subsequent first-instance crash. This mainly matters for the
+    // standalone calibrator launched in parallel with the dashboard — they
+    // share the lifecycle dir under PROGRAMDATA.
+    if (_lastShutdownSnapshot && _lastShutdownSnapshot.classification === "concurrent-instance") {
+      _ownsLifecycleMarkers = false;
+      try {
+        console.log(
+          `[main] Lifecycle markers owned by live PID ${_lastShutdownSnapshot.concurrentPid || "?"} ` +
+          `— this process will not write shutdown markers.`,
+        );
+      } catch (_) {}
+    } else {
+      _ownsLifecycleMarkers = true;
+    }
     if (_lastShutdownSnapshot) {
       process.env.ADSI_LAST_SHUTDOWN_JSON = JSON.stringify(_lastShutdownSnapshot);
       try {
@@ -268,6 +305,10 @@ function _initShutdownSnapshot() {
     }
   } catch (err) {
     try { console.warn("[main] readLastShutdownSync failed:", err?.message || err); } catch (_) {}
+    // On any unexpected failure, claim ownership so a real first-instance
+    // dashboard launch still records markers (the err-handler must not
+    // accidentally silence the diagnostic).
+    _ownsLifecycleMarkers = true;
   }
 }
 
@@ -413,7 +454,37 @@ const CALIBRATOR_SCRIPT_NAMES = ["CalibratorService.py"];
 const CALIBRATOR_NODE_ENTRY = "server/calibratorMain.js";
 const CALIBRATOR_PY_PORT = 9200;
 const CALIBRATOR_NODE_PORT = 3600;
-const CALIBRATOR_READINESS_TIMEOUT_MS = 15000;
+// 30 s (was 15 s): an Electron-as-Node cold start + SQLite open is slow on
+// a contended box (e.g. a concurrent electron-builder / native rebuild),
+// and a 15 s window false-failed a calibrator that was merely starting
+// slowly. Readiness still polls every 250 ms so a fast start is unaffected.
+const CALIBRATOR_READINESS_TIMEOUT_MS = 30000;
+// Last lines of calibrator Python+Node stdio, for the failure dialog and a
+// persisted log (main.js otherwise pipes calibrator stdio to nowhere, so
+// "check the logs" was previously impossible to act on).
+let _calibratorLogTail = "";
+function _calibratorLogPath() {
+  try {
+    return path.join(app.getPath("userData"), "calibrator.log");
+  } catch (_) {
+    return path.join(__dirname, "..", "calibrator.log");
+  }
+}
+function _attachCalibratorLogging(proc, tag) {
+  if (!proc) return;
+  let logFile = null;
+  try {
+    logFile = fs.createWriteStream(_calibratorLogPath(), { flags: "a" });
+    logFile.write(`\n===== ${tag} spawn ${new Date().toISOString()} (pid ${proc.pid}) =====\n`);
+  } catch (_) {}
+  const sink = (buf) => {
+    const s = String(buf || "");
+    _calibratorLogTail = (_calibratorLogTail + s).slice(-8000);
+    if (logFile) { try { logFile.write(s); } catch (_) {} }
+  };
+  try { proc.stdout && proc.stdout.on("data", sink); } catch (_) {}
+  try { proc.stderr && proc.stderr.on("data", sink); } catch (_) {}
+}
 const LEGACY_SERVICE_IMAGE_NAMES = ["ADSI_InverterService.exe", "ADSI_ForecastService.exe"];
 // Login-page admin auth key is intentionally fixed across devices.
 const LOGIN_ADMIN_AUTH_KEY = "ADSI-2026";
@@ -496,6 +567,11 @@ let loginWin = null;
 let topologyWin = null;
 let ipConfigWin = null;
 let calibratorWin = null;
+// Mirrors `allowMainWindowClose` for the standalone Utility Tool window.
+// Set true after the operator confirms the exit prompt (or by callers that
+// close the window programmatically, e.g. parent-app shutdown chain) so the
+// next "close" event proceeds without re-prompting.
+let allowCalibratorClose = false;
 let _calibratorSpawnInProgress = false; // FIX B: spawn-guard to prevent overlapping invocations
 let calibratorPyProc = null;
 let calibratorNodeProc = null;
@@ -4384,6 +4460,19 @@ function createMainWindow() {
 
   mainWin.on("close", (e) => {
     if (isAppShuttingDown || allowMainWindowClose) return;
+    // Tentative graceful marker, written BEFORE the synchronous confirm
+    // dialog blocks the close handler. If Task Manager / Windows ends the
+    // process while the dialog is up (user gives up and clicks "End Task"
+    // because the prompt looks stuck, or release-tooling taskkills the
+    // running app), the marker is already on disk and the next boot will
+    // classify the prior run as graceful instead of false-flagging
+    // "Unexpected prior shutdown". Rescinded below on Cancel so a real
+    // later crash is still detectable.
+    const _tentativeMarker = recordEarlyExitMarker(
+      SHUTDOWN_REASONS.BEFORE_QUIT,
+      SHUTDOWN_INITIATORS.USER,
+      { earlyExitPath: "mainwin-close-prompt", tentative: true },
+    );
     const choice = dialog.showMessageBoxSync(mainWin, {
       type: "question",
       buttons: ["Cancel", "Exit"],
@@ -4395,6 +4484,7 @@ function createMainWindow() {
     });
     if (choice !== 1) {
       e.preventDefault();
+      if (_tentativeMarker) rescindEarlyExitMarker();
       return;
     }
     allowMainWindowClose = true;
@@ -4586,6 +4676,8 @@ function spawnCalibratorPython() {
       detached: false,
     });
 
+    _attachCalibratorLogging(calibratorPyProc, "python");
+
     calibratorPyProc.on("error", (err) => {
       console.error("[main] calibrator python spawn error:", err?.message);
     });
@@ -4632,6 +4724,8 @@ function spawnCalibratorNode() {
 
   try {
     calibratorNodeProc = spawn(command, args, spawnOpts);
+
+    _attachCalibratorLogging(calibratorNodeProc, "node");
 
     calibratorNodeProc.on("error", (err) => {
       console.error("[main] calibrator node spawn error:", err?.message);
@@ -4701,7 +4795,7 @@ function openCalibratorWindow(theme = "") {
     minWidth: 1000,
     minHeight: 700,
     icon: calibratorIconPath("ico"),
-    title: "Inverter Calibration Tool",
+    title: "ADSI Utility Tool",
     frame: true,
     autoHideMenuBar: true,
     backgroundColor: "#080c14",
@@ -4732,8 +4826,42 @@ function openCalibratorWindow(theme = "") {
     focusWindow(calibratorWin);
   });
 
+  // Mirror the dashboard's graceful-exit prompt (see mainWin "close"
+  // handler) so the operator doesn't accidentally close the Utility Tool
+  // mid-calibration / mid-fleet-scan. Bypassed when the parent app is
+  // already shutting down (isAppShuttingDown) or when a caller has set
+  // allowCalibratorClose=true (e.g. shutdown chain calling close()).
+  calibratorWin.on("close", (e) => {
+    if (isAppShuttingDown || allowCalibratorClose) return;
+    // Same tentative-graceful-marker trick as the dashboard's mainWin close
+    // handler — the synchronous dialog blocks the close path, so write the
+    // marker first and rescind it on Cancel. Matters most for standalone
+    // calibrator launches, which share the lifecycle dir with the dashboard.
+    const _tentativeMarker = recordEarlyExitMarker(
+      SHUTDOWN_REASONS.BEFORE_QUIT,
+      SHUTDOWN_INITIATORS.USER,
+      { earlyExitPath: "calibratorwin-close-prompt", tentative: true },
+    );
+    const choice = dialog.showMessageBoxSync(calibratorWin, {
+      type: "question",
+      buttons: ["Cancel", "Exit"],
+      defaultId: 0,
+      cancelId: 0,
+      title: "Confirm Exit",
+      message: "Exit ADSI Utility Tool?",
+      detail: "This will stop the calibrator service and close the tool.",
+    });
+    if (choice !== 1) {
+      e.preventDefault();
+      if (_tentativeMarker) rescindEarlyExitMarker();
+      return;
+    }
+    allowCalibratorClose = true;
+  });
+
   calibratorWin.on("closed", () => {
     calibratorWin = null;
+    allowCalibratorClose = false;
     // Tear down child procs when window closes
     terminateCalibratorProcesses();
   });
@@ -4827,9 +4955,12 @@ async function openCalibratorWindowGuarded(theme = "") {
   const ready = await waitForCalibratorReady();
   if (!ready) {
     terminateCalibratorProcesses();
+    const tail = _calibratorLogTail.trim().slice(-1200);
     await dialog.showErrorBox(
       "Calibrator Startup Failed",
-      "The calibrator service failed to start. Please check the logs and try again."
+      "The calibrator service did not become ready in time.\n\n" +
+        `Full log: ${_calibratorLogPath()}\n` +
+        (tail ? `\nLast output:\n${tail}` : "\n(No output was captured.)")
     );
     return false;
   }
@@ -4847,7 +4978,7 @@ async function startCalibratorStandalone() {
     if (process.platform === "win32") {
       app.setAppUserModelId("com.engr-m.inverter-dashboard.calibrator");
     }
-    app.setName("Inverter Calibration Tool");
+    app.setName("ADSI Utility Tool");
     Menu.setApplicationMenu(null);
   } catch (_) {}
 
@@ -5432,7 +5563,42 @@ ipcMain.handle("create-calibrator-shortcut", async () => {
       return { ok: false, error: "Desktop shortcuts are only supported on Windows." };
     }
     const desktop = app.getPath("desktop");
-    const shortcutPath = path.join(desktop, "Inverter Calibration Tool.lnk");
+    const shortcutPath = path.join(desktop, "ADSI Utility Tool.lnk");
+    // Sweep legacy shortcut names from previous releases. Operators who
+    // installed before the "ADSI Utility Tool" rename still have the old
+    // `Inverter Calibration Tool.lnk` (or earlier "Field Calibrator.lnk")
+    // sitting on the desktop because Windows does NOT auto-rename existing
+    // .lnk files when the source code changes its label. Without this
+    // sweep, clicking "Create Utility Tool Desktop Shortcut" leaves BOTH
+    // icons on the desktop — one with the old truncated text. Sweep runs
+    // best-effort: file-in-use / ACL failures are silently ignored so the
+    // new shortcut still gets written.
+    const LEGACY_NAMES = [
+      "Inverter Calibration Tool.lnk",
+      "Inverter Calibration.lnk",
+      "Inverter Calibrator.lnk",
+      "Field Calibrator.lnk",
+      "Calibrator.lnk",
+    ];
+    // Also clean up legacy Public Desktop copies — the dashboard installer
+    // historically placed the icon there for multi-user machines.
+    const publicDesktop = process.env.PUBLIC
+      ? path.join(process.env.PUBLIC, "Desktop")
+      : null;
+    const sweepDirs = publicDesktop ? [desktop, publicDesktop] : [desktop];
+    for (const dir of sweepDirs) {
+      for (const legacy of LEGACY_NAMES) {
+        const legacyPath = path.join(dir, legacy);
+        try {
+          if (fs.existsSync(legacyPath)) {
+            fs.unlinkSync(legacyPath);
+            console.log(`[main] swept legacy calibrator shortcut: ${legacyPath}`);
+          }
+        } catch (err) {
+          console.warn(`[main] could not sweep ${legacyPath}: ${err.message}`);
+        }
+      }
+    }
     const target = process.execPath;
     const iconPath = calibratorIconPath("ico");
     // Packaged: process.execPath IS the installed app .exe (Electron renamed
@@ -5458,7 +5624,7 @@ ipcMain.handle("create-calibrator-shortcut", async () => {
       cwd: workingDir,
       icon: iconPath,
       iconIndex: 0,
-      description: "Inverter Calibration Tool — isolated inverter calibration (no dashboard required)",
+      description: "ADSI Utility Tool — isolated inverter calibration & settings viewer (no dashboard required)",
       appUserModelId: "com.engr-m.inverter-dashboard.calibrator",
     });
     if (!ok) {

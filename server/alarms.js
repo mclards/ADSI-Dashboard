@@ -1061,16 +1061,58 @@ function raiseActiveAlarm(row, cur, now, newAlarms) {
   }
 }
 
+// v2.11.0-beta.10 — close-and-reopen semantics on bit-composition change.
+//
+// Background (2026-05-22): The original implementation
+// `UPDATE alarms SET alarm_value=? ...` clobbered the prior bitmask on
+// every poll-cycle composition change. An alarm that briefly fired
+// bits 4 + 9 (`0x0210`) and then settled back to bits 6 + 9 (`0x0240`)
+// before clearing left ONLY `0x0240` in the DB — the bit-4 event the
+// operator saw on the inverter card vanished from the log.
+//
+// An earlier in-session fix OR-accumulated (`alarm_value |= cur`) but the
+// operator correctly pushed back: "very awkward and not right" — that
+// approach manufactures fictional values like 0x0250 that NEVER appeared
+// on the wire (bit 4 fired at time T1, bits 6+9 fired at time T2 — they
+// were never all set together).
+//
+// Correct fix: every composition change CLOSES the active row (sets
+// cleared_ts to the transition timestamp) and INSERTs a NEW row whose
+// alarm_value is exactly what the inverter emitted at that moment.
+// Each alarms row is now a faithful snapshot — no merging, no
+// supersets, no overwrites. The operator's timeline for an episode
+// becomes a sequence of consecutive rows whose cleared_ts of row N
+// equals ts of row N+1.
+//
+// CRITICAL_PATTERNS auto-block is unaffected: it uses supermask
+// semantics + the 60-min minSpacingMs gate, so rapid in-episode
+// composition flaps are still counted as one fault.
+//
+// Broadcast suppressed for the close/reopen pair: the operator's toast
+// already fired on the original raise; in-episode changes show up via
+// the next /api/alarms/active refresh of the notification panel. This
+// preserves the prior no-spam UX while now also preserving the data.
+// Atomic close-and-reopen wrapped in a single SQLite transaction so any
+// concurrent /api/alarms/active query cannot observe the brief gap
+// between the old row's `cleared_ts` write and the new row's INSERT.
+// Without this wrapper, a polling query that lands in the (microsecond-
+// short) window would briefly report the unit as "no active alarm",
+// causing transient false-clears in the notification panel and any
+// auto-reset / critical-pattern logic that consumes getActiveAlarms.
+const _closeAndReopenAlarmTx = db.transaction((row, newCur, evTsNum) => {
+  stmts.clearAlarm.run(evTsNum, row.inverter, row.unit);
+  if (newCur === 0) return;
+  // Use a sink array so raiseActiveAlarm's INSERT still runs (and the
+  // stop-reason auto-capture hook fires on the new alarm id), but the
+  // operator doesn't get re-toasted for an in-episode change.
+  const silentSink = [];
+  raiseActiveAlarm(row, newCur, evTsNum, silentSink);
+});
+
 function updateActiveAlarmValue(row, cur, evTs) {
-  const severity = getTopSeverity(cur) || "fault";
-  stmts.updateActiveAlarm.run(
-    formatAlarmHex(cur),
-    cur,
-    severity,
-    Number(evTs) > 0 ? Number(evTs) : Date.now(),
-    row.inverter,
-    row.unit,
-  );
+  const evTsNum = Number(evTs) > 0 ? Number(evTs) : Date.now();
+  const newCur = (Number(cur) || 0) >>> 0;
+  _closeAndReopenAlarmTx(row, newCur, evTsNum);
 }
 
 function checkAlarms(batch) {
@@ -1084,6 +1126,7 @@ function checkAlarms(batch) {
   }
 
   for (const row of batch) {
+    try {
     if (!isConfiguredNode(row.inverter, row.unit)) continue;
     const key = `${row.inverter}_${row.unit}`;
     const prev = activeAlarmState[key];
@@ -1148,6 +1191,15 @@ function checkAlarms(batch) {
     if (transition === "raise") {
       raiseActiveAlarm(row, cur, evTs, newAlarms);
       activeAlarmState[key] = cur;
+    }
+    } catch (err) {
+      // Per-row error isolation: a malformed frame or one transient DB
+      // error MUST NOT abort the whole batch — every other inverter's
+      // alarm transitions still need to be recorded. Log so the failure
+      // is visible in operator logs, then continue.
+      console.error(
+        `[alarms] checkAlarms row inverter=${row?.inverter} unit=${row?.unit} failed: ${err?.message || err}`,
+      );
     }
   }
 

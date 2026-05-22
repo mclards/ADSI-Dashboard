@@ -1,6 +1,6 @@
 # ADSI Inverter Dashboard User Manual
 
-**Applies to:** ADSI Inverter Dashboard `v2.11.0-beta.9`
+**Applies to:** ADSI Inverter Dashboard `v2.11.0`
 **Document type:** Operator and administrator reference  
 **Scope:** Main dashboard, forecast workspace, settings center, cloud backup, standby database workflow, alarm handling, exports, IP Configuration, and Topology
 
@@ -1607,6 +1607,67 @@ Remote-mode behavior:
   must execute on the gateway-side network. `Show target map` and the
   audit log remain available.
 
+#### Firmware Map
+
+The nodes **within one inverter** should all run the **same firmware**.
+The Firmware Map tab audits that invariant **per inverter** — each
+inverter is judged only against *its own* nodes, never against other
+inverters or a plant-wide version. Firmware rides the same FC11 payload
+the serial scan already reads, so this is a **projection of the serial
+scan — it adds no extra bus traffic**.
+
+**What "firmware" means here (verified 2026-05-19):** the comparison uses
+the **inverter firmware code** — the `AAV1003xx` string in the
+**Firmware** column. This was confirmed by decompiling ISM's own FC11
+parser (`IngeconModbusSlaveID_Freescale`): for this hardware family ISM
+extracts exactly the serial plus *one* firmware code, and never a
+separate display-firmware field. The two extra strings in the **Aux ID 1
+/ Aux ID 2** columns (the `AAS…` values) are *unverified auxiliary
+identifiers* the vendor tool does not treat as a firmware version — they
+are shown for diagnostics only and are **not** part of the comparison
+(so a blank or varying Aux value never raises a false alarm).
+
+| Control | Function |
+| --- | --- |
+| `Scan firmware` | Reads every `(inverter, slave)` via FC11 (reusing the serial scan path). Bulk-auth required; gateway-only. |
+| `Bypass 5-min cache` | Re-reads every inverter from the wire instead of serving recent cache hits. |
+| `Show last snapshot` | Renders the last persisted firmware map without any new reads. Works in remote mode (reads the replicated `inverter_firmware_state`). |
+| `Drift log` | Chronological trail of every inverter-firmware change detected between scans (`firmware_drift_log`). Works in remote mode. |
+| Fleet table | One block per inverter (sorted by inverter number, then slave) with each slave's Firmware code, the two Aux IDs, and a per-inverter verdict pill. |
+
+Per-inverter verdict pill:
+
+- **all same** (green) — every readable node on the inverter runs the
+  same firmware code.
+- **mixed nodes** (red) — nodes *on the same inverter* run different
+  firmware. This is the post-board-swap signature (a replaced power
+  module brought a different firmware) — the firmware-side dual of the
+  serial relocation guard.
+- **partial read** (amber) — at least one node on the inverter could not
+  be read this scan; the ones that answered agree.
+- **no read** (red) — no node on the inverter answered.
+
+Per-node Status is **same** or **different** *relative to the other nodes
+on the same inverter* (the minority node in a mixed inverter is the one
+shown **different**, with its Firmware cell highlighted).
+
+A drift event is logged **only** when a previously-seen node's
+**inverter-firmware code** actually changes between scans — first
+sightings, unreadable nodes, and Aux-ID-only changes never create noise.
+The snapshot of an unreadable node is never overwritten by a failed read.
+
+**Field check (Utility / Calibration Tool):** the calibration tool exposes
+a single-inverter `Firmware Check` for the connected inverter — it reads
+slaves 1–4 and reports whether that one inverter's nodes match, so a
+technician can confirm a freshly swapped board matches its siblings
+without a full plant scan.
+
+Remote-mode behavior:
+
+- `Show last snapshot` and `Drift log` work remotely (replicated tables).
+- `Scan firmware` is disabled on a remote workstation because the FC11
+  reads must execute on the gateway-side network.
+
 ### 6.9.9 Cloud Backup & Restore
 
 #### Provider Access
@@ -1933,7 +1994,7 @@ visible at a glance.
 > **Irreversible.** Flashing rewrites the inverter DSP program and
 > **cannot be undone**. A wrong or interrupted image can brick the unit.
 > This feature is gated, experimental, and available **only in the
-> standalone Inverter Calibration Tool** (not the dashboard). Use it only
+> standalone Utility Tool** (not the dashboard). Use it only
 > with the manufacturer-supplied image for the exact unit, after operator
 > sign-off.
 
@@ -1950,6 +2011,15 @@ reached by accident:
    (the serial analogue of the RS-485 bus lock); reconnect the transport
    in the calibrator afterwards. The `0x96` high-speed/baud-bump frame is
    never sent, so there is no baud-switch race at any speed.
+   *Bus-lock note:* for an Ethernet flash, the dashboard's live poller is
+   a second Modbus master on the same gateway. The flash now publishes a
+   cross-process claim so the dashboard **automatically pauses polling of
+   that one inverter** for the duration (it is shown as *maintenance*, not
+   offline, and not counted as downtime) and resumes the moment the flash
+   ends. This prevents the two-master collision that otherwise makes the
+   DSP reject the start with *"firmware load start (0x90) error code 2"*.
+   The claim self-expires (~2 min) if the calibrator crashes, so polling
+   can never be permanently silenced.
 2. **Browse… to the firmware file.** The native OS file picker opens;
    choose the `.S` Motorola S-record image (you may also paste an
    absolute path). The filename must follow the ISM `LLLnnnn…` rule
@@ -1965,13 +2035,11 @@ reached by accident:
    selected file/node/parameters is a hard precondition for arming the
    live flash — changing any of them re-disables the live button.
 5. **Arm.** The live block reveals only after a passing dry-run. You
-   must (a) tick the irreversible-acknowledgement box, (b) type the
-   exact phrase `FLASH <node>` (e.g. `FLASH 23`), and (c) supply the
-   topology authorization key (`adsiMM`). The **FLASH (live)** button
-   stays disabled until all of these and the SHA still match.
-6. **FLASH (live).** A final browser confirmation restates the file,
-   node and SHA-256. The flash then runs as a background job with a
-   live progress bar, an audit-event log, and an **Abort** button.
+   must (a) tick the irreversible-acknowledgement box and (b) supply the
+   authorization key (`adsiMM`). The **FLASH (live)** button stays
+   disabled until both hold and the SHA still matches.
+6. **FLASH (live).** The flash runs as a background job with a live
+   progress bar, an audit-event log, and an **Abort** button.
 
 **Server-side gates (enforced regardless of the UI).** The live flash is
 refused unless *all* hold: explicit irreversible confirmation; a prior

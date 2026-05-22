@@ -17409,6 +17409,17 @@ body.mode-transition-active {
 .srn-table col.srn-col-debug    { width: 10rem;  }
 .srn-table col.srn-col-power    { width: 10rem;  }
 .srn-table col.srn-col-active   { width: 6rem;  }
+
+/* 2026-05-19 operator request — every table in Serial Number Setting
+ * (Plant Serial Map, Bulk Fix plan/result, Migration History, Firmware
+ * Map, Drift log, Read-all) must fill its container with EVENLY
+ * distributed columns. `table-layout: fixed` + equal `auto` cols
+ * overrides the per-render inline `<col style="width:..px">` hints, so
+ * stacked per-inverter blocks stay aligned and there is no right-edge
+ * whitespace. Scoped to #serialNumberSection so Stop Reasons / other
+ * .srn-table users keep their tuned column widths. */
+#serialNumberSection .srn-table { width: 100%; table-layout: fixed; }
+#serialNumberSection .srn-table colgroup col { width: auto !important; }
 .srn-table td.srn-cell-reason {
   white-space: normal;       /* allow wrap for the stacked vendor + EN lines */
   overflow: visible;
@@ -20496,6 +20507,17 @@ body.mode-transition-active {
    Calm ghost until the row is dirty (New value ≠ Factor); then it becomes
    the accent primary action. Red is reserved for a deliberately-armed
    Force bypass — never a normal write. (primary-action / state-clarity) */
+/* Write button visual progression — operator request 2026-05-21:
+ * "make Write with distinct color across the themes". Token-driven so it
+ * adapts to every theme; uses --orange because the warm hue reads as
+ * "state-changing action" and stands out from the calm --accent used by
+ * the consign / mode tiles. Stage progression:
+ *   IDLE (clean)         — orange outline, orange text, transparent fill
+ *   HOVER                — orange-tinted fill, keeps the outline
+ *   DIRTY (value typed)  — full orange fill, white text — "ready to commit"
+ *   DIRTY + FORCE armed  — full red fill — "destructive, gate bypassed"
+ *   DISABLED             — keeps outline but desaturates (handled below)
+ */
 #page-field-calibration #fieldCalibrationSection .fcal-write-btn {
   display: inline-flex;
   align-items: center;
@@ -20504,36 +20526,29 @@ body.mode-transition-active {
   font-size: 11.5px;
   font-weight: var(--fw-semibold, 600);
   line-height: 1;
-  color: var(--text2);
+  color: var(--orange);
   background: transparent;
-  border: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
+  border: 1px solid var(--orange);
   border-radius: 6px;
   cursor: pointer;
   white-space: nowrap;
   transition: background 140ms ease, border-color 140ms ease, color 140ms ease, opacity 140ms ease;
 }
 #page-field-calibration #fieldCalibrationSection .fcal-write-btn:hover {
-  color: var(--text);
-  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  color: #fff;
+  background: color-mix(in srgb, var(--orange) 70%, transparent);
+  border-color: var(--orange);
 }
 #page-field-calibration #fieldCalibrationSection .fcal-write-btn .mdi { margin: 0; font-size: 14px; }
-/* Not dirty → de-emphasize to near-icon weight so the grid reads calm. */
-#page-field-calibration #fieldCalibrationSection .fcal-row:not(.fcal-dirty) .fcal-write-btn {
-  opacity: 0.5;
-}
-#page-field-calibration #fieldCalibrationSection .fcal-row:not(.fcal-dirty) .fcal-write-btn:hover {
-  opacity: 1;
-}
-/* Dirty → this is now the primary action on the slot-card. */
+/* Dirty → escalate to filled orange so the slot reads as "ready to write". */
 #page-field-calibration #fieldCalibrationSection .fcal-row.fcal-dirty .fcal-write-btn {
-  opacity: 1;
   color: #fff;
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--orange);
+  border-color: var(--orange);
 }
 #page-field-calibration #fieldCalibrationSection .fcal-row.fcal-dirty .fcal-write-btn:hover {
-  background: color-mix(in srgb, var(--accent) 86%, #000);
-  border-color: color-mix(in srgb, var(--accent) 86%, #000);
+  background: color-mix(in srgb, var(--orange) 86%, #000);
+  border-color: color-mix(in srgb, var(--orange) 86%, #000);
 }
 /* Dirty AND a Force bypass armed → destructive treatment (red). */
 #page-field-calibration #fcalReadResult.fcal-force-on .fcal-row.fcal-dirty .fcal-write-btn,
@@ -20541,6 +20556,17 @@ body.mode-transition-active {
   background: var(--red);
   border-color: var(--red);
   color: #fff;
+}
+/* Disabled (Calibration Mode off OR safety gate blocks + Force not armed)
+ * — keep the orange identity but mute the saturation so the button still
+ * reads as a Write surface, just unavailable. */
+#page-field-calibration #fieldCalibrationSection .fcal-write-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+#page-field-calibration #fieldCalibrationSection .fcal-write-btn:disabled:hover {
+  background: transparent;
+  color: var(--orange);
 }
 
 /* Each parameter group is its own card — clear surface, calm border,
@@ -20668,8 +20694,8 @@ body.mode-transition-active {
 #page-field-calibration #fieldCalibrationSection .fcal-param-grid {
   display: grid;
   grid-template-columns: repeat(var(--fcal-cols, 3), minmax(0, 1fr));
-  gap: 8px;
-  padding: 10px;
+  gap: 12px;
+  padding: 14px;
 }
 /* Very narrow viewport — drop to a single field so inputs never overflow
    (overrides the per-field column count above). */
@@ -20696,19 +20722,20 @@ body.mode-transition-active {
 #page-field-calibration #fieldCalibrationSection .fcal-slot {
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  padding: 7px 9px;
+  gap: 9px;
+  padding: 11px 13px;
   background: var(--card);
   border: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
-  border-radius: 7px;
+  border-radius: 8px;
   transition: border-color 140ms ease, box-shadow 140ms ease;
 }
 #page-field-calibration #fieldCalibrationSection .fcal-slot-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 6px;
+  gap: 8px;
   min-width: 0;
+  margin-bottom: 1px;
 }
 /* Name = label text (ellipsizes if long) + offset chip that stays visible
    (never clipped) + optional gate badge. */
@@ -20730,30 +20757,31 @@ body.mode-transition-active {
   flex: 0 0 auto;
   margin-left: 0;
 }
-/* Factor + Live on ONE tight inline row (label + value pairs). */
-/* Two metrics span the FULL slot width: Factor pinned left, Live pinned
-   right (operator request 2026-05-17). One line, no wrap. */
+/* Factor + Live stacked vertically — Factor on top, Live below.
+ * Operator request 2026-05-21: side-by-side layout was clipping signed /
+ * larger live values (e.g. "-60 VAr") in narrow 3-up slot columns. The
+ * stack guarantees every value renders fully regardless of card width;
+ * the icons + tooltip on each row still distinguish Factor from Live. */
 #page-field-calibration #fieldCalibrationSection .fcal-slot-metrics {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
   width: 100%;
   font-size: 12px;
+  padding: 2px 0;
 }
 #page-field-calibration #fieldCalibrationSection .fcal-slot-metric {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   min-width: 0;
-  overflow: hidden;
   white-space: nowrap;
-  text-overflow: ellipsis;
 }
-/* Live sits flush at the right edge so the pair fills the slot. */
+/* Both rows left-aligned now that they share the same column. */
 #page-field-calibration #fieldCalibrationSection .fcal-slot-metric:last-child {
-  justify-content: flex-end;
-  text-align: right;
+  justify-content: flex-start;
+  text-align: left;
 }
 /* Replaces the "FACTOR"/"LIVE" text labels (space-inefficient) with a
    compact icon: tune-variant = stored scale factor, pulse = live reading.
@@ -20787,7 +20815,7 @@ body.mode-transition-active {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 5px;
+  gap: 7px;
 }
 /* X1 (91) / Y2 (94): display-only — no input/Write. Quiet locked chip
    occupying the same footprint so the grid stays aligned (operator
@@ -20975,11 +21003,13 @@ body.mode-transition-active {
 }
 #page-field-calibration #fieldCalibrationSection .fcal-table th:first-child,
 #page-field-calibration #fieldCalibrationSection .fcal-table td:first-child {
-  padding-left: 14px;
+  padding-left: 16px;
 }
+/* Match .fcal-settings-table: the Calibration tab also scrolls inside its
+   .card-tab-panel, so the rightmost column needs the same scrollbar gap. */
 #page-field-calibration #fieldCalibrationSection .fcal-table th:last-child,
 #page-field-calibration #fieldCalibrationSection .fcal-table td:last-child {
-  padding-right: 14px;
+  padding-right: 28px;
 }
 
 #page-field-calibration #fieldCalibrationSection .fcal-table th {
@@ -21720,7 +21750,11 @@ body.calib-session-active {
 
 #page-field-calibration #fieldCalibrationSection .fcal-consign-tiles-list {
   display: grid;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
+  /* 6 consign targets share the first row evenly (0/10/20/50/60/70 %); the
+   * Release tile drops to its own full-width row below — operator request
+   * 2026-05-21. The full-width span makes Release unmistakable as a
+   * "finish & restore" action distinct from the calibration setpoints. */
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 6px;
 }
 
@@ -21749,6 +21783,9 @@ body.calib-session-active {
   background: color-mix(in srgb, var(--green) 15%, transparent);
   border-color: color-mix(in srgb, var(--green) 50%, transparent);
   color: var(--green);
+  /* Span the full row so Release reads as a "finish & restore" action
+   * distinct from the 0/10/20/50/60/70 % setpoint tiles above. */
+  grid-column: 1 / -1;
 }
 #page-field-calibration #fieldCalibrationSection .fcal-consign-tile-release:hover {
   background: var(--green);
@@ -22240,9 +22277,9 @@ body.calib-session-active #fieldCalibrationSection {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 8px;
-  padding: 10px 12px;
-  margin-bottom: 8px;
+  gap: 4px;
+  padding: 6px 10px;
+  margin-bottom: 6px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface);
@@ -22293,57 +22330,133 @@ body.calib-session-active #fieldCalibrationSection {
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  width: min(720px, 94vw);
+  width: min(960px, 96vw);
   max-height: 90vh;
-  overflow: auto;
-  padding: 14px 16px;
-  border: 1px solid var(--red, #d9534f);
-  border-radius: 10px;
+  /* Header is a fixed strip; only .fcal-fw-body scrolls. */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
   background: var(--surface);
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 20px 56px rgba(0, 0, 0, 0.5);
 }
 
 .calibrator-mode .fcal-fw-header {
+  flex: none;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  padding: 4px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  border-top-left-radius: 12px;
+  border-top-right-radius: 12px;
+}
+
+.calibrator-mode .fcal-fw-header .fcal-fw-title {
+  font-size: 13.5px;
+  line-height: 1.1;
+}
+
+.calibrator-mode .fcal-fw-header .fcal-fw-title .mdi {
+  font-size: 15px;
+}
+
+/* The base .btn enforces height/min-height 30px — override on the close
+   button so the title strip stays compact. */
+.calibrator-mode .fcal-fw-header #btnFwClose {
+  height: 24px;
+  min-height: 24px;
+  padding: 0 10px;
+  font-size: 11.5px;
+  line-height: 1.1;
+  border-radius: 10px;
+}
+
+.calibrator-mode .fcal-fw-header #btnFwClose .mdi {
+  font-size: 13px;
 }
 
 .calibrator-mode .fcal-fw-title {
   display: flex;
   align-items: center;
   gap: 8px;
+  font-size: 15px;
   font-weight: 600;
   color: var(--text);
 }
 
-.calibrator-mode .fcal-fw-badge {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  padding: 2px 8px;
-  border-radius: 999px;
-  color: #fff;
-  background: var(--red, #d9534f);
-}
-
 .calibrator-mode .fcal-fw-body {
-  margin-top: 12px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 14px 20px 20px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
 }
 
 .calibrator-mode .fcal-fw-warn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin: 0;
-  padding: 8px 10px;
-  border-left: 3px solid var(--orange, #e0a800);
-  background: color-mix(in srgb, var(--orange, #e0a800) 12%, transparent);
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--orange, #e0a800) 45%, var(--border));
+  background: color-mix(in srgb, var(--orange, #e0a800) 10%, transparent);
   color: var(--text);
-  font-size: 13px;
-  line-height: 1.45;
-  border-radius: 4px;
+  font-size: 12.5px;
+  line-height: 1.4;
+  border-radius: 8px;
+}
+
+.calibrator-mode .fcal-fw-warn .mdi {
+  color: var(--orange, #e0a800);
+  font-size: 16px;
+  flex: none;
+}
+
+.calibrator-mode .fcal-fw-checklist {
+  border: 1px solid color-mix(in srgb, var(--accent, #2f7ed8) 35%, var(--border));
+  background: color-mix(in srgb, var(--accent, #2f7ed8) 6%, transparent);
+  border-radius: 8px;
+  padding: 10px 14px 12px;
+}
+
+.calibrator-mode .fcal-fw-checklist-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+
+.calibrator-mode .fcal-fw-checklist-title .mdi {
+  color: var(--accent, #2f7ed8);
+  font-size: 15px;
+  flex: none;
+}
+
+.calibrator-mode .fcal-fw-checklist-list {
+  margin: 0;
+  padding-left: 22px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.calibrator-mode .fcal-fw-checklist-list li {
+  margin: 4px 0;
+}
+
+.calibrator-mode .fcal-fw-checklist-list li strong {
+  color: var(--text);
 }
 
 .calibrator-mode .fcal-fw-row {
@@ -22353,50 +22466,93 @@ body.calib-session-active #fieldCalibrationSection {
   gap: 10px;
 }
 
+/* Align the leading label of every field row so inputs line up cleanly. */
+.calibrator-mode .fcal-fw-row > .invclock-label:first-child {
+  min-width: 96px;
+  font-size: 12px;
+  color: var(--muted, var(--text));
+}
+
+/* Advanced parameters: keep all four controls on ONE line. */
+.calibrator-mode .fcal-fw-adv .fcal-fw-row {
+  flex-wrap: nowrap;
+  gap: 8px;
+}
+
+.calibrator-mode .fcal-fw-adv .fcal-fw-row > .invclock-label {
+  min-width: 0;
+  white-space: nowrap;
+  flex: none;
+}
+
+.calibrator-mode .fcal-fw-adv .fcal-fw-row .inp {
+  min-width: 0;
+}
+
+.calibrator-mode .fcal-fw-adv .fcal-fw-row .fcal-force-toggle {
+  white-space: nowrap;
+  flex: none;
+}
+
 .calibrator-mode .fcal-fw-box {
   font-family: var(--mono-font, monospace);
   font-size: 12px;
   white-space: pre-wrap;
   word-break: break-all;
-  padding: 8px 10px;
+  padding: 10px 12px;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--bg, var(--surface));
   color: var(--text);
+}
+
+.calibrator-mode .fcal-fw-adv {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
 }
 
 .calibrator-mode .fcal-fw-adv summary {
   cursor: pointer;
   font-size: 12px;
+  font-weight: 600;
   color: var(--muted, var(--text));
   user-select: none;
 }
 
 .calibrator-mode .fcal-fw-adv[open] summary {
-  margin-bottom: 8px;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
 }
 
 .calibrator-mode .fcal-fw-arm {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 10px 12px;
-  border: 1px dashed var(--red, #d9534f);
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--red, #d9534f) 8%, transparent);
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--red, #d9534f) 55%, var(--border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--red, #d9534f) 7%, transparent);
 }
 
 .calibrator-mode .fcal-fw-arm-title {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-weight: 600;
+  font-size: 13px;
+  font-weight: 700;
   color: var(--red, #d9534f);
 }
 
 .calibrator-mode .fcal-fw-sha {
   font-size: 12px;
+  color: var(--muted, var(--text));
+}
+
+.calibrator-mode .fcal-fw-sha .mono {
   color: var(--text);
+  word-break: break-all;
 }
 
 .calibrator-mode .fcal-fw-progress-wrap {
@@ -22426,7 +22582,11 @@ body.calib-session-active #fieldCalibrationSection {
 
 .calibrator-mode .fcal-fw-log {
   max-height: 220px;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   margin: 0;
   padding: 8px 10px;
   font-family: var(--mono-font, monospace);
@@ -22444,12 +22604,12 @@ body.calib-session-active #fieldCalibrationSection {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
 }
 
 .calibrator-mode .fcal-transport-row-top {
   border-bottom: 1px solid var(--border);
-  padding-bottom: 8px;
+  padding-bottom: 4px;
 }
 
 .calibrator-mode .fcal-transport-label {
@@ -22460,7 +22620,7 @@ body.calib-session-active #fieldCalibrationSection {
 
 .calibrator-mode .fcal-transport-modes {
   display: flex;
-  gap: 16px;
+  gap: 12px;
 }
 
 .calibrator-mode .fcal-transport-mode {
@@ -22479,6 +22639,27 @@ body.calib-session-active #fieldCalibrationSection {
 /* Hidden serial/tcp pane. */
 .calibrator-mode .fcal-transport-pane[hidden] {
   display: none;
+}
+
+/* Uniform control height across BOTH panes so the Ethernet <-> COM Port
+   swap is a clean in-place exchange with zero vertical jump (every input,
+   select and button is exactly the same height; the pane reserves that
+   height even while the other mode is shown). */
+.calibrator-mode .fcal-transport-pane {
+  min-height: 26px;
+}
+
+.calibrator-mode .fcal-transport-pane .inp,
+.calibrator-mode .fcal-transport-pane .btn {
+  height: 26px;
+  box-sizing: border-box;
+  padding-top: 2px;
+  padding-bottom: 2px;
+}
+
+.calibrator-mode .fcal-transport-pane .btn {
+  display: inline-flex;
+  align-items: center;
 }
 
 /* Label+control pair — inline unit that never splits across a wrap. */
@@ -22562,3 +22743,411 @@ body.calib-session-active #fieldCalibrationSection {
   transform: scale(0.96);
 }
 
+
+
+/* ── Utility Tool: read-only setting view tabs (Phase C) ─────────────── */
+.fcal-view-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 4px 0 2px;
+  border-bottom: 1px solid var(--border);
+}
+.fcal-view-tab {
+  appearance: none;
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: none;
+  color: var(--text2);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: var(--fw-semibold, 600);
+  padding: 6px 12px;
+  border-radius: 6px 6px 0 0;
+  cursor: pointer;
+  transition: color 140ms ease, background 140ms ease;
+}
+.fcal-view-tab:hover { color: var(--text); background: var(--surface2, var(--surface)); }
+.fcal-view-tab-active {
+  color: var(--accent);
+  background: var(--surface);
+  border-color: var(--border);
+  font-weight: var(--fw-bold, 700);
+}
+.fcal-settings-controls { align-items: center; gap: 10px; margin-bottom: 8px; }
+/* Read-only chip in the controls strip. Uses --text2 (defined in every
+   theme) — earlier code referenced var(--muted) which is NOT defined in
+   this codebase and silently fell back to browser default ⇒ invisible on
+   the cream/parchment theme. All settings-table colours below use defined
+   tokens for the same reason. */
+.fcal-settings-ro {
+  font-size: 10.5px;
+  font-weight: var(--fw-semibold, 600);
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--text2);
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  border-radius: 4px;
+  padding: 2px 7px;
+  background: color-mix(in srgb, var(--surface2, var(--surface)) 70%, transparent);
+}
+.fcal-settings-group { margin: 0 0 14px; }
+.fcal-settings-group:last-child { margin-bottom: 0; }
+.fcal-settings-group-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: var(--fw-bold, 700);
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--text);
+  margin: 0 0 6px;
+  padding: 0 2px;
+}
+.fcal-settings-group-title .fcal-settings-group-count {
+  font-size: 10.5px;
+  font-weight: var(--fw-regular, 400);
+  color: var(--text3);
+  letter-spacing: 0.3px;
+  text-transform: none;
+}
+/* Unified data table: matches .fcal-table padding/header treatment so
+   Calibration / Node & Startup / Grid Protection / Power & Reactive /
+   Isolation & Temp / Fleet Scan all read like the same product. All
+   text colours resolve to defined theme tokens (--text / --text2 /
+   --text3) so contrast is correct on dark AND parchment themes. */
+table.fcal-settings-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  color: var(--text);
+}
+table.fcal-settings-table th,
+table.fcal-settings-table td {
+  padding: 7px 12px;
+  text-align: left;
+  vertical-align: middle;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+}
+table.fcal-settings-table tbody tr:last-child td { border-bottom: 0; }
+table.fcal-settings-table th:first-child,
+table.fcal-settings-table td:first-child { padding-left: 16px; }
+/* Last column needs extra right-padding so its values don't hug the
+   vertical scrollbar (the table scrolls inside #fcalSettingsView). On
+   Windows the scrollbar steals ~12-17 px from the viewport edge; 28 px
+   leaves a clean gap regardless of OS-rendered scrollbar width. */
+table.fcal-settings-table th:last-child,
+table.fcal-settings-table td:last-child  { padding-right: 28px; }
+table.fcal-settings-table th {
+  font-size: 10.5px;
+  font-weight: var(--fw-bold, 700);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text2);
+  background: transparent;
+  white-space: nowrap;
+}
+/* Body cells default to high-contrast --text. Specialized cells below
+   adjust weight / family / alignment but stay readable on every theme.
+
+   IMPORTANT: every alignment-bearing class is applied to BOTH the <th>
+   and the matching <td>. Headers MUST sit over their data — never let a
+   left-aligned header label a right-aligned numeric column. */
+table.fcal-settings-table td { color: var(--text); }
+table.fcal-settings-table th.fcal-set-val,
+table.fcal-settings-table td.fcal-set-val { text-align: left; }
+table.fcal-settings-table td.fcal-set-val { font-weight: var(--fw-semibold, 600); color: var(--text); }
+table.fcal-settings-table th.fcal-set-raw,
+table.fcal-settings-table td.fcal-set-raw { text-align: right; }
+table.fcal-settings-table td.fcal-set-raw {
+  color: var(--text2);
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  white-space: nowrap;
+}
+table.fcal-settings-table th.fcal-set-off,
+table.fcal-settings-table td.fcal-set-off { text-align: right; }
+table.fcal-settings-table td.fcal-set-off {
+  color: var(--text3);
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  white-space: nowrap;
+}
+/* Numeric body column (Modbus#, CAN#, P-Limit) — right-aligned mono so
+   digits compare cleanly; header right-aligned too via the same class. */
+table.fcal-settings-table th.fcal-set-num,
+table.fcal-settings-table td.fcal-set-num { text-align: right; }
+table.fcal-settings-table td.fcal-set-num {
+  color: var(--text);
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  white-space: nowrap;
+}
+/* IP cell — mono but left-aligned (it's an address, not a magnitude),
+   so it stays under a left-aligned IP header. */
+table.fcal-settings-table th.fcal-set-ip,
+table.fcal-settings-table td.fcal-set-ip { text-align: left; }
+table.fcal-settings-table td.fcal-set-ip {
+  color: var(--text2);
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  white-space: nowrap;
+}
+/* Centered status column (CfgCode sentinel "OK" / "?" badge). */
+table.fcal-settings-table th.fcal-set-status,
+table.fcal-settings-table td.fcal-set-status { text-align: center; }
+table.fcal-settings-table tbody tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--surface2, var(--surface)) 28%, transparent);
+}
+table.fcal-settings-table tbody tr:hover td {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+/* Empty-state cell (skeleton "click Scan fleet…" row) needs readable text
+   on every theme — was inheriting muted/undefined colours. */
+table.fcal-settings-table td.srn-empty {
+  color: var(--text2);
+  background: transparent;
+  border: none;
+  text-align: center;
+  font-size: 12px;
+  padding: 18px 12px;
+}
+table.fcal-settings-table td.srn-empty strong { color: var(--text); }
+/* Small unit suffix shown after a decoded value (e.g. "60 s", "230 V").
+   Distinct from .fcal-settings-ro (the bordered chip that labels the view
+   as read-only) — units are inline, lower-weight, no border. */
+.fcal-settings-unit {
+  margin-left: 4px;
+  font-size: 11px;
+  color: var(--text3);
+  font-weight: var(--fw-regular, 400);
+}
+
+/* ── Editable Utility Tool tabs (B/C/D/I): New Value + Write columns ── */
+table.fcal-settings-table th.fcal-set-input,
+table.fcal-settings-table td.fcal-set-input { text-align: left; }
+table.fcal-settings-table th.fcal-set-action,
+table.fcal-settings-table td.fcal-set-action { text-align: left; white-space: nowrap; }
+
+table.fcal-settings-table td.fcal-set-input input.fcal-set-input-el {
+  width: 110px;
+  max-width: 100%;
+  height: 26px;
+  padding: 2px 8px;
+  font-size: 12px;
+  font-family: var(--font-mono, monospace);
+}
+
+/* Toggle switch for single-bit fields (calibration write table).
+   Compact + calm — sits inline in a table cell next to the New-value
+   inputs. Native checkbox is visually hidden but stays focusable +
+   accessible; the track + thumb are purely cosmetic.
+
+   States:
+     • OFF (read)  — slate track, thumb left,  muted "Off" text
+     • ON  (read)  — green track, thumb right, green "On" text
+     • DISABLED    — dashed-outline skeleton track, faint "—" placeholder
+                     (matches the "no live value yet" — placeholder used
+                     in every other cell when the operator hasn't Read). */
+.fcal-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+  position: relative;
+  line-height: 1;
+}
+.fcal-toggle input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+.fcal-toggle-track {
+  position: relative;
+  display: inline-block;
+  width: 32px;
+  height: 18px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text3) 24%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
+  transition: background 140ms ease, border-color 140ms ease;
+  flex: none;
+}
+.fcal-toggle-track::before {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #f5f5f5;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: transform 160ms cubic-bezier(.4, 0, .2, 1), background 140ms ease;
+}
+.fcal-toggle:hover .fcal-toggle-track {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+}
+.fcal-toggle input:checked + .fcal-toggle-track {
+  background: var(--green, #2da55a);
+  border-color: var(--green, #2da55a);
+}
+.fcal-toggle input:checked + .fcal-toggle-track::before {
+  transform: translateX(14px);
+  background: #ffffff;
+}
+.fcal-toggle input:focus-visible + .fcal-toggle-track {
+  outline: 2px solid var(--accent, #2f7ed8);
+  outline-offset: 2px;
+}
+/* Disabled / not-yet-read state — render as a SKELETON, not a broken
+   toggle. Dashed neutral outline + no thumb glyph + "—" label so the
+   operator immediately reads "no value yet — click Read", matching how
+   numeric cells in the same table render "—" in the not-read state. */
+.fcal-toggle input:disabled + .fcal-toggle-track {
+  background: transparent;
+  border: 1px dashed color-mix(in srgb, var(--text3) 60%, transparent);
+  cursor: not-allowed;
+}
+.fcal-toggle input:disabled + .fcal-toggle-track::before {
+  display: none;
+}
+.fcal-toggle:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.85;
+}
+/* Inline status label — plain text in the row, not a heavy chip.
+   Uses cell typography so it reads as part of the table, not a sticker. */
+.fcal-toggle-label {
+  font-size: 11.5px;
+  font-weight: var(--fw-semibold, 600);
+  letter-spacing: 0.2px;
+  color: var(--text2);
+  min-width: 20px;
+  text-align: left;
+  transition: color 140ms ease;
+}
+.fcal-toggle input:checked ~ .fcal-toggle-label {
+  color: var(--green, #2da55a);
+}
+.fcal-toggle input:disabled ~ .fcal-toggle-label {
+  color: var(--text3);
+  font-weight: var(--fw-regular, 400);
+}
+
+/* Disabled input + Write button styling for the gated state (no live
+   values read yet). Keeps the row visible but visually de-emphasized. */
+table.fcal-settings-table input.fcal-set-input-el:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  background: color-mix(in srgb, var(--text3) 6%, transparent);
+}
+table.fcal-settings-table .fcal-write-one:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Banner that appears at the top of a settings group when no live values
+   have been read yet — points the operator to the Read settings button. */
+.fcal-settings-gate-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  margin: 8px 16px 12px;
+  font-size: 12px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent, #2f7ed8) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent, #2f7ed8) 35%, var(--border));
+  border-radius: 8px;
+}
+.fcal-settings-gate-banner .mdi {
+  color: var(--accent, #2f7ed8);
+  font-size: 15px;
+  flex: none;
+}
+
+table.fcal-settings-table .fcal-write-one {
+  height: 24px;
+  min-height: 24px;
+  padding: 0 10px;
+  font-size: 11.5px;
+  line-height: 1.1;
+  border-radius: 8px;
+}
+
+table.fcal-settings-table .fcal-set-readonly {
+  display: inline-block;
+  padding: 1px 8px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text3);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  background: color-mix(in srgb, var(--text3) 7%, transparent);
+}
+/* Persistent header layout: the transport selector + node picker live
+   ABOVE the tab strip so they're available across every tab (the operator
+   connects/picks once, then browses tabs). The .field-calibration-container
+   is a flex column — we reorder children with `order:` instead of moving
+   DOM nodes, so the existing init/event wiring stays untouched. */
+#page-field-calibration #fieldCalibrationSection > #fcalRemoteBanner { order: 0; }
+#page-field-calibration #fieldCalibrationSection > .fcal-header      { order: 1; }
+#page-field-calibration #fieldCalibrationSection > .fcal-view-tabs   { order: 2; }
+#page-field-calibration #fieldCalibrationSection > #fcalSettingsView { order: 3; }
+#page-field-calibration #fieldCalibrationSection > #fcalPanelSingle  { order: 4; }
+
+/* The settings view (B/C/D/I/Fleet) must scroll INSIDE its own viewport
+   so the pinned header + tab strip stay put when the table is tall. The
+   container is overflow:hidden, so we need explicit flex sizing here. */
+#page-field-calibration #fieldCalibrationSection > #fcalSettingsView {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 0 24px;
+}
+#page-field-calibration #fieldCalibrationSection > #fcalSettingsView[hidden] {
+  display: none !important;
+}
+/* Pinned subheader wrapper holds the Write-all controls AND the group
+   title + gate banner. It sticks at the top of the scrolling settings
+   view so all three pieces ride together across every tab. The inner
+   controls row no longer needs its own sticky — the wrapper handles it. */
+#page-field-calibration #fieldCalibrationSection > #fcalSettingsView .fcal-settings-pinned {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 2px 0 0;
+  margin: 0 0 4px;
+  background: var(--bg, var(--surface));
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 35%, transparent);
+}
+#page-field-calibration #fieldCalibrationSection > #fcalSettingsView .fcal-settings-controls {
+  padding: 0 0 4px;
+  margin: 0;
+}
+/* The pinned header subdivision (group title + gate banner) — keep tight
+   spacing so the strip doesn't dominate the viewport. */
+#page-field-calibration #fieldCalibrationSection > #fcalSettingsView .fcal-settings-pinned-header {
+  padding: 0;
+}
+#page-field-calibration #fieldCalibrationSection > #fcalSettingsView .fcal-settings-pinned-header .fcal-settings-group-title {
+  margin: 4px 0 0;
+}
+#page-field-calibration #fieldCalibrationSection > #fcalSettingsView .fcal-settings-pinned-header .fcal-settings-gate-banner {
+  margin: 6px 16px 0;
+}
+
+/* On settings tabs hide ONLY the calibration scale-factor body — the
+   pinned-header controls (Read, bypass toggles, FW Upgrade, read msg)
+   stay visible across every tab so the single Read button serves all
+   tabs uniformly. */
+#fieldCalibrationSection[data-fcal-view]:not([data-fcal-view="calibration"]) #fcalPanelSingle {
+  display: none;
+}

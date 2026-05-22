@@ -291,6 +291,19 @@ function registerCalibrationRoutes(app, deps) {
     }
   });
 
+  // Read-only — see comment on /state. PUBLIC: static field map (offsets/
+  // kinds/groups/labels/units) used by the Utility Tool to render the
+  // tab LAYOUT before any Modbus Read. No transport / no inverter needed.
+  app.get("/api/calibration/cfg-map", async (req, res) => {
+    if (isRemoteMode()) return proxyToRemote(req, res);
+    try {
+      const result = await callPython("/calibration/cfg-map", "GET");
+      return res.json(result);
+    } catch (err) {
+      return res.status(502).json({ ok: false, error: err?.message || String(err) });
+    }
+  });
+
   // Read-only — see comment on /state.
   app.get("/api/calibration/full-config/:inverter/:slave", async (req, res) => {
     if (isRemoteMode()) return proxyToRemote(req, res);
@@ -552,6 +565,11 @@ function registerCalibrationRoutes(app, deps) {
     if (isRemoteMode()) return proxyToRemote(req, res);
     res.json({ ok: true, busy: _fleetScanInFlight, progress: { ..._fleetScanProgress } });
   });
+
+  // Utility Tool fleet scan route removed 2026-05-20 — broken (duplicate
+  // button id with Parameters Fleet Anomalies; the Utility Tool button
+  // could never receive clicks). The Parameters page Fleet Anomalies scan
+  // above is unrelated and remains in place.
 
   app.get("/api/calibration/feature-status", (req, res) => {
     if (isRemoteMode()) return proxyToRemote(req, res);
@@ -1321,6 +1339,130 @@ function registerCalibrationRoutes(app, deps) {
       } catch (err) {
         return res.status(502).json({ ok: false, error: err?.message || String(err) });
       }
+    });
+
+  // ── Utility Tool: L2 config-block write (groups B/C/D/I) ─────────────
+  //
+  // Distinct from /api/calibration/write above (which targets the
+  // calibration scale-factor window 81-94 under an active session). This
+  // route is for the Utility Tool's editable settings tabs and uses the
+  // broader cfg_trif_map.FIELDS whitelist. Auth = sacupsMM (operator
+  // preference: one prompt per page visit, cached client-side). Does
+  // NOT require an active calibration session — this is a config-write
+  // flow, not a calibration session.
+  //
+  // Body: { inverter, slave, field, value }
+  app.post("/api/calibration/config-write",
+    require("express").json(),
+    requireBulkAuth,
+    async (req, res) => {
+      if (isRemoteMode()) return proxyToRemote(req, res);
+      const body = req.body || {};
+      const inv = Number(body.inverter);
+      const slave = Number(body.slave);
+      // Normalise field name to ASCII-identifier-safe so a unicode-
+      // lookalike "ValidCfgCode" can't slip past the encoder's
+      // NON_WRITABLE_FIELDS check. The cfg_trif_map field names are
+      // all [A-Za-z0-9_], so a strict regex here is fine.
+      const fieldRaw = String(body.field || "").trim();
+      const field = /^[A-Za-z0-9_]+$/.test(fieldRaw) ? fieldRaw : "";
+      if (!Number.isInteger(inv) || inv < 1 || inv > KNOWN_INVERTERS_MAX) {
+        return res.status(400).json({
+          ok: false,
+          error: `inverter must be 1..${KNOWN_INVERTERS_MAX}`,
+        });
+      }
+      if (!Number.isInteger(slave) || slave < 1 || slave > 247) {
+        return res.status(400).json({
+          ok: false, error: "slave must be 1..247",
+        });
+      }
+      if (!field) {
+        return res.status(400).json({
+          ok: false,
+          error: "field required and must be an ASCII identifier",
+        });
+      }
+      if (!Object.prototype.hasOwnProperty.call(body, "value")) {
+        return res.status(400).json({ ok: false, error: "value required" });
+      }
+      // Reject obviously wrong value types up-front. Numbers, booleans,
+      // and strings are all valid (the encoder parses each); arrays and
+      // plain objects are not — they'd hit the encoder's stringify path
+      // and produce a useless "[object Object]" range error.
+      const vt = typeof body.value;
+      if (
+        vt !== "number" && vt !== "string" && vt !== "boolean"
+      ) {
+        return res.status(400).json({
+          ok: false,
+          error: "value must be a number, string, or boolean",
+        });
+      }
+      const ip = resolveIp(inv);
+      if (!ip) {
+        return res.status(404).json({
+          ok: false, error: `no IP for inverter ${inv}`,
+        });
+      }
+      const cb = checkCriticalBlock(inv);
+      if (cb) {
+        // Critical block — audit the rejection so forensic visibility is
+        // not lost on a refused write.
+        try {
+          insertAuditLogRow?.({
+            actor: "operator",
+            action: "utility_config_write_refused",
+            detail: JSON.stringify({
+              inverter: inv, slave, ip, field,
+              reason: "critical_block",
+              pattern_hex: cb.pattern_hex || null,
+            }),
+          });
+        } catch (_) { /* fail-open on audit */ }
+        return res.status(cb.status).json({ ok: false, ...cb });
+      }
+
+      let result = null;
+      let pythonError = null;
+      try {
+        result = await callPython("/calibration/config-write", "POST", {
+          ip, slave, field, value: body.value,
+          verify_delay_s: 1.0,
+        });
+      } catch (err) {
+        pythonError = err?.message || String(err);
+      }
+      // Audit every attempt — success, refusal, transport error, or
+      // encoder rejection. Without this, fuzz-style probing leaves no
+      // forensic record.
+      try {
+        if (typeof insertAuditLogRow === "function") {
+          insertAuditLogRow({
+            actor: "operator",
+            action: pythonError
+              ? "utility_config_write_error"
+              : (result?.ok ? "utility_config_write" : "utility_config_write_refused"),
+            detail: JSON.stringify({
+              inverter: inv, slave, ip, field,
+              kind: result?.kind || null,
+              value_requested: body.value,
+              value_before_raw: result?.value_before_raw ?? null,
+              value_after_raw: result?.value_after_raw ?? null,
+              raw_to_write: result?.raw_to_write ?? null,
+              status: result?.status || null,
+              verify_ok: !!result?.verify_ok,
+              error: result?.error || pythonError || null,
+            }),
+          });
+        }
+      } catch (e) {
+        console.warn("[utility] config-write audit failed:", e?.message);
+      }
+      if (pythonError) {
+        return res.status(502).json({ ok: false, error: pythonError });
+      }
+      return res.json(result);
     });
 
   // ── PHASE 3: consign mode (drive APC cmd-3 under active session) ────

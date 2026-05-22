@@ -627,3 +627,220 @@ def consign_apc_with_lock(client, lock: threading.Lock, slave: int, pct: float) 
             "error": f"percent must be 0..100, got {pct_f}",
         }
     return _consign_apc_sync(client, lock, int(slave), pct_f)
+
+
+# ─── L2 config block writes (Utility Tool tabs B/C/D/I) ──────────────────────
+# Mirrors write_one_with_lock above but operates on the broader L2 config
+# block (offsets 0-176) rather than the calibration scale-factor window
+# (offsets 81-94). The field metadata comes from services/cfg_trif_map.FIELDS
+# (the same map the read decoder uses) and the user-supplied value is
+# turned into a raw u16 by services/cfg_block_write.encode_value().
+#
+# Same UNLOCK magic (0xFFFA <- [0x0065, 0x07A7]) — the magic is the
+# general "privileged write" gate proven by Slice C (serial write) and
+# the calibration write path; same DSP, same protection register. Live-
+# soak on hardware is still pending and must precede any production use.
+#
+# For kind='bits' the function performs a READ-MODIFY-WRITE on the target
+# register so other bit fields sharing the same u16 (e.g. offset 16 packs
+# MarchaParo at bit 0 and ConsignaDeVin at bit 1) are preserved.
+
+def write_cfg_field_with_lock(
+    client,
+    lock: threading.Lock,
+    slave: int,
+    field_meta: Dict[str, object],
+    new_value,
+    *,
+    verify_delay_s: float = VERIFY_DELAY_S,
+    is_flash_active=None,
+) -> dict:
+    """Write one L2 config-block field. Returns a serializable dict.
+
+    field_meta is one row from services.cfg_trif_map.FIELDS — the same
+    metadata the read decoder uses. new_value is the operator-supplied
+    natural value (e.g. 5000 W, not 500 raw; 60.00 Hz, not 6000 raw);
+    cfg_block_write.encode_value does the kind-specific encoding.
+
+    `is_flash_active` is an optional zero-arg callable. When provided it
+    is invoked AFTER the per-IP lock is acquired so we close the TOCTOU
+    window between the endpoint's pre-check and the actual write — a
+    firmware flash that claims the bus mid-call is still caught.
+    """
+    # Imported lazily so that calibration_io.py keeps loading even if
+    # cfg_block_write is temporarily broken — the calibration write path
+    # (offsets 81-94) does not depend on this new code.
+    from services.cfg_block_write import (
+        encode_value, is_writable_field, merge_bit, CfgEncodeError,
+    )
+
+    offset = int(field_meta.get("offset") or -1)
+    kind = str(field_meta.get("kind") or "")
+    field_name = str(field_meta.get("field") or "")
+
+    out: Dict[str, object] = {
+        "ok":               False,
+        "status":           "preflight_failed",
+        "offset":           offset,
+        "field":            field_name,
+        "kind":             kind,
+        "value_requested":  None,
+        "raw_to_write":     None,
+        "value_before_raw": None,
+        "value_after_raw":  None,
+        "verify_ok":        False,
+        "sentinel_before":  None,
+        "sentinel_after":   None,
+        "error":            None,
+    }
+
+    if offset < 0 or offset >= 177:
+        out["status"] = "bad_offset"
+        out["error"] = f"offset {offset} outside L2 config block [0, 176]"
+        return out
+
+    if not is_writable_field(field_meta):
+        out["status"] = "not_writable"
+        out["error"] = (
+            f"field '{field_name}' (kind '{kind}') is not writable — see "
+            f"cfg_block_write.UNSUPPORTED_KINDS / NON_WRITABLE_FIELDS"
+        )
+        return out
+
+    # Encode the user value to a raw register write. For kind='bits' the
+    # encoder returns 0/1 (or a small int for slices) and the real wire
+    # value is computed by merge_bit() once we've read the current u16.
+    try:
+        encoded = encode_value(field_meta, new_value)
+    except CfgEncodeError as exc:
+        out["status"] = "encode_failed"
+        out["error"] = str(exc)
+        return out
+    out["value_requested"] = int(encoded)
+
+    with lock:
+        # Re-check firmware-flash AFTER lock acquisition. The endpoint's
+        # pre-lock check is for early refusal; this second check closes
+        # the TOCTOU window where a flash could start between the
+        # endpoint check and us holding the lock.
+        if is_flash_active is not None:
+            try:
+                if is_flash_active():
+                    out["status"] = "firmware_flash_in_progress"
+                    out["error"] = (
+                        "firmware flash started during write window — "
+                        "refused at lock acquisition")
+                    return out
+            except Exception as exc:
+                # Fail-open: a broken probe must not silently disable
+                # legitimate writes. Surface the probe error in the
+                # status but do not stop the write.
+                out["flash_probe_error"] = str(exc)
+
+        # PREFLIGHT — sentinel must be 0x1F1F before any write attempt.
+        try:
+            sentinel_regs = _do_read_block(client, int(slave), VALID_CFG_OFFSET, 1)
+        except CalibIoError as exc:
+            out["status"] = "preflight_read_failed"
+            out["error"] = str(exc)
+            return out
+        sentinel = int(sentinel_regs[0])
+        out["sentinel_before"] = sentinel
+        if sentinel != VALID_CFG_CODE_EXPECTED:
+            out["status"] = "preflight_failed"
+            out["error"] = (
+                f"ValidCfgCode = 0x{sentinel:04X}, expected "
+                f"0x{VALID_CFG_CODE_EXPECTED:04X}; refusing write"
+            )
+            return out
+
+        # Read the CURRENT target register so we have value_before for
+        # audit AND so the bits read-modify-write has the surrounding
+        # bit fields to preserve.
+        try:
+            cur_reg = int(_do_read_block(client, int(slave), offset, 1)[0])
+        except CalibIoError as exc:
+            out["status"] = "preflight_read_failed"
+            out["error"] = str(exc)
+            return out
+        out["value_before_raw"] = cur_reg
+
+        if kind == "bits":
+            try:
+                final_u16 = merge_bit(
+                    cur_reg, str(field_meta.get("bits") or ""), int(encoded)
+                )
+            except CfgEncodeError as exc:
+                out["status"] = "encode_failed"
+                out["error"] = str(exc)
+                return out
+        else:
+            final_u16 = int(encoded) & 0xFFFF
+        out["raw_to_write"] = final_u16
+
+        # No-op write detection — if the requested final u16 already matches
+        # the current register, skip the unlock+write entirely. Safer (no
+        # bus traffic) and surfaces a clear status to the UI.
+        if final_u16 == cur_reg:
+            out["ok"] = True
+            out["status"] = "no_change"
+            out["value_after_raw"] = cur_reg
+            out["sentinel_after"] = sentinel
+            out["verify_ok"] = True
+            return out
+
+        # UNLOCK — same magic as the calibration window. Hardware-soak
+        # for the broader L2 offsets is the gate before production use.
+        try:
+            _do_unlock(client, int(slave))
+        except CalibIoError as exc:
+            out["status"] = "unlock_failed"
+            out["error"] = str(exc)
+            return out
+
+        # WRITE — single-register FC16. Multi-field write-all is sequenced
+        # by the caller (one lock acquisition per field; one unlock per
+        # write — same shape as write_one_with_lock).
+        try:
+            _do_write_one(client, int(slave), offset, final_u16)
+        except CalibIoError as exc:
+            out["status"] = "write_failed"
+            out["error"] = str(exc)
+            return out
+
+        # VERIFY — sleep then re-read sentinel + target together.
+        time.sleep(max(0.0, float(verify_delay_s)))
+        try:
+            post_target = int(_do_read_block(client, int(slave), offset, 1)[0])
+            post_sentinel = int(_do_read_block(
+                client, int(slave), VALID_CFG_OFFSET, 1)[0])
+        except CalibIoError as exc:
+            out["status"] = "verify_read_failed"
+            out["error"] = str(exc)
+            return out
+        out["value_after_raw"] = post_target
+        out["sentinel_after"] = post_sentinel
+
+        if post_sentinel != VALID_CFG_CODE_EXPECTED:
+            out["status"] = "sentinel_clobbered"
+            out["error"] = (
+                f"ValidCfgCode changed from 0x{sentinel:04X} to "
+                f"0x{post_sentinel:04X}; calibration block may revert on "
+                f"next boot — investigate immediately"
+            )
+            return out
+
+        if post_target == final_u16:
+            out["ok"] = True
+            out["status"] = "success"
+            out["verify_ok"] = True
+        else:
+            # No tolerance band here — config-block fields are integer
+            # settings (Modbus#, country code, Hz envelope), not quantized
+            # scale factors. A mismatch is a real failure.
+            out["status"] = "verify_failed"
+            out["error"] = (
+                f"readback 0x{post_target:04X} differs from requested "
+                f"0x{final_u16:04X}"
+            )
+        return out

@@ -101,7 +101,15 @@ def _read_live_for_calibration_sync(client, lock, slave: int) -> dict:
             # we display the raw inverter value here so the operator sees
             # the same number the display shows during calibration.
             out["vdc_v"]  = g(8)
-            out["idc_a"]  = g(9)
+            # Idc (addr 9) and Pac (addr 18) are SIGNED int16 per the
+            # INGECON Modbus reference (Reg 30010 Idc — signed, 1 A/LSB;
+            # Reg 30019 Pac — signed, tens of W). At idle the Ipv sensor
+            # zero-offset reads slightly negative (e.g. -18 A → 0xFFEE),
+            # which displayed as 65518 A in the Utility Tool when this
+            # path used u16. Fixed 2026-05-21.
+            idc_raw = g(9)
+            if idc_raw is not None:
+                out["idc_a"] = idc_raw - 0x10000 if idc_raw & 0x8000 else idc_raw
             out["vac1_v"] = g(10)
             out["vac2_v"] = g(11)
             out["vac3_v"] = g(12)
@@ -110,6 +118,8 @@ def _read_live_for_calibration_sync(client, lock, slave: int) -> dict:
             out["iac3_a"] = g(15)
             pac_raw = g(18)
             if pac_raw is not None:
+                if pac_raw & 0x8000:
+                    pac_raw -= 0x10000
                 # raw × 10 = real W (PDF page 7, "30019 PAC in tens of Watt")
                 out["pac_w"] = pac_raw * 10
         if r2 is not None and not r2.isError() and hasattr(r2, "registers"):

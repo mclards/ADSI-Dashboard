@@ -143,8 +143,8 @@
           <span class="nav-icon"><span class="mdi mdi-heart-pulse"></span></span><span>ASSET HEALTH</span>
         </button>
         <!-- v2.11.x — FIELD CALIB nav entry removed from the dashboard: field
-             calibration is now the standalone "Inverter Calibration Tool"
-             (Settings → Field Calibrator / Calibrator Desktop Shortcut). The
+             calibration is now the standalone "ADSI Utility Tool"
+             (Settings → Utility Tool / Utility Tool Shortcut). The
              #page-field-calibration markup + fcal JS are intentionally kept
              because the standalone tool reuses this exact page via the
              ?calibrator=1 boot hook. Do not delete the page itself. -->
@@ -154,7 +154,7 @@
         <section id="aboutSection" class="side-about-card" aria-label="About">
           <div class="side-about-title"><span class="mdi mdi-information-outline" aria-hidden="true"></span><span>ABOUT</span></div>
           <div class="side-about-info">
-            <div class="side-about-appname"><b>ADSI Inverter Dashboard</b> <span class="side-about-ver">v2.11.0-beta.9</span></div>
+            <div class="side-about-appname"><b>ADSI Inverter Dashboard</b> <span class="side-about-ver">v2.11.0</span></div>
             <div class="side-about-desc">Operational monitoring, performance review, forecast support, and gateway-linked remote viewing for the plant.</div>
             <a
               class="side-about-link"
@@ -1204,12 +1204,65 @@
           </div>
 
           <!-- Tab navigation removed — Fleet Anomalies moved to the dashboard
-               PARAMETERS page (v2.11.x). The standalone Inverter Calibration
-               Tool is per-node only, so the lone "Per-Node Readout" tab was
+               PARAMETERS page (v2.11.x). The standalone Utility Tool
+               is per-node only, so the lone "Per-Node Readout" tab was
                dropped. #fcalPanelSingle stays visible because
                initCardTabs/setActiveCardTab drives panel visibility off
                .card-tab-panel (defaultKey "single"), independent of any
                .card-tab buttons existing. -->
+
+          <!-- ── Utility Tool view tabs ──────────────────────────────────
+               Additive: "Calibration" is the existing scale-factor UI
+               (unchanged). The other tabs are decoded views of the
+               inverter's L2 config block (groups B/C/D/I from the
+               2026-05-19 audit). When a settings tab is active the
+               calibration .fcal-header + #fcalPanelSingle are CSS-hidden
+               (no DOM reparented, no calibration JS touched) and
+               #fcalSettingsView is shown. -->
+          <div class="fcal-view-tabs" id="fcalViewTabs" role="tablist"
+               aria-label="Utility Tool views">
+            <button class="fcal-view-tab fcal-view-tab-active" type="button"
+                    data-fcal-view="calibration" role="tab" aria-selected="true"
+                    title="Inverter scale-factor calibration (read / write / consign).">Calibration</button>
+            <button class="fcal-view-tab" type="button" data-fcal-view="B"
+                    role="tab" aria-selected="false"
+                    title="Read-only: node addressing (CAN / Modbus) and startup thresholds.">Node &amp; Startup</button>
+            <button class="fcal-view-tab" type="button" data-fcal-view="C"
+                    role="tab" aria-selected="false"
+                    title="Read-only: AC voltage / frequency protection envelope.">Grid Protection</button>
+            <button class="fcal-view-tab" type="button" data-fcal-view="D"
+                    role="tab" aria-selected="false"
+                    title="Read-only: nominal / limit power and reactive curve.">Power &amp; Reactive</button>
+            <button class="fcal-view-tab" type="button" data-fcal-view="I"
+                    role="tab" aria-selected="false"
+                    title="Read-only: isolation thresholds and temperature derating.">Isolation &amp; Temp</button>
+          </div>
+          <div id="fcalSettingsView" class="fcal-settings-view" hidden
+               role="region" aria-label="Inverter settings (read-only)">
+            <!-- Pinned subheader: Write-all button + group title + gate
+                 banner stay put across scroll. ONLY the table host below
+                 actually scrolls. The whole settings view is already a
+                 scroll container; we add this inner sticky wrapper so the
+                 row+title+banner ride together at the top of every tab. -->
+            <div class="fcal-settings-pinned">
+              <div class="srn-controls fcal-settings-controls">
+                <!-- No per-tab Read button: the pinned-header Read serves
+                     every tab. When a settings tab is active the main Read
+                     loads the full config block; on the Calibration tab it
+                     loads the scale-factor block. -->
+                <button id="btnFcalConfigWriteAll" class="btn btn-danger" type="button"
+                        title="Write every row whose New value column is non-empty. Requires sacupsMM authorization (one prompt per page visit).">
+                  <span class="mdi mdi-content-save-all-outline icon-inline" aria-hidden="true"></span>
+                  <span>Write all changed</span>
+                </button>
+                <span class="smsg" id="fcalSettingsMsg"></span>
+              </div>
+              <div id="fcalSettingsPinnedHeader" class="fcal-settings-pinned-header"></div>
+            </div>
+            <div id="fcalSettingsResult" class="srn-table-host">
+              <div class="srn-empty">Pick an inverter + node, then click <strong>Read</strong> in the header above.</div>
+            </div>
+          </div>
 
           <!-- ── PINNED HEADER — always visible above the scrolling table ── -->
           <!-- This block lives OUTSIDE the scroll viewport so it never moves.
@@ -1426,14 +1479,14 @@
               </div>
             </div>
 
-            <!-- ── Firmware Upgrade (EXPERIMENTAL) ───────────────────────
+            <!-- ── Firmware Upgrade ──────────────────────────────────────
                  Standalone Inverter Calibration Tool ONLY (.calibrator-mode
                  via CSS). Irreversible per-node DSP flash. Dry-Run is the
                  default and MUST pass before the live path can be armed; the
                  live button stays disabled until a dry-run of the SELECTED
                  file succeeds, the operator ticks the irreversible
-                 acknowledgement, types the exact confirmation phrase, and
-                 supplies the topology auth key. All real safety gates are
+                 acknowledgement, and supplies the authorization key. All
+                 real safety gates are
                  enforced server-side in firmware_transport.flash_inverter_node. -->
             <div class="fcal-fw-modal" id="fcalFirmwarePanel" role="dialog"
                  aria-modal="true" aria-label="Firmware upgrade (experimental)" hidden>
@@ -1443,7 +1496,6 @@
                 <div class="fcal-fw-title">
                   <span class="mdi mdi-memory icon-inline" aria-hidden="true"></span>
                   Firmware Upgrade
-                  <span class="fcal-fw-badge">EXPERIMENTAL · IRREVERSIBLE</span>
                 </div>
                 <button id="btnFwClose" class="btn btn-outline" type="button"
                         data-fw-close aria-label="Close firmware upgrade"
@@ -1454,18 +1506,24 @@
               </div>
 
               <div id="fcalFwBody" class="fcal-fw-body">
-                <p class="fcal-fw-warn">
-                  Flashing rewrites the inverter DSP program. It is
-                  <strong>irreversible</strong> and a wrong or interrupted
-                  image can brick the unit. Always run <strong>Dry-Run</strong>
-                  first — it simulates the entire flash with zero hardware
-                  contact. Live flash is gated server-side and uses
-                  whichever transport is connected — Ethernet (via the
-                  gateway) or RS485-USB (the most-direct path to the
-                  node). For a serial flash the tool takes exclusive
-                  ownership of the COM port for the duration; reconnect
-                  the transport afterwards.
+                <p class="fcal-fw-warn"
+                   title="Flashing rewrites the inverter DSP and is irreversible. A wrong or interrupted image can brick the unit. Dry-Run is hardware-free and proves the image and frame plan are valid; it does NOT prove the bus is clear. The live flash uses whichever transport is connected (Ethernet via the gateway, or RS485-USB direct to the node).">
+                  <span class="mdi mdi-alert-outline icon-inline" aria-hidden="true"></span>
+                  <span><strong>Irreversible.</strong> A wrong or interrupted image can brick the unit. Run <strong>Dry-Run</strong> first to validate the image — it is hardware-free and does not prove the bus is clear.</span>
                 </p>
+
+                <div class="fcal-fw-checklist" aria-label="Pre-flight checklist">
+                  <div class="fcal-fw-checklist-title">
+                    <span class="mdi mdi-clipboard-check-outline icon-inline" aria-hidden="true"></span>
+                    Before you flash
+                  </div>
+                  <ol class="fcal-fw-checklist-list">
+                    <li><strong>STOP the inverter</strong> — it must NOT be running or grid-connected. The DSP refuses firmware-load mode while the unit is online.</li>
+                    <li><strong>Clear the bus on every PC, not just this one.</strong> Close ISM, any SCADA/DAS, and every other dashboard or poller — including instances on <em>other PCs</em> on the LAN. The built-in lock only suppresses pollers on this PC.</li>
+                    <li><strong>Disable the whole inverter IP</strong> on those other dashboards, not a single node. Every node behind one gateway shares one RS-485 bus, so polling any node on the same IP keeps the bus busy.</li>
+                    <li>Verify with <strong>Read Identity</strong> that the node, serial, and current firmware match the unit you intend to flash.</li>
+                  </ol>
+                </div>
 
                 <div class="fcal-fw-row">
                   <label class="invclock-label" for="fwFilePath">Firmware file</label>
@@ -1517,8 +1575,8 @@
                       <span class="fcal-force-toggle-label">Legacy 0x50</span>
                     </label>
                     <label class="fcal-force-toggle" for="fwAllowDowngrade"
-                           title="Permit flashing an image that appears OLDER than what the unit reports. Off by default — the server blocks apparent downgrades.">
-                      <input type="checkbox" id="fwAllowDowngrade" />
+                           title="Permit flashing an image that appears OLDER than what the unit reports. On by default for operator convenience; uncheck to make the server block apparent downgrades.">
+                      <input type="checkbox" id="fwAllowDowngrade" checked />
                       <span class="fcal-force-toggle-label">Allow downgrade</span>
                     </label>
                   </div>
@@ -1548,20 +1606,13 @@
                     <span class="invclock-check-label">I understand this is irreversible and can brick the inverter.</span>
                   </label>
                   <div class="fcal-fw-row">
-                    <label class="invclock-label" for="fwConfirmText">Type to confirm</label>
-                    <input id="fwConfirmText" class="inp invclock-input" type="text"
-                           autocomplete="off" spellcheck="false" style="min-width: 170px;"
-                           placeholder="FLASH <node>"
-                           title="Type FLASH followed by the exact target node number, e.g. FLASH 23." />
-                  </div>
-                  <div class="fcal-fw-row">
                     <label class="invclock-label" for="fwAuthKey">Authorization</label>
                     <input id="fwAuthKey" class="inp invclock-input" type="password"
                            autocomplete="off" spellcheck="false" style="min-width: 140px;"
-                           placeholder="topology key"
-                           title="Topology authorization key (adsiMM). Required only for the live flash." />
+                           placeholder="authorization key"
+                           title="Authorization key — required only for the live flash." />
                     <button id="btnFwFlash" class="btn btn-danger" type="button" disabled
-                            title="Start the IRREVERSIBLE live flash. Stays disabled until the dry-run passed, the box is ticked, the confirmation phrase matches, and an auth key is present.">
+                            title="Start the IRREVERSIBLE live flash. Stays disabled until the dry-run passed, the box is ticked, and an auth key is present.">
                       <span class="mdi mdi-flash icon-inline" aria-hidden="true"></span>
                       <span>FLASH (live)</span>
                     </button>
@@ -1674,13 +1725,13 @@
                   <span class="mdi mdi-lan-connect" aria-hidden="true"></span>
                   <span>IP Configuration</span>
                 </button>
-                <button id="btnOpenCalibrator" class="btn btn-outline settings-utility-wide" title="Open the isolated Field Calibration tool with COM vs Ethernet transport selector.">
+                <button id="btnOpenCalibrator" class="btn btn-outline settings-utility-wide" title="Open the isolated Utility Tool (calibration + inverter settings viewer) with COM vs Ethernet transport selector.">
                   <span class="mdi mdi-tune-variant" aria-hidden="true"></span>
-                  <span>Field Calibrator</span>
+                  <span>Utility Tool</span>
                 </button>
-                <button id="btnCreateCalibratorShortcut" class="btn btn-outline settings-utility-wide" title="Create a Desktop shortcut that launches the Field Calibrator directly — no dashboard, no login required.">
+                <button id="btnCreateCalibratorShortcut" class="btn btn-outline settings-utility-wide" title="Create a Desktop shortcut that launches the Utility Tool directly — no dashboard, no login required.">
                   <span class="mdi mdi-rocket-launch-outline" aria-hidden="true"></span>
-                  <span>Calibrator Desktop Shortcut</span>
+                  <span>Utility Tool Shortcut</span>
                 </button>
                 <button id="btnResetSettingsDefaults" class="btn btn-red settings-utility-wide" title="Reset all settings to factory defaults. This cannot be undone without a prior export or backup.">
                   <span class="mdi mdi-restore" aria-hidden="true"></span>
@@ -3062,6 +3113,12 @@ Hover any pill in the column for the row-specific explanation.">Anchor</th>
                 <span class="mdi mdi-auto-fix icon-inline" aria-hidden="true"></span>
                 <span class="card-tab-label">Bulk Fix</span>
               </button>
+              <button class="card-tab" type="button" role="tab"
+                      data-card-tab="firmware" aria-controls="snbPanelFirmware" aria-selected="false"
+                      title="Fleet firmware versions — every node should run the same firmware. Drift and intra-inverter splits are flagged.">
+                <span class="mdi mdi-chip icon-inline" aria-hidden="true"></span>
+                <span class="card-tab-label">Firmware Map</span>
+              </button>
             </div>
 
             <!-- Tab panel: per-inverter Read / Edit / Send + audit log -->
@@ -3226,6 +3283,43 @@ Hover any pill in the column for the row-specific explanation.">Anchor</th>
                 </div>
                 <div id="snbMigHistoryHost" class="srn-table-host">
                   <div class="srn-empty">Click <strong>Load migration history</strong> to list every power module that was physically moved between slots (origin slot &rarr; where it was found &rarr; re-serialized), with timestamps and operator.</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Tab panel: Firmware Map (every node should run same firmware) -->
+            <div id="snbPanelFirmware" class="card-tab-panel" data-card-tab-panel="firmware"
+                 role="tabpanel" aria-labelledby="snbPanelFirmware" hidden>
+              <div class="cb-subsection">
+                <div class="cb-sub-title">
+                  <span class="mdi mdi-chip icon-inline" aria-hidden="true"></span>
+                  Firmware Map
+                </div>
+                <div class="srn-controls">
+                  <button id="btnFwmScan" class="btn btn-accent" type="button"
+                          title="Read every (inverter, slave) via FC11 and compare firmware versions. Reuses the serial scan — no extra Modbus traffic. Bulk-auth required.">
+                    <span class="mdi mdi-radar icon-inline" aria-hidden="true"></span>
+                    <span>Scan firmware</span>
+                  </button>
+                  <label class="invclock-check" for="fwmBypassCache"
+                         title="When checked, ignores the 5-minute cache and re-reads every inverter from the wire.">
+                    <input type="checkbox" id="fwmBypassCache" />
+                    <span class="invclock-check-label">Bypass 5-min cache</span>
+                  </label>
+                  <button id="btnFwmLoadState" class="btn btn-outline" type="button"
+                          title="Show the last persisted firmware snapshot without any new reads (works in remote mode).">
+                    <span class="mdi mdi-cached icon-inline" aria-hidden="true"></span>
+                    <span>Show last snapshot</span>
+                  </button>
+                  <button id="btnFwmDriftLog" class="btn btn-outline" type="button"
+                          title="Chronological trail of every firmware version change detected between scans (works in remote mode).">
+                    <span class="mdi mdi-history icon-inline" aria-hidden="true"></span>
+                    <span>Drift log</span>
+                  </button>
+                  <span class="smsg" id="fwmMsg"></span>
+                </div>
+                <div id="fwmTableHost" class="srn-table-host">
+                  <div class="srn-empty">Click <strong>Scan firmware</strong> to read every node, or <strong>Show last snapshot</strong> for the gateway's last collected map. Every node should run the <strong>same</strong> firmware — drift and intra-inverter splits are flagged.</div>
                 </div>
               </div>
             </div>

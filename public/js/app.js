@@ -4421,7 +4421,7 @@ async function createCalibratorDesktopShortcut() {
     showMsg("settingsMsg", "Desktop shortcut is only available in the installed app.", "error");
     return;
   }
-  showMsg("settingsMsg", "Creating Calibrator Desktop shortcut…", "");
+  showMsg("settingsMsg", "Creating Utility Tool Desktop shortcut…", "");
   try {
     const res = await window.electronAPI.createCalibratorShortcut();
     if (res && res.ok) {
@@ -13299,6 +13299,38 @@ async function authorizeBulkCommand(action, scopeLabel, totalTargets) {
   };
 }
 
+// ── Serial Number Setting — one auth prompt per ~hour ────────────────────
+//
+// Operator pain point (2026-05-19): every Read / Send / Scan / Bulk button
+// in the Serial Number Setting section re-prompted for the bulk key. The
+// server already issues a 60-minute ROLLING bulk-auth session token
+// (BULK_AUTH_SESSION_TTL_MS in server/bulkControlAuth.js) and
+// `_requireBulkAuth` accepts it — the client was simply discarding it and
+// re-prompting. This caches the issued token for the section and reuses it
+// until ~expiry, so the operator types `sacupsMM` once and every action in
+// the section runs auth-free for the hour. Re-prompts only when the token
+// is missing/near-expiry or after a 401 invalidation. Destructive
+// plant-wide flows (MW-cap, clock-sync) intentionally keep their own
+// per-action prompt — this cache is scoped to the serial/firmware section.
+let _serialBulkAuthCache = null;            // { authKey, authToken, expiresAt }
+const _SERIAL_AUTH_EXPIRY_MARGIN_MS = 30_000;
+
+function _invalidateSerialSectionAuth() { _serialBulkAuthCache = null; }
+
+async function authorizeSerialSection(action, scopeLabel, totalTargets) {
+  const now = Date.now();
+  if (
+    _serialBulkAuthCache &&
+    _serialBulkAuthCache.authToken &&
+    Number(_serialBulkAuthCache.expiresAt) - now > _SERIAL_AUTH_EXPIRY_MARGIN_MS
+  ) {
+    return _serialBulkAuthCache;
+  }
+  const auth = await authorizeBulkCommand(action, scopeLabel, totalTargets);
+  if (auth && auth.authToken) _serialBulkAuthCache = auth;
+  return auth;
+}
+
 function buildPlantCapRequestBody(context = "live") {
   const values = readPlantCapRequestValues(context);
   if (values.upperMw == null) {
@@ -15944,36 +15976,14 @@ function handleClockSyncCompleted(msg) {
 }
 
 // ─── Alarm push handling ──────────────────────────────────────────────────────
-// T5.6 fix (Phase 3, 2026-04-14): dedup pushes by (inv,unit,alarm_id) over a
-// short window so rapid raise→clear→raise cycles from the gateway WS don't
-// stack identical toasts.  Previous dedup used only (inv,unit) so a clear-
-// then-raise of the same fault produced two toasts in the same second; now
-// the alarm_id (monotonic per episode) participates in the key.
-const _ALARM_TOAST_DEDUP_WINDOW_MS = 1500;
-const _alarmToastDedup = new Map(); // key -> last-seen ts
-function _alarmToastDedupKey(a) {
-  return `${Number(a.inverter) || 0}_${Number(a.unit) || 0}_${Number(a.id) || 0}`;
-}
-function _shouldEmitAlarmToast(a) {
-  const key = _alarmToastDedupKey(a);
-  const now = Date.now();
-  const last = _alarmToastDedup.get(key);
-  if (last && now - last < _ALARM_TOAST_DEDUP_WINDOW_MS) return false;
-  _alarmToastDedup.set(key, now);
-  // Bound the map: drop entries older than 10x window.
-  if (_alarmToastDedup.size > 256) {
-    const cutoff = now - _ALARM_TOAST_DEDUP_WINDOW_MS * 10;
-    for (const [k, ts] of _alarmToastDedup) {
-      if (ts < cutoff) _alarmToastDedup.delete(k);
-    }
-  }
-  return true;
-}
-
+// Transient alarm pop-up toasts were removed (operator request, 2026-05-21) —
+// they overlapped the bottom-right inverter cards. Alarm visibility now lives
+// entirely in the persistent summary pill (driven by `_syncNotifHub` from
+// `refreshAlarmBadge`/`refreshNotifPanel`), the sidebar ALARMS badge, and the
+// right-side notification panel.
 function handleAlarmPush(alarms) {
   if (!alarms.length) return;
 
-  // Toast per alarm
   alarms.forEach((a) => {
     if (!isConfiguredNodeClient(a.inverter, a.unit)) return;
     const key = alarmKey(a.inverter, a.unit);
@@ -15987,16 +15997,6 @@ function handleAlarmPush(alarms) {
       ts: Number(a.ts || Date.now()),
       alarm_hex: toAlarmHex(a.alarm_value),
     };
-
-    if (!_shouldEmitAlarmToast(a)) return;
-
-    const invLabel = getInverterNodeDisplayLabel(a.inverter, a.unit, {
-      includeIp: true,
-    });
-    const hex = toAlarmHex(a.alarm_value);
-    const desc =
-      (a.decoded || []).map((b) => b.label).join(", ") || "Alarm triggered";
-    showAlarmToast(a, invLabel, hex, desc);
   });
 
   syncAlarmSoundPlayback();
@@ -16093,8 +16093,8 @@ function _renderToastSummary() {
       : `${count} active alarm notifications — click to view`);
 }
 
-// Called by showToast / showAlarmToast after appending a transient item. The
-// pill is active-alarm driven, so this just keeps it in sync after DOM churn.
+// Called by showToast after appending a transient item. The pill is
+// active-alarm driven, so this just keeps it in sync after DOM churn.
 function _notifyToastAppended() {
   _renderToastSummary();
 }
@@ -16142,45 +16142,6 @@ function showToast(html, severity = "fault", ttlMs = 8000) {
     },
     Math.max(800, Number(ttlMs) || 8000),
   );
-}
-// Alarm-specific toast — same layout as showToast but with an inline ACK button
-// so operators can acknowledge without navigating to the Alarms page.
-function showAlarmToast(alarm, invLabel, hex, desc) {
-  const toast = $("alarmToast");
-  if (!toast) return;
-
-  const maxStack = 3;
-  _evictOldestToastItem(toast, maxStack);
-
-  const sev = alarm.severity || "fault";
-  const alarmId = Number(alarm.id || 0);
-  const sevLabel = {
-    success: "🟢 SUCCESS",
-    critical: "🔴 CRITICAL",
-    fault: "🟠 FAULT",
-    warning: "🟡 WARNING",
-    info: "🔵 INFO",
-  }[sev] || "ALARM";
-
-  const item = el("div", `toast-item sev-${sev}`);
-  item.innerHTML = `
-    <div class="toast-hdr">
-      <span class="toast-title">${sevLabel}</span>
-      <div class="toast-hdr-actions">
-        ${alarmId ? `<button class="toast-ack-btn" data-alarm-id="${alarmId}" aria-label="Acknowledge alarm">ACK</button>` : ""}
-        <button class="toast-close" aria-label="Dismiss">✕</button>
-      </div>
-    </div>
-    <div class="toast-body">${invLabel} — <b>${hex}</b><br><small>${desc}</small></div>
-    <div class="toast-time">${fmtDateTime(Date.now())}</div>`;
-
-  toast.appendChild(item);
-  _notifyToastAppended();
-  // Slightly longer TTL so operator has time to ACK before it disappears.
-  setTimeout(() => {
-    if (item.parentNode) item.remove();
-    _renderToastSummary();
-  }, 12000);
 }
 
 async function refreshAlarmBadge() {
@@ -24248,6 +24209,14 @@ function initSerialNumberSection() {
   const migExpBtn = document.getElementById("btnSnbMigExport");
   if (migExpBtn) migExpBtn.addEventListener("click", _snbHandleMigExport);
 
+  // Firmware Map handlers (Scan firmware / Show last snapshot / Drift log)
+  const fwmScanBtn = document.getElementById("btnFwmScan");
+  const fwmStateBtn = document.getElementById("btnFwmLoadState");
+  const fwmDriftBtn = document.getElementById("btnFwmDriftLog");
+  if (fwmScanBtn) fwmScanBtn.addEventListener("click", _fwmHandleScan);
+  if (fwmStateBtn) fwmStateBtn.addEventListener("click", _fwmHandleLoadState);
+  if (fwmDriftBtn) fwmDriftBtn.addEventListener("click", _fwmHandleDriftLog);
+
   if (invPicker.options.length > 0) {
     SerialNumberUI.inverter = Number(invPicker.options[0].value) || null;
     invPicker.value = invPicker.options[0].value;
@@ -24337,8 +24306,11 @@ function _snbApplyRemoteUiState() {
   // btnSnbFleetLoadCache is intentionally NOT in this list — it just reads
   // the cached map snapshot (no Modbus), so it stays enabled in remote
   // mode. btnSnbFleetScan IS Modbus-driven so it's disabled.
+  // btnFwmLoadState / btnFwmDriftLog are intentionally NOT listed — they
+  // read replicated tables (no Modbus) and stay enabled in remote mode.
+  // btnFwmScan IS Modbus-driven so it's disabled, like btnSnbFleetScan.
   const buttons = ["btnSnbRead", "btnSnbSend", "btnSnbFleetScan",
-                   "btnSnbBulkScan", "btnSnbBulkApply"];
+                   "btnSnbBulkScan", "btnSnbBulkApply", "btnFwmScan"];
   for (const id of buttons) {
     const btn = document.getElementById(id);
     if (!btn) continue;
@@ -24446,7 +24418,7 @@ async function _snbHandleRead() {
   if (slave === "all" || SerialNumberUI.isAll) {
     let auth;
     try {
-      auth = await authorizeBulkCommand("READ ALL NODES", `inverter ${inv}`, 1);
+      auth = await authorizeSerialSection("READ ALL NODES", `inverter ${inv}`, 1);
     } catch (err) {
       if (msgEl) { msgEl.textContent = `Auth failed: ${err.message}`; msgEl.className = "smsg error"; }
       return;
@@ -24462,6 +24434,7 @@ async function _snbHandleRead() {
       });
       const body = await r.json().catch(() => ({}));
       if (!r.ok || !body?.ok) {
+        if (r.status === 401) _invalidateSerialSectionAuth();
         const m = body?.error || `HTTP ${r.status}`;
         if (msgEl) { msgEl.textContent = `Read-all failed: ${m}`; msgEl.className = "smsg error"; }
         return;
@@ -24481,7 +24454,7 @@ async function _snbHandleRead() {
   }
   let auth;
   try {
-    auth = await authorizeBulkCommand("READ SERIAL", `inverter ${inv} slave ${slave}`, 1);
+    auth = await authorizeSerialSection("READ SERIAL", `inverter ${inv} slave ${slave}`, 1);
   } catch (err) {
     if (msgEl) { msgEl.textContent = `Auth failed: ${err.message}`; msgEl.className = "smsg error"; }
     return;
@@ -24499,6 +24472,7 @@ async function _snbHandleRead() {
     });
     const body = await r.json().catch(() => ({}));
     if (!r.ok || !body?.ok) {
+      if (r.status === 401) _invalidateSerialSectionAuth();
       const msg = body?.error || `HTTP ${r.status}`;
       if (msgEl) { msgEl.textContent = `Read failed: ${msg}`; msgEl.className = "smsg error"; }
       return;
@@ -24673,7 +24647,7 @@ async function _snbHandleRowSend(ev) {
 
   let auth;
   try {
-    auth = await authorizeBulkCommand("SEND SERIAL", `inverter ${inv} slave ${slave}`, 1);
+    auth = await authorizeSerialSection("SEND SERIAL", `inverter ${inv} slave ${slave}`, 1);
   } catch (err) {
     if (msgEl) { msgEl.textContent = `Auth failed: ${err.message}`; msgEl.className = "smsg error"; }
     return;
@@ -24711,6 +24685,7 @@ async function _snbHandleRowSend(ev) {
       return;
     }
     if (!r.ok || !respBody?.ok) {
+      if (r.status === 401) _invalidateSerialSectionAuth();
       if (msgEl) {
         msgEl.textContent = `Send failed: ${respBody?.error || "HTTP " + r.status}`
           + (respBody?.readback ? ` (readback: ${respBody.readback})` : "");
@@ -24801,7 +24776,7 @@ async function _snbHandleSend() {
   }
   let auth;
   try {
-    auth = await authorizeBulkCommand("SEND SERIAL", `inverter ${inv} slave ${slave}`, 1);
+    auth = await authorizeSerialSection("SEND SERIAL", `inverter ${inv} slave ${slave}`, 1);
   } catch (err) {
     if (msgEl) { msgEl.textContent = `Auth failed: ${err.message}`; msgEl.className = "smsg error"; }
     return;
@@ -24960,7 +24935,7 @@ async function _snbHandleFleetScan() {
   const bypassCache = Boolean(bypassEl?.checked);
   let auth;
   try {
-    auth = await authorizeBulkCommand("SCAN PLANT SERIALS", "all inverters", 0);
+    auth = await authorizeSerialSection("SCAN PLANT SERIALS", "all inverters", 0);
   } catch (err) {
     if (msgEl) { msgEl.textContent = `Auth failed: ${err.message}`; msgEl.className = "smsg error"; }
     return;
@@ -24981,6 +24956,7 @@ async function _snbHandleFleetScan() {
     });
     const body = await r.json().catch(() => ({}));
     if (!r.ok || !body?.ok) {
+      if (r.status === 401) _invalidateSerialSectionAuth();
       const m = body?.error || `HTTP ${r.status}`;
       if (msgEl) { msgEl.textContent = `Scan failed: ${m}`; msgEl.className = "smsg error"; }
       return;
@@ -25153,6 +25129,258 @@ function _snbRenderFleetTable(rows, opts = {}) {
     ${sections.join("")}`;
 }
 
+// ── Firmware Map — every node should run the SAME firmware ───────────────
+//
+// Projection of the serial fleet scan (firmware rides the same FC11
+// payload). Invariant audited: fleet-wide homogeneity. Verdict mapping:
+//   ok   — inverter uniform AND on the fleet-canonical firmware
+//   warn — inverter uniform but OFF canonical (whole-inverter drift) or a
+//          node was unreadable this scan (partial)
+//   bad  — intra-inverter SPLIT (nodes disagree — board-swap signature) or
+//          no node readable
+// Per-inverter ONLY (operator clarification 2026-05-19): an inverter's
+// nodes are judged against EACH OTHER, never against other inverters /
+// a plant-wide firmware. Compute the inverter-local majority tuple; a
+// node is "different" only when it disagrees with the OTHER nodes on the
+// SAME inverter. No plant/fleet canonical anywhere in this view.
+function _fwmInvAnalysis(inv) {
+  const nodes = Array.isArray(inv && inv.nodes) ? inv.nodes : [];
+  const readable = nodes.filter((n) => n && n.status !== "unknown");
+  const counts = {};
+  for (const n of readable) counts[n.tuple] = (counts[n.tuple] || 0) + 1;
+  let majority = null;
+  let best = -1;
+  for (const t of Object.keys(counts).sort()) {
+    if (counts[t] > best) { majority = t; best = counts[t]; }
+  }
+  const distinct = Object.keys(counts).length;
+  const anyUnread = readable.length < nodes.length;
+  let pill;
+  if (readable.length === 0) pill = { cls: "bad", text: "no read" };
+  else if (distinct > 1) pill = { cls: "bad", text: "mixed nodes" };
+  else if (anyUnread) pill = { cls: "warn", text: "partial read" };
+  else pill = { cls: "ok", text: "all same" };
+  return {
+    pill,
+    mixed: distinct > 1,
+    noRead: readable.length === 0,
+    // a readable node is "different" only if it disagrees with the
+    // majority of the OTHER nodes on this same inverter
+    isDifferent: (n) => readable.length > 1 && distinct > 1 && n.tuple !== majority,
+  };
+}
+
+function _fwmRenderClassified(classified, opts = {}) {
+  const host = document.getElementById("fwmTableHost");
+  if (!host) return;
+  const perInv = Array.isArray(classified?.perInverter) ? classified.perInverter : [];
+  if (perInv.length === 0) {
+    host.innerHTML = `<div class="srn-empty">No firmware rows.</div>`;
+    return;
+  }
+  const colgroup = `<colgroup>
+    <col style="width: 70px;">
+    <col style="width: 150px;">
+    <col style="width: 130px;">
+    <col style="width: 130px;">
+    <col>
+  </colgroup>`;
+  // Sort blocks by inverter NUMBER (then nodes by slave below) — operator
+  // request 2026-05-19. inverter_id is the canonical number; fall back to
+  // the trailing digits of the name/ip so a 0-id (calibrator) or odd row
+  // still orders sensibly instead of jumping to the top.
+  const _invNo = (x) => {
+    const id = Number(x && x.inverter_id);
+    if (Number.isFinite(id) && id > 0) return id;
+    const m = String((x && (x.inverter_name || x.inverter_ip)) || "").match(/(\d+)\s*$/);
+    return m ? Number(m[1]) : Number.MAX_SAFE_INTEGER;
+  };
+  let mixedInverters = 0;
+  let noReadInverters = 0;
+  const sections = perInv.slice()
+    .sort((a, b) => _invNo(a) - _invNo(b))
+    .map((inv) => {
+    const an = _fwmInvAnalysis(inv);
+    if (an.mixed) mixedInverters += 1;
+    if (an.noRead) noReadInverters += 1;
+    const pill = an.pill;
+    const rows = (inv.nodes || []).slice()
+      .sort((a, b) => Number(a.slave) - Number(b.slave))
+      .map((n) => {
+        if (n.status === "unknown") {
+          const errText = String(n.error || "read failed");
+          return `
+            <tr>
+              <td class="srn-cell-slave">${_snbEsc(n.slave)}</td>
+              <td colspan="3" class="srn-quiet" title="${_snbEsc(errText)}">${_snbEsc(errText.slice(0, 80))}</td>
+              <td class="srn-quiet" title="This node did not answer the scan.">not read</td>
+            </tr>`;
+        }
+        const diff = an.isDifferent(n);
+        return `
+          <tr>
+            <td class="srn-cell-slave">${_snbEsc(n.slave)}</td>
+            <td class="srn-mono ${diff ? "srn-active" : ""}">${_snbEsc(n.model_code || "—")}</td>
+            <td class="srn-mono srn-quiet">${_snbEsc(n.firmware_main || "—")}</td>
+            <td class="srn-mono srn-quiet">${_snbEsc(n.firmware_aux || "—")}</td>
+            <td>${diff
+              ? '<span class="srn-active" title="This node runs a different inverter firmware than the other nodes on THIS inverter — the nodes on one inverter should all match.">different</span>'
+              : '<span class="srn-quiet" title="Same inverter firmware as the other nodes on this inverter.">same</span>'}</td>
+          </tr>`;
+      }).join("");
+    return `
+      <div class="srn-fleet-block">
+        <div class="srn-fleet-block-head">
+          <span class="name">${_snbEsc(inv.inverter_name || inv.inverter_ip || "—")}</span>
+          <span class="ip">${_snbEsc(inv.inverter_ip || "")}</span>
+          <span class="pill ${pill.cls}">${_snbEsc(pill.text)}</span>
+        </div>
+        <table class="srn-table">
+          ${colgroup}
+          <thead><tr>
+            <th class="srn-cell-slave">Slave</th>
+            <th title="The inverter firmware code (AAV1003xx) — the authoritative version this comparison uses.">Firmware</th>
+            <th class="srn-quiet" title="Unverified auxiliary identifier from the slave-ID payload. ISM does not read it as a firmware version — shown for diagnostics only, NOT compared.">Aux ID 1</th>
+            <th class="srn-quiet" title="Unverified auxiliary identifier from the slave-ID payload. ISM does not read it as a firmware version — shown for diagnostics only, NOT compared.">Aux ID 2</th>
+            <th>Status</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+  });
+  // Summary is purely per-inverter: how many inverters have nodes that
+  // disagree among THEMSELVES. No plant-wide firmware comparison.
+  const s = classified.summary || {};
+  const invCount = perInv.length;
+  const okInverters = invCount - mixedInverters - noReadInverters;
+  const verdict = mixedInverters === 0
+    ? `<span class="pill ok" title="On every inverter, all of its nodes run the same firmware.">all inverters consistent</span>`
+    : `<span class="pill bad" title="These inverters have at least one node whose firmware differs from the other nodes on the same inverter.">${mixedInverters} inverter(s) with mixed nodes</span>`;
+  host.innerHTML = `
+    <div class="srn-fleet-summary">
+      <span><strong>${_snbEsc(opts.label || "Firmware map")}</strong></span>
+      <span>${invCount} inverter(s) · ${s.total_nodes || 0} node(s)${noReadInverters ? ` · ${noReadInverters} unread` : ""}</span>
+      <span class="took">${verdict}</span>
+    </div>
+    ${sections.join("")}`;
+}
+
+async function _fwmHandleScan() {
+  const msgEl = document.getElementById("fwmMsg");
+  const btn = document.getElementById("btnFwmScan");
+  const bypassCache = Boolean(document.getElementById("fwmBypassCache")?.checked);
+  let auth;
+  try {
+    auth = await authorizeSerialSection("SCAN FLEET FIRMWARE", "all inverters", 0);
+  } catch (err) {
+    if (msgEl) { msgEl.textContent = `Auth failed: ${err.message}`; msgEl.className = "smsg error"; }
+    return;
+  }
+  if (!auth) return;
+  if (btn) btn.disabled = true;
+  if (msgEl) { msgEl.textContent = "Scanning fleet firmware…"; msgEl.className = "smsg"; }
+  try {
+    const r = await fetch(`/api/firmware/fleet/scan`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ authToken: auth.authToken, bypass_cache: bypassCache }),
+    });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok || !body?.ok) {
+      if (r.status === 401) _invalidateSerialSectionAuth();
+      const m = body?.error || `HTTP ${r.status}`;
+      if (msgEl) { msgEl.textContent = `Scan failed: ${m}`; msgEl.className = "smsg error"; }
+      return;
+    }
+    _fwmRenderClassified(body, { label: bypassCache ? "Fresh scan" : "Scan (cached where possible)" });
+    if (msgEl) {
+      msgEl.textContent = `Scanned ${body.successful}/${body.total_targets} (${body.failed} failed`
+        + (body.drift_logged ? `, ${body.drift_logged} drift event(s) logged` : "") + ")";
+      msgEl.className = "smsg";
+    }
+  } catch (err) {
+    if (msgEl) { msgEl.textContent = `Scan error: ${err.message}`; msgEl.className = "smsg error"; }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function _fwmHandleLoadState() {
+  const msgEl = document.getElementById("fwmMsg");
+  const btn = document.getElementById("btnFwmLoadState");
+  if (btn) btn.disabled = true;
+  if (msgEl) { msgEl.textContent = "Loading last snapshot…"; msgEl.className = "smsg"; }
+  try {
+    const body = await api(`/api/firmware/state?_t=${Date.now()}`);
+    if (!body?.ok) {
+      if (msgEl) { msgEl.textContent = `Load failed: ${body?.error || "unknown"}`; msgEl.className = "smsg error"; }
+      return;
+    }
+    if (!body.snapshot_rows) {
+      const host = document.getElementById("fwmTableHost");
+      if (host) host.innerHTML = `<div class="srn-empty">No firmware snapshot yet. Click <strong>Scan firmware</strong> on the gateway to populate it.</div>`;
+      if (msgEl) { msgEl.textContent = "Snapshot is empty."; msgEl.className = "smsg"; }
+      return;
+    }
+    _fwmRenderClassified(body, { label: "Last snapshot" });
+    if (msgEl) { msgEl.textContent = `Loaded ${body.snapshot_rows} node(s) from last snapshot.`; msgEl.className = "smsg"; }
+  } catch (err) {
+    if (msgEl) { msgEl.textContent = `Load failed: ${err.message}`; msgEl.className = "smsg error"; }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function _fwmHandleDriftLog() {
+  const msgEl = document.getElementById("fwmMsg");
+  const host = document.getElementById("fwmTableHost");
+  const btn = document.getElementById("btnFwmDriftLog");
+  if (btn) btn.disabled = true;
+  if (msgEl) { msgEl.textContent = "Loading drift log…"; msgEl.className = "smsg"; }
+  try {
+    const body = await api(`/api/firmware/drift-log?limit=200&_t=${Date.now()}`);
+    const rows = Array.isArray(body?.rows) ? body.rows : [];
+    if (rows.length === 0) {
+      if (host) host.innerHTML = `<div class="srn-empty">No firmware drift detected. Every tracked node has kept the same firmware between scans.</div>`;
+      if (msgEl) { msgEl.textContent = "Drift log is empty (good)."; msgEl.className = "smsg"; }
+      return;
+    }
+    const tbody = rows.map((r) => `
+      <tr>
+        <td class="srn-cell-time">${_snbEsc(fmtDateTime(r.detected_at_ms))}</td>
+        <td>${_snbEsc(r.inverter_ip)}</td>
+        <td class="srn-cell-slave">${_snbEsc(r.slave)}</td>
+        <td class="srn-mono">${_snbEsc(r.old_tuple || "—")}</td>
+        <td class="srn-mono srn-active">${_snbEsc(r.new_tuple || "—")}</td>
+        <td>${_snbEsc(r.scan_by || "—")}</td>
+      </tr>`).join("");
+    if (host) {
+      host.innerHTML = `
+        <div class="srn-fleet-summary">
+          <span><strong>Firmware Drift Log</strong></span>
+          <span>${rows.length} change event(s)</span>
+          <span class="took">newest first</span>
+        </div>
+        <table class="srn-table">
+          <thead><tr>
+            <th class="srn-cell-time">When</th>
+            <th>Inverter IP</th>
+            <th class="srn-cell-slave">Slave</th>
+            <th>Old (model|main|aux)</th>
+            <th>New (model|main|aux)</th>
+            <th>Scan by</th>
+          </tr></thead>
+          <tbody>${tbody}</tbody>
+        </table>`;
+    }
+    if (msgEl) { msgEl.textContent = `Loaded ${rows.length} drift event(s).`; msgEl.className = "smsg"; }
+  } catch (err) {
+    if (msgEl) { msgEl.textContent = `Load failed: ${err.message}`; msgEl.className = "smsg error"; }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 // ── Bulk Fix — diff every node vs the locked factory map, re-write wrong ──
 
 const SnbBulk = { rows: [], fmt: "motorola" };
@@ -25242,7 +25470,7 @@ async function _snbHandleBulkScan() {
   const btn = document.getElementById("btnSnbBulkScan");
   let auth;
   try {
-    auth = await authorizeBulkCommand("SCAN & DIFF SERIALS", "all inverters", 0);
+    auth = await authorizeSerialSection("SCAN & DIFF SERIALS", "all inverters", 0);
   } catch (err) {
     if (msgEl) { msgEl.textContent = `Auth failed: ${err.message}`; msgEl.className = "smsg error"; }
     return;
@@ -25258,6 +25486,7 @@ async function _snbHandleBulkScan() {
     });
     const body = await r.json().catch(() => ({}));
     if (!r.ok || !body?.ok) {
+      if (r.status === 401) _invalidateSerialSectionAuth();
       const hint = _snbBulkStaleServerHint(r, body);
       if (msgEl) {
         msgEl.textContent = hint || `Scan failed: ${body?.error || "HTTP " + r.status}`;
@@ -25462,7 +25691,7 @@ async function _snbHandleBulkApply() {
 
   let auth;
   try {
-    auth = await authorizeBulkCommand("BULK RE-SERIALIZE", `${selected.length} node(s)`, selected.length);
+    auth = await authorizeSerialSection("BULK RE-SERIALIZE", `${selected.length} node(s)`, selected.length);
   } catch (err) {
     if (msgEl) { msgEl.textContent = `Auth failed: ${err.message}`; msgEl.className = "smsg error"; }
     return;
@@ -25484,6 +25713,7 @@ async function _snbHandleBulkApply() {
     });
     const body = await r.json().catch(() => ({}));
     if (!r.ok || !body?.ok) {
+      if (r.status === 401) _invalidateSerialSectionAuth();
       const hint = _snbBulkStaleServerHint(r, body);
       if (msgEl) {
         msgEl.textContent = hint || `Apply failed: ${body?.error || "HTTP " + r.status}`;
@@ -28298,6 +28528,16 @@ const FieldCalibrationUI = {
   mode:        "LOCKED",
   // v2.11.x — prevent double-click on write buttons during fetch
   _writing:    new Set(),
+  // Utility Tool read-only setting views (Phase C). "calibration" = the
+  // existing scale-factor UI (unchanged); "B"|"C"|"D"|"I" = decoded
+  // L2-config groups. `settings` caches the last full-config decode.
+  activeView:  "calibration",
+  settings:    null,
+  fleet:       null,
+  // Static field map (offsets/kinds/groups/labels/units) — fetched once on
+  // page init so each settings tab can render its LAYOUT (skeleton) before
+  // any Modbus Read fires.
+  cfgMap:      null,
 };
 
 function initFieldCalibrationSection() {
@@ -28334,14 +28574,19 @@ function initFieldCalibrationSection() {
     // Ethernet transport targets the selected inverter's IP — keep the
     // displayed/used IP in sync with the picker.
     try { _fcalSyncTransportIp(); } catch (_) {}
+    _fcalInvalidateSettings();
   });
   slavePicker.addEventListener("change", () => {
     FieldCalibrationUI.slave = Number(slavePicker.value) || null;
     _fcalHideResults();
     _fcalStopLiveAutoRefresh();
+    _fcalInvalidateSettings();
   });
 
   readBtn.addEventListener("click", _fcalHandleRead);
+  // Utility Tool read-only view tabs (Phase C) — additive; calibration UI
+  // untouched.
+  _fcalBindViewTabs();
   // Fleet Anomalies scan is no longer part of this tool — it moved to the
   // dashboard PARAMETERS page (wired in _paramWireOnce).
 
@@ -28725,16 +28970,14 @@ function _fwRecomputeArmState() {
     _fwState.argDsp === p.arg_dsp &&
     _fwState.frameLen === p.frame_len &&
     _fwState.legacy50 === p.legacy50;
+  // Arm gate: passing dry-run for THIS exact image/node + the explicit
+  // irreversible checkbox + the authorization key. (The type-to-confirm
+  // phrase was removed 2026-05-19 — redundant friction; the checkbox +
+  // auth + dry-run-match + server-side gates are the real protection.)
   const ack = !!document.getElementById("fwAck")?.checked;
-  const confirmText = String(
-    document.getElementById("fwConfirmText")?.value || "",
-  ).trim().toUpperCase();
-  const wantText = `FLASH ${p.node}`;
   const authKey = String(document.getElementById("fwAuthKey")?.value || "").trim();
   const running = !!_fwState.jobId;
-  btn.disabled = !(
-    sameImage && ack && confirmText === wantText && authKey && !running
-  );
+  btn.disabled = !(sameImage && ack && authKey && !running);
 }
 
 // Open the Electron native file picker and put the chosen ABSOLUTE path
@@ -28789,12 +29032,16 @@ async function _fwReadIdentity() {
   _fcalSetMsg("fwIdentityMsg", "Identity read OK", "ok");
   if (box) {
     box.hidden = false;
+    // The authoritative inverter firmware is the model_code (AAV1003xx) —
+    // verified 2026-05-19 vs ISM's FC11 parser. The AAS firmware_main/aux
+    // are unverified aux IDs (usually blank) — show only if present, as a
+    // de-emphasised diagnostic, so the panel never reads a blank "Firmware:".
+    const aux = [j.firmware_main, j.firmware_aux].filter(Boolean).map(_fcalEsc).join(" / ");
     box.innerHTML =
       `<strong>Node ${node}</strong>\n` +
       `Serial:   ${_fcalEsc(j.serial)} (${_fcalEsc(j.serial_format)})\n` +
-      `Model:    ${_fcalEsc(j.model_code)}\n` +
-      `Firmware: ${_fcalEsc(j.firmware_main)}` +
-      (j.firmware_aux ? ` / ${_fcalEsc(j.firmware_aux)}` : "");
+      `Firmware: ${_fcalEsc(j.model_code) || "—"}` +
+      (aux ? `\nAux ID:   ${aux}` : "");
   }
 }
 
@@ -28920,14 +29167,9 @@ async function _fwStartFlash() {
     _fcalSetMsg("fwFlashMsg", "Re-run the dry-run for this exact file/node first.", "err");
     return;
   }
-  const ok = window.confirm(
-    `IRREVERSIBLE FIRMWARE FLASH\n\n` +
-      `File: ${p.file}\nNode: ${p.node}\nSHA-256: ${_fwState.sha}\n\n` +
-      `This rewrites the inverter DSP program and CANNOT be undone. ` +
-      `A wrong or interrupted image can brick the unit.\n\n` +
-      `Proceed with the LIVE flash?`,
-  );
-  if (!ok) return;
+  // No extra confirm() dialog — arming already requires the irreversible
+  // checkbox + the exact typed phrase + the authorization key, and the
+  // dry-run-match guard above. A browser confirm on top is redundant.
   const btn = document.getElementById("btnFwFlash");
   if (btn) btn.disabled = true;
   _fcalSetMsg("fwFlashMsg", "Arming live flash…", "info");
@@ -29008,7 +29250,7 @@ function _fwPanelInit() {
     .getElementById("fwFilePath")
     ?.addEventListener("input", _fwInvalidateDryRun);
   // Arm-state inputs only recompute the FLASH enable (no dry-run reset).
-  ["fwAck", "fwConfirmText", "fwAuthKey"].forEach((id) => {
+  ["fwAck", "fwAuthKey"].forEach((id) => {
     const el = document.getElementById(id);
     el?.addEventListener("input", _fwRecomputeArmState);
     el?.addEventListener("change", _fwRecomputeArmState);
@@ -29249,6 +29491,14 @@ async function _fcalAuthedFetch(url, _keyElUnused) {
 }
 
 async function _fcalHandleRead() {
+  // Route to the right loader for the active tab. The pinned-header
+  // Read is the SINGLE entry point: Calibration tab reads the
+  // scale-factor block (this function's original behaviour); settings
+  // tabs B/C/D/I read the full L2 config block via _fcalLoadSettings.
+  const view = FieldCalibrationUI.activeView;
+  if (view && view !== "calibration") {
+    return _fcalLoadSettings();
+  }
   const btn = document.getElementById("btnFcalRead");
   const inv = FieldCalibrationUI.inverter;
   const slave = FieldCalibrationUI.slave;
@@ -29309,6 +29559,783 @@ async function _fcalHandleRead() {
     if (btn) btn.disabled = false;
   }
 }
+
+// ─── Utility Tool: read-only L2-config setting views (Phase C) ─────────
+// Additive to the calibration UI. "calibration" view = the existing
+// scale-factor page (untouched). B/C/D/I views call the SAME read-only
+// /api/calibration/full-config/:inv/:slave endpoint the calibration Read
+// already uses (PUBLIC, never prompts) and render the decoded grouped
+// fields. No write path, no calibration JS touched, no DOM reparented.
+
+function _fcalBindViewTabs() {
+  const tabs = document.getElementById("fcalViewTabs");
+  const sec = document.getElementById("fieldCalibrationSection");
+  if (!tabs || !sec) return;
+  sec.setAttribute("data-fcal-view", "calibration");
+  tabs.querySelectorAll(".fcal-view-tab").forEach((btn) => {
+    btn.addEventListener("click", () =>
+      _fcalSwitchView(btn.dataset.fcalView || "calibration"));
+  });
+  // Per-tab Read settings button removed 2026-05-20 — the pinned-header
+  // Read (btnFcalRead, _fcalHandleRead) now serves every tab and routes
+  // to _fcalLoadSettings when a settings tab is active.
+  const wa = document.getElementById("btnFcalConfigWriteAll");
+  if (wa) wa.addEventListener("click", _fcalConfigWriteAll);
+  // Fire-and-forget: load the static field map so each tab renders its
+  // layout immediately (before any Connect/Read). On completion re-render
+  // the active settings view so it picks up the skeleton.
+  _fcalLoadCfgMap();
+}
+
+async function _fcalLoadCfgMap() {
+  if (FieldCalibrationUI.cfgMap) return;
+  // Prefer the STATIC committed JSON shipped under public/ — that path is
+  // served by Express directly (calibratorServer + main server both
+  // `app.use(express.static(public/))`) so it works without a running
+  // Python service. The API endpoint is the fallback for environments
+  // where the static asset isn't reachable.
+  const sources = [
+    "/js/cfg_trif_map.json?_t=" + Date.now(),
+    "/api/calibration/cfg-map?_t=" + Date.now(),
+  ];
+  for (const url of sources) {
+    try {
+      const r = await fetch(url, { cache: "no-store" });
+      if (!r.ok) continue;
+      const body = await r.json();
+      const fields = Array.isArray(body?.fields) ? body.fields : null;
+      if (!fields) continue;
+      FieldCalibrationUI.cfgMap = {
+        fields,
+        group_titles: body.group_titles || {},
+      };
+      const v = FieldCalibrationUI.activeView;
+      if (v && v !== "calibration") {
+        _fcalRenderSettingsGroup(v);
+      }
+      return;
+    } catch (_) {
+      /* try next source */
+    }
+  }
+}
+
+// Target (inverter/node) changed — drop the cached decode so the next
+// settings-tab view auto-loads for the NEW target instead of showing the
+// previous node's data. If a settings group tab is currently active,
+// re-enter it so the fresh fetch fires immediately.
+function _fcalInvalidateSettings() {
+  FieldCalibrationUI.settings = null;
+  const v = FieldCalibrationUI.activeView;
+  if (v && v !== "calibration") _fcalSwitchView(v);
+}
+
+function _fcalSwitchView(view) {
+  const sec = document.getElementById("fieldCalibrationSection");
+  const sv = document.getElementById("fcalSettingsView");
+  const tabs = document.getElementById("fcalViewTabs");
+  if (!sec || !sv || !tabs) return;
+  FieldCalibrationUI.activeView = view;
+  sec.setAttribute("data-fcal-view", view);
+  tabs.querySelectorAll(".fcal-view-tab").forEach((b) => {
+    const on = (b.dataset.fcalView || "") === view;
+    b.classList.toggle("fcal-view-tab-active", on);
+    b.setAttribute("aria-selected", on ? "true" : "false");
+  });
+  const isCalib = view === "calibration";
+  sv.hidden = isCalib;
+  if (isCalib) return;
+  // Settings group tab. The skeleton (from cfgMap) always paints
+  // immediately so the operator can inspect each tab's LAYOUT without
+  // connecting/reading. If a transport is ready and we don't have a
+  // decode yet, silently auto-load so values fill in. If not ready, we
+  // just leave the skeleton; the manual Read button surfaces the gate.
+  _fcalRenderSettingsGroup(view);
+  const transportOk =
+    !_fcalInCalibratorMode() || !!FieldCalibrationUI.transportReady;
+  const targetOk =
+    !!FieldCalibrationUI.inverter && !!FieldCalibrationUI.slave;
+  if (
+    transportOk && targetOk &&
+    (!FieldCalibrationUI.settings || !FieldCalibrationUI.settings.groups) &&
+    !FieldCalibrationUI._settingsLoading
+  ) {
+    _fcalLoadSettings();
+  }
+}
+
+async function _fcalLoadSettings() {
+  const inv = FieldCalibrationUI.inverter;
+  const slave = FieldCalibrationUI.slave;
+  // The per-tab Read button is gone — the pinned-header Read is the
+  // only one we toggle. Falls back to null gracefully on the older
+  // markup so a stale cache during dev doesn't TypeError.
+  const btn = document.getElementById("btnFcalRead")
+           || document.getElementById("btnFcalSettingsRead");
+  if (!inv || !slave) {
+    _fcalSetMsg("fcalSettingsMsg", "Pick an inverter and node first.", "err");
+    return;
+  }
+  if (_fcalInCalibratorMode() && !FieldCalibrationUI.transportReady) {
+    _fcalSetMsg(
+      "fcalSettingsMsg",
+      "Connect a transport on the Calibration tab first (Ethernet IP or COM Port → Connect).",
+      "err",
+    );
+    return;
+  }
+  if (FieldCalibrationUI._settingsLoading) return;
+  FieldCalibrationUI._settingsLoading = true;
+  _fcalSetMsg("fcalSettingsMsg", "Reading…");
+  if (btn) btn.disabled = true;
+  try {
+    const url =
+      `/api/calibration/full-config/${inv}/${slave}?_t=${Date.now()}`;
+    const body = await _fcalAuthedFetch(url);
+    if (!body?.ok) {
+      if (body?.error === "no_client") {
+        FieldCalibrationUI.transportReady = false;
+        const e = new Error(
+          "No transport connected. Connect on the Calibration tab, then Read settings.",
+        );
+        e.userFacing = true;
+        throw e;
+      }
+      throw new Error(body?.error || "read failed");
+    }
+    const full = body?.decoded?.full;
+    if (!full || !full.available) {
+      throw new Error("settings map unavailable on this build");
+    }
+    FieldCalibrationUI.settings = full;
+    _fcalSetMsg("fcalSettingsMsg", "");
+    _fcalRenderSettingsGroup(FieldCalibrationUI.activeView || "B");
+  } catch (err) {
+    _fcalSetMsg(
+      "fcalSettingsMsg",
+      err?.userFacing ? err.message : `Read failed: ${err?.message || err}`,
+      "err",
+    );
+  } finally {
+    FieldCalibrationUI._settingsLoading = false;
+    if (btn) btn.disabled = false;
+  }
+}
+
+// ─── Utility Tool config-write: writable-field policy (mirrors the
+//     Python services/cfg_block_write.py module so the UI never offers
+//     a write the backend would refuse). Keep these two lists in sync
+//     with cfg_block_write.UNSUPPORTED_KINDS / NON_WRITABLE_FIELDS. ───
+const _FCAL_CFG_UNSUPPORTED_KINDS = new Set(["dt6", "recta", "byte"]);
+const _FCAL_CFG_PROTECTED_FIELDS = new Set([
+  "ValidCfgCode", "FechaConfiguracion", "NumGrabaciones",
+]);
+
+// Human-readable English labels for each field. The cfg_trif_map values
+// are ISM-internal names (Spanish + ISM register codes); operators read
+// these descriptions in the field guide. Keep the labels concise — they
+// render in a tabular row alongside Current, New value, Write, Raw, Reg.
+const _FCAL_FIELD_LABEL_EN = {
+  // Group A — identity & clock
+  FechaConfiguracion:        "Configuration date (read-only)",
+  ValidCfgCode:              "Config-block sentinel (read-only)",
+  NumGrabaciones:            "Configuration write counter (read-only)",
+  Idioma:                    "HMI language",
+  CountryCode:               "Country / grid code",
+  // Group B — node addressing & startup
+  VdcStart:                  "DC start-up voltage",
+  TiempoArranqueTension:     "DC start-up dwell time",
+  VdcStop:                   "DC shutdown voltage",
+  MarchaParo:                "Run / Stop mode",
+  ConsignaDeVin:             "DC voltage setpoint mode",
+  NumeroNodoCAN:             "CAN node address",
+  NumeroNodoModbus:          "Modbus slave address",
+  // Group C — grid protection envelope
+  Vacmin:                    "AC voltage — minimum",
+  Vacmax:                    "AC voltage — maximum",
+  Facmin:                    "AC frequency — minimum",
+  Facmax:                    "AC frequency — maximum",
+  R40103_Vac_min_num_cycles: "AC V-min trip — cycle count",
+  R40104_Vac_max_num_cycles: "AC V-max trip — cycle count",
+  Freq_min_value_num_cycles: "Frequency-min trip — cycle count",
+  Freq_max_value_num_cycles: "Frequency-max trip — cycle count",
+  Vac_min_temp_value:        "AC V-min — temporary threshold",
+  Vac_max_temp_value:        "AC V-max — temporary threshold",
+  Freq_min_temp_value:       "Frequency-min — temporary threshold",
+  Freq_max_temp_value:       "Frequency-max — temporary threshold",
+  Vac_min_temp_ticks:        "AC V-min temp — dwell ticks",
+  Vac_max_temp_ticks:        "AC V-max temp — dwell ticks",
+  Freq_min_temp_ticks:       "Frequency-min temp — dwell ticks",
+  Freq_max_temp_ticks:       "Frequency-max temp — dwell ticks",
+  VMax_Disc:                 "AC V-max while disconnected",
+  VMin_Disc:                 "AC V-min while disconnected",
+  FMax_Disc:                 "Frequency-max while disconnected",
+  FMin_Disc:                 "Frequency-min while disconnected",
+  Vgrid_max_slope:           "Grid voltage max slope",
+  NominalVoltageInverter:    "Nominal AC voltage",
+  // Group D — power & reactive
+  TanFi:                     "Power factor (tan φ)",
+  PotenciaNominal:           "Nominal active power",
+  PotenciaLimite:            "Active power limit",
+  comp_per_vacio:            "No-load compensation",
+  comp_reactiva_x1:          "Reactive curve — X1 (20% Pn)",
+  comp_reactiva_y1:          "Reactive curve — Y1",
+  comp_reactiva_x2:          "Reactive curve — X2 (70% Pn)",
+  comp_reactiva_y2:          "Reactive curve — Y2",
+  // Group I — isolation & temperature derating
+  KZdc:                      "Insulation resistance threshold",
+  DifFalloAisl:              "Insulation fault differential",
+  ExpectedIDC:               "Expected DC current",
+  CX_Waiting_Time_PI:        "PI controller wait time",
+  Waiting_time_COM:          "Communication wait time",
+  EOF_timeout:               "End-of-frame timeout",
+  MaxVocValue:               "Maximum DC open-circuit voltage",
+  AmbTempRedRate:            "Ambient-temperature derate rate",
+  AmbTempRedTemp:            "Ambient-temperature derate start",
+  InomWithTempDerating:      "Nominal current after temperature derating",
+};
+
+function _fcalDisplayLabel(row) {
+  const en = _FCAL_FIELD_LABEL_EN[String(row.field || "")];
+  if (en) return en;
+  return row.label || row.field || "";
+}
+
+// Implied units for fields whose cfg_trif_map row has unit: "" but where
+// the value clearly carries a unit in context. We never overwrite a unit
+// that the cfg map already carries — _fcalDisplayUnit prefers the cfg
+// value and falls back to this override. Cycles = grid AC half-cycles
+// (≈ 10 ms at 50 Hz); ticks = control-loop ticks (vendor convention,
+// see ISM PowerMax docs). Sentinels / enum codes intentionally stay
+// blank so we don't fabricate a misleading dimension.
+const _FCAL_FIELD_UNIT_EN = {
+  // Bits / enums — no unit on purpose
+  MarchaParo:                "",
+  ConsignaDeVin:             "",
+  Idioma:                    "",
+  CountryCode:               "",
+  ValidCfgCode:              "",
+  // Identifiers / counters
+  NumGrabaciones:            "writes",
+  NumeroNodoCAN:             "id",
+  NumeroNodoModbus:          "id",
+  // Ratios / dimensionless
+  TanFi:                     "ratio",
+  // Reactive curve (operator note in label already says % Pn)
+  comp_per_vacio:            "raw",
+  comp_reactiva_x1:          "% Pn",
+  comp_reactiva_y1:          "raw",
+  comp_reactiva_x2:          "% Pn",
+  comp_reactiva_y2:          "raw",
+  // Grid envelope trip cycle counts
+  R40103_Vac_min_num_cycles: "cycles",
+  R40104_Vac_max_num_cycles: "cycles",
+  Freq_min_value_num_cycles: "cycles",
+  Freq_max_value_num_cycles: "cycles",
+  // Temporary thresholds (V for Vac_*, Hz for Freq_*)
+  Vac_min_temp_value:        "V",
+  Vac_max_temp_value:        "V",
+  Freq_min_temp_value:       "Hz",
+  Freq_max_temp_value:       "Hz",
+  // Temporary dwell tick counters
+  Vac_min_temp_ticks:        "ticks",
+  Vac_max_temp_ticks:        "ticks",
+  Freq_min_temp_ticks:       "ticks",
+  Freq_max_temp_ticks:       "ticks",
+  // Misc grid + timing
+  Vgrid_max_slope:           "V/cycle",
+  CX_Waiting_Time_PI:        "ticks",
+  // Insulation differential
+  DifFalloAisl:              "raw",
+  // Temp derating
+  AmbTempRedRate:            "%/°C",
+};
+
+function _fcalDisplayUnit(row) {
+  if (row.unit && String(row.unit).trim() !== "") return String(row.unit);
+  const ov = _FCAL_FIELD_UNIT_EN[String(row.field || "")];
+  return ov || "";
+}
+
+function _fcalIsFieldWritable(kind, fieldName) {
+  if (_FCAL_CFG_PROTECTED_FIELDS.has(String(fieldName))) return false;
+  return !_FCAL_CFG_UNSUPPORTED_KINDS.has(String(kind || ""));
+}
+
+// True when the operator has actually read live values from the inverter
+// for the active settings tab. Writes are gated on this so we never let a
+// New Value field write without first knowing the Current Value (which
+// is also what every operator should be checking against before typing).
+function _fcalHasLiveValues(view) {
+  const s = FieldCalibrationUI.settings;
+  return !!(s && s.groups && Array.isArray(s.groups[view]) && s.groups[view].length);
+}
+
+// Build the per-row New Value input. Returns inner HTML for the cell.
+// For kind='bits' single bit a TOGGLE switch is rendered (styled
+// checkbox); for multi-bit slices and every numeric kind a text input
+// with step suited to the kind. Inputs are DISABLED until the operator
+// has read live values for this tab — there's no safe write without a
+// Current Value to compare against.
+function _fcalRenderConfigInput(row, cfgField, opts) {
+  const disabled = !!(opts && opts.disabled);
+  const dis = disabled ? " disabled" : "";
+  const kind = String(cfgField?.kind || "");
+  const dec = row.decoded;
+  const placeholder = dec === null || dec === undefined
+    ? ""
+    : (typeof dec === "object" ? JSON.stringify(dec) : String(dec));
+  const fieldName = String(row.field || "");
+  const dataField = `data-field="${escapeHtml(fieldName)}"`;
+  if (kind === "bits") {
+    const bits = String(cfgField?.bits || "");
+    const parts = bits.split(";").filter((b) => b !== "").map(Number);
+    if (parts.length === 1) {
+      const hasValue = dec !== null && dec !== undefined && dec !== "";
+      const isOn = dec === 1 || dec === "1" || dec === true;
+      const checked = isOn ? " checked" : "";
+      // When the operator hasn't read live values yet the toggle is in
+      // its skeleton state — render "—" instead of "Off" so the cell
+      // reads "no value yet" matching the dash placeholder used in every
+      // other column. The toggle CSS handles the dashed-outline track.
+      const labelText = !hasValue && disabled ? "—" : (isOn ? "On" : "Off");
+      const tip = disabled
+        ? "No value read yet — click Read in the header above."
+        : "Click to toggle between Off and On.";
+      return (
+        `<label class="fcal-toggle" title="${escapeHtml(tip)}">` +
+        `<input type="checkbox" class="fcal-set-input-el" ${dataField}${checked}${dis}>` +
+        '<span class="fcal-toggle-track"></span>' +
+        `<span class="fcal-toggle-label" data-on="On" data-off="Off">${labelText}</span>` +
+        "</label>"
+      );
+    }
+  }
+  // Numeric/text path. step=0.01 for Hz-class (c100), step=10 for x10
+  // power values, integer step otherwise. min/max kept loose — the
+  // backend encoder is authoritative on range and surfaces a clear error.
+  let step = "1";
+  if (kind === "c100") step = "0.01";
+  else if (kind === "x10") step = "10";
+  return (
+    '<input type="number" class="fcal-set-input-el inp" ' +
+    `${dataField} placeholder="${escapeHtml(placeholder)}" step="${step}"${dis}>`
+  );
+}
+
+function _fcalRenderSettingsGroup(view) {
+  const host = document.getElementById("fcalSettingsResult");
+  if (!host || view === "calibration") return;
+  // Always render the layout: prefer the decoded values (`settings.groups`)
+  // if a Read has populated them; otherwise build a SKELETON from the
+  // static `cfgMap` so each tab shows its own field list immediately.
+  const settings = FieldCalibrationUI.settings;
+  const decoded = (settings && settings.groups && settings.groups[view]) || null;
+  const cfgMap = FieldCalibrationUI.cfgMap;
+  let rows = decoded;
+  if (!rows && cfgMap && Array.isArray(cfgMap.fields)) {
+    rows = cfgMap.fields
+      .filter((f) => f && f.group === view)
+      .map((f) => ({
+        offset: f.offset,
+        field: f.field,
+        label: f.label || f.field,
+        unit: f.unit || "",
+        raw_u16: null,
+        raw_hex: null,
+        decoded: null,
+      }));
+  }
+  const title =
+    (settings && settings.group_titles && settings.group_titles[view]) ||
+    (cfgMap && cfgMap.group_titles && cfgMap.group_titles[view]) ||
+    view;
+  if (!rows || !rows.length) {
+    host.innerHTML =
+      '<div class="srn-empty">Loading layout… (click <strong>Read</strong> in the ' +
+      "header above to populate values).</div>";
+    // Reset the pinned subheader so a stale title from another tab
+    // doesn't linger above the empty body.
+    const ph = document.getElementById("fcalSettingsPinnedHeader");
+    if (ph) ph.innerHTML = "";
+    return;
+  }
+  // Join decoded rows with cfgMap by field name so each row carries its
+  // `kind` + `bits` spec — needed to choose an input control type AND to
+  // decide writable vs read-only.
+  const cfgByField = new Map();
+  if (cfgMap && Array.isArray(cfgMap.fields)) {
+    for (const f of cfgMap.fields) cfgByField.set(String(f.field), f);
+  }
+  // Inputs + Write buttons are disabled until live values are read. The
+  // operator must know the Current value before typing a New value — and
+  // the "no_change" shortcut on the backend needs a real Current to work.
+  const writesGated = !_fcalHasLiveValues(view);
+  const trs = rows.map((r) => {
+    const cfg = cfgByField.get(String(r.field)) || {};
+    const writable = _fcalIsFieldWritable(cfg.kind, r.field);
+    const decRaw = r.decoded;
+    const decDisp =
+      decRaw === null || decRaw === undefined
+        ? "—"
+        : typeof decRaw === "object"
+          ? JSON.stringify(decRaw)
+          : String(decRaw);
+    const unitText = _fcalDisplayUnit(r);
+    const unit = unitText
+      ? ' <span class="fcal-settings-unit">' + escapeHtml(unitText) + "</span>"
+      : "";
+    const inputUnitSuffix = unitText && writable && cfg.kind !== "bits"
+      ? ' <span class="fcal-settings-unit">' + escapeHtml(unitText) + "</span>"
+      : "";
+    const inputCell = writable
+      ? _fcalRenderConfigInput(r, cfg, { disabled: writesGated }) + inputUnitSuffix
+      : '<span class="fcal-set-readonly">read-only</span>';
+    const disBtn = writable && writesGated ? " disabled" : "";
+    const btnTip = writesGated
+      ? "Read live values first — Write is disabled until then."
+      : "Write this value to the inverter (sacupsMM authorization required).";
+    const writeCell = writable
+      ? `<button class="btn btn-outline btn-xs fcal-write-one" ` +
+        `data-field="${escapeHtml(r.field)}" title="${escapeHtml(btnTip)}"${disBtn}>Write</button>`
+      : "";
+    return (
+      `<tr data-field="${escapeHtml(r.field)}" data-kind="${escapeHtml(cfg.kind || "")}">` +
+      "<td>" + escapeHtml(_fcalDisplayLabel(r)) + "</td>" +
+      '<td class="fcal-set-val">' + escapeHtml(decDisp) + unit + "</td>" +
+      '<td class="fcal-set-input">' + inputCell + "</td>" +
+      '<td class="fcal-set-raw">' + escapeHtml(r.raw_hex || "—") + "</td>" +
+      '<td class="fcal-set-off">' + escapeHtml(String(r.offset)) + "</td>" +
+      '<td class="fcal-set-action">' + writeCell + "</td>" +
+      "</tr>"
+    );
+  }).join("");
+  const countLabel = decoded
+    ? `${rows.length} field${rows.length === 1 ? "" : "s"}`
+    : "layout preview — click Read first";
+  const gateBanner = writesGated
+    ? '<div class="fcal-settings-gate-banner">' +
+      '<span class="mdi mdi-information-outline icon-inline" aria-hidden="true"></span>' +
+      'Click <strong>Read</strong> in the header above to load live values from the inverter. ' +
+      'Writes are disabled until live values are visible in the Current column.' +
+      "</div>"
+    : "";
+  // The group title + gate banner go into the PINNED subheader so they
+  // stay put across scroll. Only the <table> scrolls inside the result
+  // host. Older markup without the subheader element still works — the
+  // title falls back into the result host to preserve compatibility.
+  const pinned = document.getElementById("fcalSettingsPinnedHeader");
+  const titleHtml =
+    '<div class="fcal-settings-group-title">' + escapeHtml(title) +
+    '<span class="fcal-settings-group-count">' + escapeHtml(countLabel) + "</span>" +
+    "</div>" + gateBanner;
+  const tableHtml =
+    '<table class="fcal-settings-table fcal-settings-table-edit"><thead><tr>' +
+    '<th class="fcal-set-val">Setting</th>' +
+    '<th class="fcal-set-val">Current</th>' +
+    '<th class="fcal-set-input">New value</th>' +
+    '<th class="fcal-set-raw">Raw</th>' +
+    '<th class="fcal-set-off">Reg</th>' +
+    '<th class="fcal-set-action">Write</th>' +
+    "</tr></thead><tbody>" + trs + "</tbody></table>";
+  if (pinned) {
+    pinned.innerHTML = titleHtml;
+    host.innerHTML = '<div class="fcal-settings-group">' + tableHtml + "</div>";
+  } else {
+    host.innerHTML =
+      '<div class="fcal-settings-group">' + titleHtml + tableHtml + "</div>";
+  }
+  // Wire per-row Write buttons (skip disabled). Delegate per render so we
+  // don't accumulate listeners across re-renders.
+  host.querySelectorAll(".fcal-write-one").forEach((btn) => {
+    btn.addEventListener("click", () => _fcalConfigWriteOne(btn.dataset.field));
+  });
+  // Live label flip on toggle switches: Off ⇄ On as the operator clicks.
+  host.querySelectorAll(".fcal-toggle input[type='checkbox']").forEach((el) => {
+    el.addEventListener("change", () => {
+      const lbl = el.parentElement && el.parentElement.querySelector(".fcal-toggle-label");
+      if (lbl) lbl.textContent = el.checked ? "On" : "Off";
+    });
+  });
+  // Reflect the gate state on the top-level Write all changed button.
+  const wa = document.getElementById("btnFcalConfigWriteAll");
+  if (wa) {
+    wa.disabled = writesGated;
+    wa.title = writesGated
+      ? "Read live values first — Write all is disabled until then."
+      : "Write every row whose New value column is non-empty (sacupsMM authorization required).";
+  }
+}
+
+// Resolve the value the operator typed (or checked) for a given field.
+// Returns null when the input is empty / unchanged from the placeholder.
+function _fcalReadConfigInput(field) {
+  const host = document.getElementById("fcalSettingsResult");
+  if (!host) return null;
+  const tr = host.querySelector(`tr[data-field="${CSS.escape(String(field))}"]`);
+  if (!tr) return null;
+  const el = tr.querySelector(".fcal-set-input-el");
+  if (!el) return null;
+  if (el.type === "checkbox") return el.checked ? 1 : 0;
+  const s = String(el.value || "").trim();
+  if (s === "") return null;
+  return s;  // backend accepts strings; encoder parses
+}
+
+// One-prompt-per-page auth cache for L2 config writes. Lives only in
+// memory — reset on reload. Mirrors the existing _fcalAuthedFetch pattern
+// from the calibration page.
+let _fcalConfigAuthKey = null;
+async function _fcalEnsureConfigAuth() {
+  if (_fcalConfigAuthKey) return _fcalConfigAuthKey;
+  const k = window.prompt(
+    "Enter authorization key (sacupsMM) to enable inverter config writes for this session:",
+    "",
+  );
+  if (!k) throw new Error("Authorization cancelled.");
+  _fcalConfigAuthKey = String(k).trim();
+  if (!_fcalConfigAuthKey) {
+    _fcalConfigAuthKey = null;
+    throw new Error("Authorization key is empty.");
+  }
+  return _fcalConfigAuthKey;
+}
+
+async function _fcalConfigWriteOne(fieldName) {
+  const tr = document.querySelector(
+    `#fcalSettingsResult tr[data-field="${CSS.escape(String(fieldName))}"]`,
+  );
+  const inv = FieldCalibrationUI.inverter;
+  const slave = FieldCalibrationUI.slave;
+  if (!inv || !slave) {
+    _fcalSetMsg("fcalSettingsMsg", "Pick an inverter and node first.", "err");
+    return;
+  }
+  const value = _fcalReadConfigInput(fieldName);
+  if (value === null) {
+    _fcalSetMsg(
+      "fcalSettingsMsg",
+      `No new value entered for ${fieldName} — type a value first.`,
+      "err",
+    );
+    return;
+  }
+  let authKey;
+  try {
+    authKey = await _fcalEnsureConfigAuth();
+  } catch (err) {
+    _fcalSetMsg("fcalSettingsMsg", err.message, "err");
+    return;
+  }
+  const btn = tr ? tr.querySelector(".fcal-write-one") : null;
+  if (btn) btn.disabled = true;
+  _fcalSetMsg("fcalSettingsMsg", `Writing ${fieldName}…`, "info");
+  try {
+    const resp = await fetch("/api/calibration/config-write", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        inverter: Number(inv),
+        slave: Number(slave),
+        field: String(fieldName),
+        value,
+        authKey,
+      }),
+    });
+    const body = await resp.json().catch(() => ({}));
+    if (resp.status === 403) {
+      // Auth rejected — drop the cached key so the next click reprompts.
+      _fcalConfigAuthKey = null;
+      throw new Error(body.error || "Authorization rejected.");
+    }
+    if (resp.status === 423) {
+      // Critical-block lock — operator must acknowledge first.
+      throw new Error(
+        body.error ||
+        "This inverter is critically blocked. Acknowledge the block before writing."
+      );
+    }
+    if (!resp.ok || !body.ok) {
+      throw new Error(body.error || `Write failed (${resp.status})`);
+    }
+    if (body.status === "no_change") {
+      _fcalSetMsg(
+        "fcalSettingsMsg",
+        `${fieldName}: value already matches — no write issued.`,
+        "info",
+      );
+    } else {
+      _fcalSetMsg(
+        "fcalSettingsMsg",
+        `${fieldName}: write OK (raw 0x${(body.value_after_raw ?? 0).toString(16).toUpperCase().padStart(4, "0")}).`,
+        "ok",
+      );
+    }
+    // Force a fresh read so the Current column reflects the new value.
+    FieldCalibrationUI.settings = null;
+    await _fcalLoadSettings();
+  } catch (err) {
+    _fcalSetMsg(
+      "fcalSettingsMsg",
+      `${fieldName} write failed: ${err.message}`,
+      "err",
+    );
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function _fcalConfigWriteAll() {
+  const view = FieldCalibrationUI.activeView;
+  if (!view || view === "calibration") return;
+  const host = document.getElementById("fcalSettingsResult");
+  if (!host) return;
+  const inv = FieldCalibrationUI.inverter;
+  const slave = FieldCalibrationUI.slave;
+  if (!inv || !slave) {
+    _fcalSetMsg("fcalSettingsMsg", "Pick an inverter and node first.", "err");
+    return;
+  }
+  // Collect every row in the active tab whose input has a non-empty new
+  // value. Read-only / protected rows have no input element and are
+  // naturally excluded.
+  const pending = [];
+  host.querySelectorAll("tr[data-field]").forEach((tr) => {
+    const field = tr.dataset.field;
+    if (!field) return;
+    const el = tr.querySelector(".fcal-set-input-el");
+    if (!el) return;
+    let v = null;
+    if (el.type === "checkbox") {
+      v = el.checked ? 1 : 0;
+    } else {
+      const s = String(el.value || "").trim();
+      if (s === "") return;
+      v = s;
+    }
+    pending.push({ field, value: v });
+  });
+  if (!pending.length) {
+    _fcalSetMsg(
+      "fcalSettingsMsg",
+      "Nothing to write — type new values in any row first.",
+      "info",
+    );
+    return;
+  }
+  const proceed = window.confirm(
+    `Write ${pending.length} field${pending.length === 1 ? "" : "s"} on ` +
+    `inverter ${inv} node ${slave}? This is IRREVERSIBLE on the inverter.`,
+  );
+  if (!proceed) return;
+  let authKey;
+  try {
+    authKey = await _fcalEnsureConfigAuth();
+  } catch (err) {
+    _fcalSetMsg("fcalSettingsMsg", err.message, "err");
+    return;
+  }
+  const allBtn = document.getElementById("btnFcalConfigWriteAll");
+  if (allBtn) allBtn.disabled = true;
+  let okCount = 0, failCount = 0, noChangeCount = 0;
+  let blockedCount = 0;
+  let abortedReason = null;
+  for (const p of pending) {
+    _fcalSetMsg("fcalSettingsMsg", `Writing ${p.field}…`, "info");
+    let resp, body;
+    try {
+      resp = await fetch("/api/calibration/config-write", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          inverter: Number(inv),
+          slave: Number(slave),
+          field: p.field,
+          value: p.value,
+          authKey,
+        }),
+      });
+      body = await resp.json().catch(() => ({}));
+    } catch (err) {
+      failCount += 1;
+      console.warn(`[config-write] ${p.field} network error:`, err.message);
+      continue;
+    }
+    // 403 = authorization rejected; the cached key is stale or wrong.
+    // Drop the cache, re-prompt ONCE, retry this field. If the operator
+    // cancels the prompt or the new key is also rejected, abort the
+    // whole loop — every subsequent write would otherwise spam 403s.
+    if (resp.status === 403) {
+      _fcalConfigAuthKey = null;
+      try {
+        authKey = await _fcalEnsureConfigAuth();
+      } catch (_) {
+        abortedReason = "Authorization cancelled — remaining writes skipped.";
+        break;
+      }
+      try {
+        const retry = await fetch("/api/calibration/config-write", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            inverter: Number(inv),
+            slave: Number(slave),
+            field: p.field,
+            value: p.value,
+            authKey,
+          }),
+        });
+        const retryBody = await retry.json().catch(() => ({}));
+        if (retry.status === 403) {
+          _fcalConfigAuthKey = null;
+          abortedReason = "Authorization still rejected after re-entry — remaining writes skipped.";
+          break;
+        }
+        resp = retry;
+        body = retryBody;
+      } catch (err) {
+        failCount += 1;
+        abortedReason = `Auth retry failed: ${err.message}`;
+        break;
+      }
+    }
+    // 423 = critical-block lock on this inverter. Every subsequent
+    // write on the same inverter would fail identically — abort loop.
+    if (resp.status === 423) {
+      blockedCount += 1;
+      abortedReason = body.error || "Inverter is critically blocked — acknowledge the block first.";
+      break;
+    }
+    if (!resp.ok || !body.ok) {
+      failCount += 1;
+      console.warn(`[config-write] ${p.field} failed:`, body.error);
+      continue;
+    }
+    if (body.status === "no_change") noChangeCount += 1;
+    else okCount += 1;
+  }
+  const summary =
+    `Write all: ${okCount} ok, ${noChangeCount} no-change, ${failCount} failed` +
+    (blockedCount ? `, ${blockedCount} blocked` : "") +
+    (abortedReason ? ` — ${abortedReason}` : ".");
+  _fcalSetMsg(
+    "fcalSettingsMsg",
+    summary,
+    (failCount || blockedCount || abortedReason) ? "err" : "ok",
+  );
+  if (allBtn) allBtn.disabled = false;
+  // Refresh the Current column from the wire — even on partial success,
+  // the displayed values must reflect what the inverter actually holds.
+  FieldCalibrationUI.settings = null;
+  await _fcalLoadSettings();
+}
+
+// ─── Fleet Scan (removed 2026-05-20) ──────────────────────────────────
+// The Utility Tool's dedicated fleet scan was removed: the button was
+// blocked by a duplicate id with the Parameters page Fleet Anomalies
+// button, so it could never receive clicks. The Parameters page version
+// remains (separate feature). Backend routes /api/calibration/utility-
+// fleet-scan also removed.
 
 // ─── Quiet live-value auto-refresh ─────────────────────────────────────
 // Operator preference: the Live column should update silently every few
@@ -30035,6 +31062,28 @@ function _fcalSyncControlCards() {
   if (host) {
     host.classList.toggle("fcal-force-on",
       !!(FieldCalibrationUI.forceWrite || FieldCalibrationUI.forceSafety));
+    // Per-slot Write-button gate sync. Source of truth = the per-slot
+    // dataset (`data-gate-severity` / `data-gate-reason`) populated at
+    // render time from the server's writability verdict. Walk every slot
+    // and reconcile button disabled state + tooltip against the current
+    // Force-safety arm. Skip slots without a Write button (display-only).
+    const forceSafetyArmed = !!FieldCalibrationUI.forceSafety;
+    host.querySelectorAll(".fcal-row[data-gate-severity]").forEach((row) => {
+      const btn = row.querySelector(".fcal-write-btn");
+      if (!btn) return;
+      const sev = row.dataset.gateSeverity || "ok";
+      const reason = row.dataset.gateReason || "";
+      const gateBlocks = sev === "block" && !forceSafetyArmed;
+      // Calibration Mode is the outer gate; the safety verdict layers on top.
+      btn.disabled = !writesEnabled || gateBlocks;
+      btn.title = sev === "ok"
+        ? "TrinPM20 safety gates clear — Write is safe."
+        : (gateBlocks
+            ? `${reason} — tick "Force (bypass TrinPM20 safety gate)" in the toolbar to override.`
+            : (sev === "block" && forceSafetyArmed)
+                ? `${reason} — Force-bypass armed, write will skip the gate.`
+                : reason);
+    });
   }
 }
 
@@ -30320,6 +31369,11 @@ function _fcalRenderSingleEditable(state) {
     const allSlots = [];
     const allOffsets = [];
 
+    // Force-bypass arm-state — read once per render. _fcalSyncControlCards
+    // updates buttons live on toggle, so a render here just establishes the
+    // initial baseline.
+    const forceSafetyArmed = !!(FieldCalibrationUI.forceSafety
+      || document.getElementById("fcalForceSafetyGate")?.checked);
     for (const g of groupsToRender) {
       const slots = (groups.get(g) || []).map((f) => {
         allOffsets.push(f.offset);
@@ -30327,8 +31381,17 @@ function _fcalRenderSingleEditable(state) {
         const wrClass = wr && !wr.ok
           ? (wr.severity === "block" ? "fcal-gate-block" : "fcal-gate-warn")
           : "fcal-gate-ok";
+        // A "block" verdict means the server will refuse this write with 409
+        // unless Force-bypass is armed. Mirror that to the Write button so
+        // the UI is honest about what's gated (operator confusion 2026-05-21:
+        // big red BLOCKED chip while Write was still clickable).
+        const gateBlocks = !!(wr && wr.severity === "block" && !forceSafetyArmed);
         const wrTitle = wr && !wr.ok
-          ? wr.reason
+          ? (gateBlocks
+              ? `${wr.reason} — tick "Force (bypass TrinPM20 safety gate)" in the toolbar to override.`
+              : (wr.severity === "block" && forceSafetyArmed)
+                  ? `${wr.reason} — Force-bypass armed, write will skip the gate.`
+                  : wr.reason)
           : "TrinPM20 safety gates clear — Write is safe.";
         // Compact: only surface a gate marker when NOT clear (block/warn).
         // "ready" slots stay clean — the quiet Write button itself is the
@@ -30341,6 +31404,11 @@ function _fcalRenderSingleEditable(state) {
         // Read fills .fcal-val / .fcal-live and (if Calibration Mode is on)
         // enables editing.
         const dis = editable ? "" : "disabled";
+        // The Write button has an extra gate: even in Calibration Mode it
+        // stays disabled when the safety verdict is "block" and Force is
+        // not armed. Input + Meter mode buttons keep the looser `dis` so
+        // the operator can still PREPARE a value, then arm Force to write.
+        const writeDis = (editable && !gateBlocks) ? "" : "disabled";
         const factorHtml = scaffold ? '<span class="fcal-live-na">—</span>' : String(baseVal);
         const liveHtml   = scaffold ? '<span class="fcal-live-na">—</span>' : _fcalLiveCell(f.offset, live);
         const inVal      = scaffold ? "" : String(baseVal);
@@ -30439,7 +31507,7 @@ function _fcalRenderSingleEditable(state) {
                    placeholder="meter${_unit ? " (" + _unit + ")" : ""}" ${dis} hidden
                    title="Type the multimeter / wattmeter reading. Factor = current factor × your reading ÷ the live reading, rounded. Review it, then click Write (same range + TrinPM20 gates)." />
             <div class="fcal-meter-calc" hidden></div>` : ""}
-            <button class="fcal-write-btn" data-off="${f.offset}" type="button" ${dis}
+            <button class="fcal-write-btn" data-off="${f.offset}" type="button" ${writeDis}
                     title="${_fcalEsc(scaffold ? "Click Read to load this node, then enter Calibration Mode to write." : wrTitle)}">
               <span class="mdi mdi-content-save-outline icon-inline" aria-hidden="true"></span><span class="fcal-write-btn-label">Write</span>
             </button>
@@ -30456,7 +31524,7 @@ function _fcalRenderSingleEditable(state) {
           ? "Reported active power (Pac, W) at 0 % consign — trim Per. Vacio until this matches the wattmeter's real no-load reading"
           : "Live — measurement read from the inverter right now";
         return `
-        <div data-off="${f.offset}" data-field="${_fcalEsc(f.field)}" data-group="${_fcalEsc(groupInfo.title)}" data-signed="${f.is_signed ? "1" : "0"}" class="fcal-row fcal-slot ${wrClass}${slotReadonly ? " fcal-slot-ro" : ""}">
+        <div data-off="${f.offset}" data-field="${_fcalEsc(f.field)}" data-group="${_fcalEsc(groupInfo.title)}" data-signed="${f.is_signed ? "1" : "0"}" data-gate-severity="${wr?.severity || "ok"}" data-gate-reason="${_fcalEsc(wr?.reason || "")}" class="fcal-row fcal-slot ${wrClass}${slotReadonly ? " fcal-slot-ro" : ""}">
           <div class="fcal-slot-head">
             <span class="fcal-param-name" title="${_fcalEsc(nameTitle)}"><span class="fcal-pname-txt">${_fcalEsc(dispLabel)}</span><span class="fcal-off-chip">·${f.offset}</span></span>
             ${scaffold ? "" : wrBadge}
@@ -31804,7 +32872,7 @@ async function _fcalHandleToggleWrites() {
   // <title> once the page loads (overriding BrowserWindow.title), so the
   // shared SPA would otherwise show "ADSI Inverter Dashboard". Force it and
   // re-assert in case anything rewrites it later.
-  var CALIBRATOR_WINDOW_TITLE = "Inverter Calibration Tool";
+  var CALIBRATOR_WINDOW_TITLE = "ADSI Utility Tool";
   function setCalibratorTitle() {
     try {
       if (document.title !== CALIBRATOR_WINDOW_TITLE) {

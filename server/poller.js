@@ -18,6 +18,7 @@ const { checkAlarms } = require('./alarms');
 const { broadcastUpdate } = require('./ws');
 const dailyAgg = require('./dailyAggregator');
 const { sharedMonitor: gridCodeMonitor } = require('./gridCodeMonitor');
+const firmwareBusLock = require('./firmwareBusLock');
 const {
   normalizeTodayEnergyRows,
   evaluateTodayEnergyHealth,
@@ -1448,6 +1449,34 @@ async function poll() {
   const expectedKeys = getExpectedKeysFromIpConfig(ipConfig);
   const expectedSet = new Set(expectedKeys);
 
+  // Cross-process firmware-flash bus lock. While the standalone
+  // calibrator flashes an inverter, the Python engine already backs the
+  // Modbus poller off that inverter's bus; here we make sure the
+  // resulting telemetry gap is NOT treated as a comms outage — the
+  // inverter is in planned maintenance, not down. FAIL-OPEN: any marker
+  // problem -> empty set -> behaviour identical to before this feature.
+  let fwSuspendedInverters = new Set();
+  try {
+    const fwActiveIps = firmwareBusLock.activeInverterIps(now);
+    if (fwActiveIps && fwActiveIps.size) {
+      // Normalise the marker IPs (calibrator writes the raw link_host —
+      // may carry a :port) through the SAME normaliser used to build
+      // ipConfigLookup.byIp, so the host match can't silently miss.
+      const normActive = new Set();
+      for (const a of fwActiveIps) {
+        const n = normalizeSourceIp(a);
+        if (n) normActive.add(n);
+      }
+      // Reuse the already-built ip->inv map (line ~1448) instead of
+      // re-deriving it with a hardcoded count + inconsistent parsing.
+      for (const [cfgIp, inv] of ipConfigLookup.byIp) {
+        if (normActive.has(cfgIp)) fwSuspendedInverters.add(inv);
+      }
+    }
+  } catch {
+    fwSuspendedInverters = new Set();
+  }
+
   let rows = [];
   let fetchOk = false;
   try {
@@ -1573,6 +1602,9 @@ async function poll() {
 
     seen.add(key);
     markSeenKey(key);
+    // Inverter answered again — clear any lingering maintenance tag from a
+    // just-finished firmware flash so the UI returns to normal.
+    if (liveData[key] && liveData[key].maintenance) liveData[key].maintenance = 0;
 
     // v2.11.x Phase 1 — push to grid-code monitor. Plan: plans/2026-05-12-ppc-capabilities-implementation.md §2.
     // Tap on parsed frame (already in W after parseRow:802 safePac = pac*10).
@@ -1696,6 +1728,17 @@ async function poll() {
   for (const key of expectedKeys) {
     if (seen.has(key)) continue;
 
+    // Firmware flash in progress for this inverter — a deliberate
+    // maintenance gap, NOT a comms loss. Clear any miss state, tag the
+    // row maintenance, and never markMissingKey (no offline alarm,
+    // no flap). Polling auto-resumes when the claim clears/expires.
+    const invNum = Number(String(key).split("_")[0]);
+    if (fwSuspendedInverters.has(invNum)) {
+      if (unreachableState[key]) delete unreachableState[key];
+      if (liveData[key]) liveData[key].maintenance = 1;
+      continue;
+    }
+
     // Short gaps are common with Modbus polling; avoid flapping on brief misses.
     const last = liveData[key];
     if (last && now - Number(last.ts || 0) <= MISSING_GRACE_MS) continue;
@@ -1725,7 +1768,9 @@ async function poll() {
       const ip = String(
         ipConfig?.inverters?.[inv] ?? ipConfig?.inverters?.[String(inv)] ?? "",
       ).trim();
-      if (ip) expectedInverters.add(inv);
+      // Exclude a firmware-flashing inverter from the availability
+      // denominator — a planned flash must not count as downtime.
+      if (ip && !fwSuspendedInverters.has(inv)) expectedInverters.add(inv);
     }
     if (expectedInverters.size > 0) {
       try {

@@ -14,6 +14,7 @@ const http = require("http");
 const WebSocket = require("ws");
 const path = require("path");
 const calibratorDb = require("./calibratorDb");
+const firmwareMap = require("./firmwareMap");
 const { registerCalibrationRoutes } = require("./calibrationRoutes");
 
 // Default topology auth key window — same algorithm as server/index.js lines 12841–12863
@@ -422,6 +423,20 @@ function startCalibratorServer({
     return res.json({ inverters: {}, units: {} });
   });
 
+  // GET /api/calibration/cfg-map — PUBLIC, READ-ONLY. Returns the static
+  // field map (offsets/kinds/groups/labels/units) so the Utility Tool can
+  // render each tab's LAYOUT even before any Connect/Read.
+  app.get("/api/calibration/cfg-map", async (req, res) => {
+    try {
+      const r = await callPython("/calibration/cfg-map", "GET");
+      return res.json(r);
+    } catch (err) {
+      return res.status(502).json({
+        ok: false, error: err && err.message ? err.message : String(err),
+      });
+    }
+  });
+
   // GET /api/active-inverter — report current active inverter for C4
   app.get("/api/active-inverter", (req, res) => {
     res.json({
@@ -499,6 +514,53 @@ function startCalibratorServer({
     }
     const response = await callPython(`/firmware/identity/${slave}`, "GET");
     return res.status(response.ok ? 200 : 400).json(response);
+  });
+
+  // GET /api/firmware/check — PUBLIC: per-inverter firmware homogeneity for
+  // the CONNECTED inverter. The calib tool is single-transport (one
+  // inverter), so this reads slaves 1..4 via the existing FC11 identity
+  // path and reports whether they all run the SAME firmware — the field
+  // tech's post-board-swap check (the dual of the serial-relocation guard).
+  // Display-only: the calib tool persists nothing; the dashboard scan owns
+  // the audit trail. ?slaves=1,2,3,4 (default 1..4).
+  app.get("/api/firmware/check", async (req, res) => {
+    let slaves = [1, 2, 3, 4];
+    const q = String(req.query.slaves || "").trim();
+    if (q) {
+      const parsed = q.split(",").map((x) => Number(x.trim()))
+        .filter((n) => Number.isInteger(n) && n >= 1 && n <= 247);
+      if (parsed.length) slaves = parsed;
+    }
+    const rows = [];
+    for (const slave of slaves) {
+      let r;
+      try {
+        r = await callPython(`/firmware/identity/${slave}`, "GET");
+      } catch (err) {
+        r = { ok: false, error: err.message };
+      }
+      rows.push({
+        inverter_id: 0,
+        inverter_ip: "calibrator",       // single synthetic inverter
+        inverter_name: "Connected inverter",
+        slave,
+        ok: Boolean(r && r.ok),
+        serial: r && r.serial ? r.serial : null,
+        model_code: r && r.ok ? r.model_code : null,
+        firmware_main: r && r.ok ? r.firmware_main : null,
+        firmware_aux: r && r.ok ? r.firmware_aux : null,
+        error: r && !r.ok ? (r.error || "read_failed") : null,
+      });
+    }
+    const classified = firmwareMap.classifyFleet(rows);
+    const inv = classified.perInverter[0] || { verdict: "none", drifted: false };
+    return res.json({
+      ok: true,
+      verdict: inv.verdict,          // uniform | split | partial | none
+      canonical: classified.canonical,
+      nodes: classified.perNode,
+      summary: classified.summary,
+    });
   });
 
   // POST /api/firmware/dryrun — PUBLIC: hardware-free full simulation (the

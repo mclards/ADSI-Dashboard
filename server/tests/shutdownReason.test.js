@@ -179,6 +179,105 @@ runTest("record-returns-null-when-writer-fails", ({ scratchRoot, originalProgram
   }
 });
 
+runTest("concurrent-instance-suppresses-unexpected-classification", ({ scratchRoot, originalProgramData }) => {
+  // The standalone Utility Tool / Calibrator launches in parallel with the
+  // dashboard and shares the lifecycle dir. Without a liveness check the
+  // calibrator's `readLastShutdownSync` would see the dashboard's still-
+  // present sentinel + missing current.json and synthesize a bogus
+  // "unexpected-shutdown" record into prev — false-flagging a perfectly
+  // healthy first-instance run. The liveness check (process.kill(pid, 0))
+  // must catch this and return classification "concurrent-instance"
+  // without mutating sentinel or prev.
+  const mod = freshRequire(originalProgramData, scratchRoot);
+  // Startup #1: simulate the dashboard taking ownership.
+  mod.readLastShutdownSync();
+  const sentinelBefore = fs.readFileSync(mod.PATHS.sentinel, "utf8");
+  // Forge a sentinel whose pid is THIS process — known alive. The module's
+  // own check skips its own pid intentionally (to avoid self-deadlock in
+  // tests / single-run smokes), so we use a sibling pid that is definitely
+  // alive: the parent of `process` if available, otherwise fall back to
+  // `process.pid` and accept the test will exercise the "concurrent" path
+  // only when ppid is reachable. On Windows, ppid is usually the shell —
+  // also alive while tests run.
+  const alivePid = (typeof process.ppid === "number" && process.ppid > 0)
+    ? process.ppid
+    : process.pid;
+  fs.writeFileSync(mod.PATHS.sentinel, JSON.stringify({
+    startedAt: Date.now() - 60000,
+    isoTime: new Date(Date.now() - 60000).toISOString(),
+    pid: alivePid,
+    platform: process.platform,
+  }, null, 2));
+  // No current.json — would normally classify "unexpected".
+  try { fs.unlinkSync(mod.PATHS.current); } catch (_) {}
+  try { fs.unlinkSync(mod.PATHS.prev); } catch (_) {}
+
+  const snap = mod.readLastShutdownSync();
+  if (alivePid !== process.pid) {
+    assert.strictEqual(snap.classification, "concurrent-instance",
+      "live-pid sentinel must classify as concurrent-instance, not unexpected");
+    assert.strictEqual(snap.sentinelWasPresent, true);
+    assert.strictEqual(snap.priorReason, null,
+      "concurrent-instance must NOT synthesize a unexpected-shutdown prev");
+    // Critical: sentinel was NOT overwritten by the concurrent caller
+    const sentinelAfter = fs.readFileSync(mod.PATHS.sentinel, "utf8");
+    assert.strictEqual(
+      JSON.parse(sentinelAfter).pid,
+      alivePid,
+      "concurrent caller must NOT overwrite the live process's sentinel",
+    );
+    assert.strictEqual(fs.existsSync(mod.PATHS.prev), false,
+      "concurrent caller must NOT write a synthetic prev");
+  } else {
+    // No usable ppid (rare): the test cannot exercise the path, but the
+    // classifier must still not crash and must return a coherent snapshot.
+    assert.ok(snap.classification);
+  }
+  void sentinelBefore;
+});
+
+runTest("dead-pid-sentinel-still-classifies-unexpected", ({ scratchRoot, originalProgramData }) => {
+  // The mirror of the concurrent-instance test: a sentinel whose PID has
+  // already died (the actual "BSOD / power loss / hard kill" case the
+  // banner is built for) MUST still classify as unexpected. We pick a
+  // PID very unlikely to exist — 1 on Windows belongs to System Idle
+  // (a no-signal target → process.kill(1,0) raises EPERM, which the
+  // liveness probe treats as alive). So use a high pid number that is
+  // almost certainly unallocated. On a contended box this could collide
+  // — accept either outcome but log if collision happens.
+  const mod = freshRequire(originalProgramData, scratchRoot);
+  mod.readLastShutdownSync();
+  // Pick a pid that should not exist. We try in descending order.
+  const candidates = [987654321, 999999, 99999];
+  let deadPid = null;
+  for (const c of candidates) {
+    try {
+      process.kill(c, 0);
+      // exists or EPERM — not usable
+    } catch (err) {
+      if (err && err.code === "ESRCH") { deadPid = c; break; }
+    }
+  }
+  if (deadPid == null) {
+    console.log("    (skipped: could not find a guaranteed-dead pid on this box)");
+    return;
+  }
+  fs.writeFileSync(mod.PATHS.sentinel, JSON.stringify({
+    startedAt: Date.now() - 60000,
+    isoTime: new Date(Date.now() - 60000).toISOString(),
+    pid: deadPid,
+    platform: process.platform,
+  }, null, 2));
+  try { fs.unlinkSync(mod.PATHS.current); } catch (_) {}
+
+  const snap = mod.readLastShutdownSync();
+  assert.strictEqual(snap.classification, "unexpected",
+    "sentinel from a dead pid must still classify as unexpected — that is the banner's whole purpose");
+  assert.strictEqual(snap.sentinelWasPresent, true);
+  assert.ok(snap.priorReason);
+  assert.strictEqual(snap.priorReason.reason, "unexpected-shutdown");
+});
+
 runTest("process-exit-fallback-classifies-graceful", ({ scratchRoot, originalProgramData }) => {
   // Mirrors the electron/main.js last-resort writer: when no specific
   // handler ran, the process 'exit' / app 'quit' fallback records

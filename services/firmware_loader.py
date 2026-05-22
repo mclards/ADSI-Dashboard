@@ -909,9 +909,38 @@ def flash_node(frames: List[bytes], transport: Transport, *, node: int,
             accepted = True
             break
         if status == 1 and attempt == num_intentos - 1:
-            raise FirmwareError("Firmware load start (0x90) error code 1")
+            raise FirmwareError(
+                "Load-start rejected (0x90 status 1) — the inverter DSP "
+                "received a malformed start frame (checksum or format). "
+                "Confirm the target node/slave address and that the firmware "
+                "image matches this unit, then retry.")
         if status == 2 and attempt == num_intentos - 1:
-            raise FirmwareError("Firmware load start (0x90) error code 2")
+            # status==2 is the DSP's own 'busy / will not enter load' byte
+            # (ISM Cargador bTramaRx[2]==2), NOT a transport/socket error.
+            # The realistic field causes are a running inverter or a second
+            # Modbus master on the line — surface both as the next action.
+            # Multi-PC poller and per-IP/per-RS-485 reality are called out
+            # explicitly because operators routinely disable only the target
+            # node on a second dashboard, which does not free the bus.
+            raise FirmwareError(
+                "Load-start refused by the inverter (0x90 status 2). "
+                "The DSP will not enter firmware-load mode. The inverter "
+                "itself reported this — it is NOT a network or cable error. "
+                "To retry, ALL of the following must be true: "
+                "(1) the inverter is STOPPED — not running, not "
+                "grid-connected; "
+                "(2) no other Modbus master is talking to this gateway IP — "
+                "stop ISM, any SCADA/DAS, and every other dashboard or "
+                "poller, INCLUDING instances running on OTHER PCs on the "
+                "LAN; "
+                "(3) on each of those other dashboards, disable the WHOLE "
+                "inverter IP — not just one node. Every node behind this "
+                "gateway shares one RS-485 bus, so polls to ANY node on "
+                "the same IP keep the bus busy and the DSP will keep "
+                "refusing. "
+                "Note: the built-in bus lock only suppresses pollers on "
+                "THIS PC; it cannot reach a dashboard on a different "
+                "machine.")
     if not accepted:
         raise FirmwareError("Target did not reply to firmware update request")
 

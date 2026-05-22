@@ -52,6 +52,8 @@ const {
   sumEnergy5minByInverterRange,
   countDistinctReadingBuckets,
   getLatestReadingDate,
+  queryAlarmsRangeArchiveAware,
+  findAlarmByIdArchiveAware,
   archiveReadingsRows,
   archiveEnergyRows,
   getDailyReadingsSummaryRows,
@@ -155,6 +157,7 @@ const {
 const counterHealth = require("./counterHealth");
 const stopReasons = require("./stopReasons");
 const serialNumber = require("./serialNumber");
+const firmwareMap = require("./firmwareMap");
 const dailyAggregator = require("./dailyAggregator");
 const igbtHealth = require("./igbtHealth");
 const igbtThermal = require("./igbtThermal");
@@ -11199,9 +11202,26 @@ function enrichAlarmRow(row, nowTs = Date.now()) {
   const endTs = clearedTs || nowTs;
   const durationMs = occurredTs ? Math.max(0, endTs - occurredTs) : 0;
 
+  // Slim projection: the alarm-log table and notification panel only read
+  // `b.label` from `decoded`. The novice-expansion fields (safetyPrep,
+  // actionSteps, expectedReadings, escalateWhen, schematicNote, debugDesc,
+  // trinPM, physicalDevices, description, action) live on the cached
+  // /api/alarms/reference response and are resolved by openAlarmDetail()
+  // via decodeAlarmValueWithMeta(alarm_value). Inlining them per-row blew
+  // /api/alarms responses to ~12 KB/row (683 May-21 rows = 7.4 MB), which
+  // tripped the 20 s remote-proxy timeout over Tailscale AND stalled
+  // browser rendering on the gateway. Slim shape is ~50 B/row.
+  const decodedFull = decodeAlarm(row?.alarm_value);
+  const decoded = decodedFull.map((b) => ({
+    bit: b.bit,
+    hex: b.hex,
+    label: b.label,
+    severity: b.severity,
+  }));
+
   return {
     ...row,
-    decoded: decodeAlarm(row?.alarm_value),
+    decoded,
     alarm_hex: formatAlarmHex(row?.alarm_value),
     occurred_ts: occurredTs || null,
     end_ts: endTs,
@@ -16129,10 +16149,10 @@ app.get("/api/alarms/:alarm_id/stop-reason", (req, res) => {
     return res.status(400).json({ ok: false, error: "alarm_id required" });
   }
   try {
-    const alarmRow = db.prepare(
-      `SELECT id, ts, inverter, unit, alarm_code, alarm_value, severity, stop_reason_id
-       FROM alarms WHERE id = ?`,
-    ).get(alarmId);
+    // Archive-aware (v2.11.0-beta.10): drilldown click on a row that has
+    // already been pruned from hot now resolves out of the matching
+    // monthly archive shard instead of returning a confusing 404.
+    const alarmRow = findAlarmByIdArchiveAware(alarmId);
     if (!alarmRow) return res.status(404).json({ ok: false, error: "alarm not found" });
 
     let stopReason = null;
@@ -16848,6 +16868,117 @@ app.get("/api/serial/migration-history", (req, res) => {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
+
+// ─── Firmware version homogeneity (projection of the serial scan) ─────────
+//
+// Operator invariant: every inverter node runs the SAME firmware. Firmware
+// strings ride the SAME FC11 payload the serial scan already reads — these
+// routes are a PROJECTION of serialNumber.fleetScan(), never a second
+// Modbus sweep (RS-485 contention is a known sore point). Reads hit the
+// replicated SQLite snapshot so they work in remote mode (like
+// /api/serial/fleet-cache); only the scan drives hardware and is
+// gateway-only + bulk-auth.
+
+function _firmwareExpectedTuple() {
+  return firmwareMap.parseExpectedTuple(getSetting("firmwareExpectedTuple", ""));
+}
+
+// GET /api/firmware/state — last persisted snapshot, classified against the
+// canonical (modal, or operator-pinned firmwareExpectedTuple). Public, no
+// proxy: pure read of the replicated inverter_firmware_state table.
+app.get("/api/firmware/state", (req, res) => {
+  try {
+    const stateRows = firmwareMap.getFirmwareStateAll(db);
+    // Stored snapshot rows are all "known good reads" — present them as ok
+    // scan rows so classifyFleet recomputes canonical/verdicts consistently
+    // whether we just scanned or are viewing remotely off replication.
+    const asScan = stateRows.map((r) => ({
+      inverter_id: r.inverter_id,
+      inverter_ip: r.inverter_ip,
+      inverter_name: `Inverter ${r.inverter_id}`,
+      slave: r.slave,
+      ok: true,
+      model_code: r.model_code,
+      firmware_main: r.firmware_main,
+      firmware_aux: r.firmware_aux,
+      scanned_at_ms: r.last_seen_ms,
+    }));
+    const classified = firmwareMap.classifyFleet(asScan, _firmwareExpectedTuple());
+    res.json({ ok: true, ...classified, snapshot_rows: stateRows.length });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// GET /api/firmware/drift-log — chronological tuple-change trail. Public,
+// remote-safe (replicated table). ?limit=N&inverter=ID
+app.get("/api/firmware/drift-log", (req, res) => {
+  const limit = Math.min(5000, Math.max(1, Number(req.query.limit) || 200));
+  let inverterIp = null;
+  const invQ = Number(req.query.inverter);
+  if (Number.isFinite(invQ) && invQ > 0) inverterIp = _resolveInverterIp(invQ) || null;
+  try {
+    const rows = firmwareMap.getFirmwareDriftLog(db, { limit, inverterIp });
+    res.json({ ok: true, total: rows.length, rows });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// POST /api/firmware/fleet/scan — drive ONE serial fleet scan, project the
+// firmware columns, classify, persist the snapshot + drift events, return
+// the classified map. Bulk-auth, gateway-only (mirrors
+// /api/serial/fleet/scan). { bypass_cache: bool }
+app.post(
+  "/api/firmware/fleet/scan",
+  express.json(),
+  _proxySerialInRemote,
+  _requireBulkAuth,
+  async (req, res) => {
+    const topology = _buildTopologyForSerial();
+    if (!topology.length) {
+      return res.status(400).json({ ok: false, error: "no inverters configured" });
+    }
+    const bypassCache = Boolean(req.body?.bypass_cache);
+    const scanBy = String(req.body?.operator || "system:firmware-scan").slice(0, 64);
+    try {
+      const scan = await serialNumber.fleetScan({
+        topology,
+        readOne: (inv, slave, opts) => _proxySerialRead(inv, slave, opts),
+        bypassCache,
+      });
+      const expected = _firmwareExpectedTuple();
+      const classified = firmwareMap.classifyFleet(scan.rows, expected);
+      let drift_logged = 0;
+      try {
+        const prev = firmwareMap.getFirmwareStateAll(db);
+        const { upserts, driftEvents } = firmwareMap.diffForPersist(prev, classified);
+        firmwareMap.upsertFirmwareState(db, upserts);
+        for (const ev of driftEvents) {
+          firmwareMap.logFirmwareDrift(db, ev, scanBy);
+        }
+        drift_logged = driftEvents.length;
+        const retain = Number(getSetting("firmwareDriftLogRetainDays", 365)) || 365;
+        firmwareMap.pruneFirmwareDriftLog(db, retain);
+      } catch (persistErr) {
+        // Persistence must never sink the live classification result.
+        console.error("[firmware] persist failed:", persistErr.message);
+      }
+      res.json({
+        ok: true,
+        bypass_cache: bypassCache,
+        scanned_at_ms: scan.finished_at_ms,
+        total_targets: scan.total_targets,
+        successful: scan.successful,
+        failed: scan.failed,
+        drift_logged,
+        ...classified,
+      });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  },
+);
 
 // NOTE: Measurement Board migration export is served by the standard
 // export pipeline — POST /api/export/measurement-board-migration — so it
@@ -20365,15 +20496,16 @@ app.get("/api/alarms", (req, res) => {
   const s = parseDateMs(start, Date.now() - 7 * 86400000, false);
   const e = parseDateMs(end, Date.now(), true);
   const configured = getConfiguredNodeSet();
-  const rows =
-    inverter && inverter !== "all"
-      ? db
-          .prepare(
-            `SELECT id, ts, inverter, unit, alarm_code, alarm_value, severity, cleared_ts, acknowledged, updated_ts, stop_reason_id
-               FROM alarms WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts DESC LIMIT 2000`,
-          )
-          .all(Number(inverter), s, e)
-      : stmts.getAlarmsRange.all(s, e);
+  // Archive-aware (v2.11.0-beta.10): merges hot DB + every overlapping
+  // monthly archive shard so past-date queries surface alarms that the
+  // retainDays-driven pruner has migrated out of hot. The reader keeps
+  // the LIMIT 2000 / ts-DESC contract the UI depends on.
+  const invSel =
+    inverter && inverter !== "all" ? Number(inverter) : null;
+  const rows = queryAlarmsRangeArchiveAware(s, e, {
+    inverter: invSel,
+    limit: 2000,
+  });
   const nowTs = Date.now();
   const out = rows
     .filter((r) =>

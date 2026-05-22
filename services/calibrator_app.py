@@ -61,6 +61,7 @@ from drivers import modbus_tcp, modbus_rtu
 from services import firmware_transport as _fw_tx
 from services import firmware_loader as _fw_loader
 from services import vendor_pdu as _vendor_pdu
+from services import firmware_buslock as _fw_lock
 
 # ─── Configuration ────────────────────────────────────────────────────────
 
@@ -407,6 +408,8 @@ async def api_calibration_state(slave: int):
     if not client:
         return {"ok": False, "error": "no_client", "slave": int(slave)}
 
+    if _fw_flash_in_progress():
+        return {"ok": False, "error": "firmware_flash_in_progress"}
     lock = _registry.get_lock()
     loop = asyncio.get_running_loop()
 
@@ -481,6 +484,8 @@ async def api_calibration_write(req: Request):
     if not client:
         raise HTTPException(503, "no_client")
 
+    if _fw_flash_in_progress():
+        return {"ok": False, "error": "firmware_flash_in_progress"}
     lock = _registry.get_lock()
     loop = asyncio.get_running_loop()
 
@@ -534,6 +539,8 @@ async def api_calibration_write_bulk(req: Request):
     if not client:
         raise HTTPException(503, "no_client")
 
+    if _fw_flash_in_progress():
+        return {"ok": False, "error": "firmware_flash_in_progress"}
     lock = _registry.get_lock()
     loop = asyncio.get_running_loop()
 
@@ -542,6 +549,89 @@ async def api_calibration_write_bulk(req: Request):
             None,
             _calib_io.write_bulk_with_lock,
             client, lock, int(slave), pairs,
+        )
+        result["slave"] = int(slave)
+        result["read_at_ms"] = int(time.time() * 1000)
+        return result
+    except Exception as exc:
+        raise HTTPException(500, f"executor_error: {exc}")
+
+
+@app.post("/calibration/config-write")
+async def api_calibration_config_write(req: Request):
+    """Write ONE L2 config-block field (Utility Tool tabs B/C/D/I).
+
+    Body: {
+      slave:      int,
+      field:      str,            # field name from cfg_trif_map.FIELDS
+      value:      any,            # user-supplied natural value (e.g. 5000 W, 60.00 Hz)
+      verify_delay_s?: float,
+    }
+
+    The endpoint looks the field up in cfg_trif_map.FIELDS (single source
+    of truth — same map the read decoder uses), routes through the pure
+    encoder in cfg_block_write.encode_value, then calls the locked write
+    helper in calibration_io.write_cfg_field_with_lock. The same UNLOCK
+    magic + sentinel guard + verify cycle as the calibration write path.
+
+    Refuses cleanly (with the encoder's error message) for:
+      - kinds dt6 / recta / byte (use ISM)
+      - fields ValidCfgCode / FechaConfiguracion / NumGrabaciones
+      - any value outside the kind's safe range
+
+    Auth + audit are owned by the Node proxy layer; this Python endpoint
+    is reachable only on loopback by design.
+    """
+    try:
+        body = await req.json()
+    except Exception:
+        raise HTTPException(400, "invalid JSON")
+
+    slave = int(body.get("slave") or 0)
+    field_name = str(body.get("field") or "").strip()
+    new_value = body.get("value")
+    verify_delay_s = float(body.get("verify_delay_s") or 1.0)
+
+    if slave <= 0:
+        raise HTTPException(400, "slave required")
+    if not field_name:
+        raise HTTPException(400, "field required")
+    if new_value is None:
+        raise HTTPException(400, "value required")
+
+    # Resolve the field metadata from the SAME map the read decoder uses
+    # — guarantees encoder + decoder stay in lockstep through future regens.
+    try:
+        from services import cfg_trif_map as _cfg_map
+    except Exception as exc:
+        raise HTTPException(500, f"cfg_trif_map unavailable: {exc}")
+
+    field_meta = None
+    for f in (getattr(_cfg_map, "FIELDS", None) or []):
+        if str(f.get("field") or "") == field_name:
+            field_meta = f
+            break
+    if field_meta is None:
+        raise HTTPException(400, f"unknown field '{field_name}'")
+
+    client = _registry.get_client()
+    if not client:
+        raise HTTPException(503, "no_client")
+
+    if _fw_flash_in_progress():
+        return {"ok": False, "error": "firmware_flash_in_progress"}
+
+    lock = _registry.get_lock()
+    loop = asyncio.get_running_loop()
+
+    try:
+        result = await loop.run_in_executor(
+            None,
+            lambda: _calib_io.write_cfg_field_with_lock(
+                client, lock, int(slave), field_meta, new_value,
+                verify_delay_s=verify_delay_s,
+                is_flash_active=_fw_flash_in_progress,
+            ),
         )
         result["slave"] = int(slave)
         result["read_at_ms"] = int(time.time() * 1000)
@@ -577,6 +667,8 @@ async def api_calibration_consign(req: Request):
     if not client:
         return {"ok": False, "pct": pct, "q15": 0, "error": "no_client"}
 
+    if _fw_flash_in_progress():
+        return {"ok": False, "error": "firmware_flash_in_progress"}
     lock = _registry.get_lock()
 
     # Delegate to single-source calibration core
@@ -598,6 +690,8 @@ async def api_calibration_preflight(slave: int):
     if not client:
         return {"ok": False, "error": "no_client"}
 
+    if _fw_flash_in_progress():
+        return {"ok": False, "error": "firmware_flash_in_progress"}
     lock = _registry.get_lock()
     loop = asyncio.get_running_loop()
 
@@ -622,6 +716,8 @@ async def api_calibration_full_config(slave: int):
     if not client:
         return {"ok": False, "error": "no_client"}
 
+    if _fw_flash_in_progress():
+        return {"ok": False, "error": "firmware_flash_in_progress"}
     lock = _registry.get_lock()
     loop = asyncio.get_running_loop()
 
@@ -666,6 +762,93 @@ async def api_calibration_full_config(slave: int):
             "block_len": _calib_dec.CONFIG_BLOCK_LENGTH,
             "decoded": decoded,
             "regs_hex": " ".join(f"{v & 0xFFFF:04X}" for v in raw["regs"]),
+            "read_at_ms": int(time.time() * 1000),
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@app.get("/calibration/cfg-map")
+async def api_calibration_cfg_map():
+    """Return the STATIC Utility Tool field map (offsets, kinds, groups,
+    labels, units). No transport, no Modbus — lets the UI render the
+    layout of every read-only tab even before a Connect/Read."""
+    try:
+        try:
+            from services import cfg_trif_map as _m  # type: ignore
+        except Exception:
+            import cfg_trif_map as _m                # type: ignore
+        return {
+            "ok": True,
+            "fields": list(_m.FIELDS),
+            "group_titles": dict(_m.GROUP_TITLES),
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@app.get("/calibration/scan/{ip}/{slave}")
+async def api_calibration_scan(ip: str, slave: int):
+    """Read-only fleet-scan probe — TCP only.
+
+    Opens a SHORT-LIVED Modbus-TCP client to `ip`, reads the 177-reg config
+    block, decodes it, and closes the socket. Deliberately does NOT touch
+    the registered transport (`_registry`) so an active calibration/transport
+    on a different inverter is never disturbed. Never writes.
+    Returns {ok, ip, slave, decoded} | {ok:false, error}.
+    """
+    if _fw_flash_in_progress():
+        return {"ok": False, "error": "firmware_flash_in_progress"}
+    loop = asyncio.get_running_loop()
+
+    def _scan(addr: str, s: int):
+        CHUNK = 48
+        client = None
+        try:
+            client = modbus_tcp.create_client(addr, port=502, timeout=3.0)
+            try:
+                opened = bool(client.connect())
+            except Exception:
+                opened = False
+            if not opened and hasattr(client, "is_socket_open"):
+                opened = bool(client.is_socket_open())
+            if not opened:
+                return {"ok": False, "error": f"unreachable:{addr}"}
+            base = _calib_dec.CONFIG_BLOCK_BASE
+            total = _calib_dec.CONFIG_BLOCK_LENGTH
+            out: list[int] = []
+            offset = 0
+            while offset < total:
+                need = min(CHUNK, total - offset)
+                r = client.read_holding_registers(
+                    address=base + offset, count=need, unit=int(s))
+                if r is None or r.isError():
+                    return {"ok": False, "error": f"modbus_error@{offset}"}
+                got = list(r.registers) if hasattr(r, "registers") else []
+                if len(got) < need:
+                    return {"ok": False,
+                            "error": f"short_frame@{offset}: {len(got)}/{need}"}
+                out.extend(got)
+                offset += need
+            return {"ok": True, "regs": out}
+        except Exception as exc:
+            return {"ok": False, "error": f"exception: {exc}"}
+        finally:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+
+    try:
+        raw = await loop.run_in_executor(None, _scan, str(ip), int(slave))
+        if not raw.get("ok"):
+            return raw
+        return {
+            "ok": True,
+            "ip": str(ip),
+            "slave": int(slave),
+            "decoded": _calib_dec.decode_config_block(raw["regs"]),
             "read_at_ms": int(time.time() * 1000),
         }
     except Exception as exc:
@@ -750,6 +933,18 @@ _fw_jobs: Dict[str, Dict[str, Any]] = {}
 _fw_jobs_lock = threading.Lock()
 _FW_JOB_TTL_S = 3600          # finished jobs purge-able after 1 h
 _FW_JOB_MAX = 64              # hard cap on retained job records
+
+
+def _fw_flash_in_progress() -> bool:
+    """True while any firmware flash job is live. The flash worker holds the
+    registry per-IP lock (`with bus_lock:`) for the ENTIRE multi-minute
+    flash, so any Modbus calibration/identity route that also takes that
+    lock would otherwise block until the flash ends — a frozen,
+    feedback-less UI. Those routes fast-fail on this instead, keeping the
+    standalone tool responsive (and avoiding a pile-up of blocked worker
+    threads). Cheap, read-only, lock-guarded snapshot."""
+    with _fw_jobs_lock:
+        return any(j.get("done") is False for j in _fw_jobs.values())
 
 
 def _fw_prune_jobs() -> None:
@@ -868,6 +1063,8 @@ async def api_firmware_identity(slave: int):
     irreversible step. Read-only; works over TCP or RS485/RTU.
     """
     ttype = _registry.get_transport_type()
+    if _fw_flash_in_progress():
+        return {"ok": False, "error": "firmware_flash_in_progress"}
     lock = _registry.get_lock()
     loop = asyncio.get_running_loop()
 
@@ -1024,6 +1221,44 @@ def _fw_live_worker(job_id: str, path: str, node: int, slave: int,
     def _prog(msg: str, pct: int = 0):
         job["progress"].append({"msg": msg, "pct": pct})
 
+    # Keep the cross-process bus-lock claim fresh for the multi-minute
+    # flash. Daemon thread so a hung flash can't wedge shutdown; the claim
+    # carries a hard TTL so even a crashed worker self-clears for the
+    # poller within ~2 min. No-op for serial flashes (link_host is None).
+    def _fw_lock_heartbeat():
+        while not job["done"]:
+            try:
+                if link_host:
+                    _fw_lock.heartbeat(link_host, node, slave, job_id)
+            except Exception:
+                pass
+            for _ in range(40):              # ~40 s, but bail fast on done
+                if job["done"]:
+                    return
+                time.sleep(1)
+    if link_host:
+        threading.Thread(target=_fw_lock_heartbeat,
+                          name=f"fw-lock-{job_id}", daemon=True).start()
+
+    # Pre-load bus settle (TCP only). This is a best-effort safeguard for
+    # the case where a dashboard/poller is running ON THE SAME (gateway)
+    # PC: the cross-process claim was published before this thread, but a
+    # local consumer re-reads the marker on a 1-2 s cache, so we wait out
+    # that window before the first 0x90 so a same-box poller has provably
+    # backed off. It is NOT a dependency on the dashboard — the standalone
+    # tool needs no dashboard, and this settle does nothing (and the lock
+    # is fail-open) when none is running. It also CANNOT prevent an
+    # external master on another machine (ISM/SCADA/another PC's poller)
+    # or a running inverter from causing "0x90 error code 2"; that is the
+    # DSP refusing the load and must be resolved at the inverter.
+    # Negligible vs a multi-minute flash; serial skips it; abort bails.
+    if link_host:
+        _prog("Settling the Modbus bus before load-start…", 0)
+        for _ in range(7):                 # ~3.5 s, 0.5 s granularity
+            if job["abort"]:
+                break
+            time.sleep(0.5)
+
     # Injected transports are owned by US, not flash_inverter_node (it only
     # connects/closes a transport it created itself), so close it here.
     abortable = _AbortableTransport(transport_obj)
@@ -1059,6 +1294,13 @@ def _fw_live_worker(job_id: str, path: str, node: int, slave: int,
         except Exception:
             pass
         job["done"] = True
+        # Release the bus lock immediately so the dashboard resumes
+        # polling this inverter the moment the flash ends (success, fail,
+        # or abort). The TTL is the backstop if this best-effort fails.
+        try:
+            _fw_lock.release(job_id)
+        except Exception:
+            pass
 
 
 @app.post("/firmware/flash")
@@ -1204,6 +1446,18 @@ async def api_firmware_flash(req: Request):
             "node": node, "slave": slave, "host": link_label,
             "file": os.path.basename(path), "started_ms": int(time.time() * 1000),
         }
+
+    # Cross-process bus lock: tell the dashboard poller (separate process,
+    # same transparent TCP->RTU gateway) to back off this inverter for the
+    # duration so two Modbus masters don't collide and trip the DSP "error
+    # code 2". TCP only — a serial flash has no IP the poller contends on.
+    # Published BEFORE the worker connects so there is no contention window;
+    # the worker heartbeats it and always releases in its finally.
+    if link_host:
+        try:
+            _fw_lock.claim(link_host, node, slave, job_id)
+        except Exception:
+            pass  # bus lock is best-effort; never block the flash on it
 
     t = threading.Thread(
         target=_fw_live_worker, name=f"fw-flash-{job_id}",

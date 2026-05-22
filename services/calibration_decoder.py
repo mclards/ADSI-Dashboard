@@ -19,6 +19,7 @@ acquiring the per-IP lock and performing the FC03 read.  See the plan at
 from __future__ import annotations
 
 import datetime as _dt
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -51,9 +52,15 @@ CALIBRATION_FIELDS: List[tuple] = [
     (89, "Fesc_vpv_n",        "F_E_Vpvn",          "DC",         False, "DC voltage full-scale, negative input"),
     (90, "comp_per_vacio",    "Per. Vacio",        "Active P",   False, "Self-consumption / standby comp"),
     (91, "comp_reactiva_x1",  "Pot. Reactiv_X1",   "Reactive 1", False, "Reactive curve X1 (Pn=20%)"),
-    (92, "comp_reactiva_y1",  "Comp. Reacti_Y1",   "Reactive 1", True,  "Reactive curve Y1"),
+    # 2026-05-20 audit fix: comp_reactiva_y1/y2 were forced signed=True
+    # here, contradicting the ISM TSV (which declares both as plain
+    # HR_UInt16Attribute). The signed read displayed register values
+    # >= 32768 as large negative numbers in the Utility Tool while ISM
+    # showed them as positive, producing a 65536-unit mismatch. They are
+    # now UInt16 in both decode AND write paths, matching ISM.
+    (92, "comp_reactiva_y1",  "Comp. Reacti_Y1",   "Reactive 1", False, "Reactive curve Y1"),
     (93, "comp_reactiva_x2",  "Pot. Reactiv_X2",   "Reactive 2", False, "Reactive curve X2 (Pn=70%)"),
-    (94, "comp_reactiva_y2",  "Comp. Reacti_Y2",   "Reactive 2", True,  "Reactive curve Y2"),
+    (94, "comp_reactiva_y2",  "Comp. Reacti_Y2",   "Reactive 2", False, "Reactive curve Y2"),
 ]
 
 # Offsets present in the config block we also surface as read-only context.
@@ -163,6 +170,145 @@ def decode_calibration_block(regs: List[int],
     }
 
 
+# ─── Full grouped settings (Utility Tool read-only tabs) ───────────────────
+#
+# Field/offset/kind map is generated from the ISM-reflected TSV into the
+# committed artifact `cfg_trif_map.py` (no _spike/_ism runtime dependency).
+# Enum *member* names are not in the artifact; boolean enums are decoded
+# from their name-encoded polarity, the few multi-value enums actually used
+# in the surfaced B/C/D/I tabs have a small curated table here.
+
+try:                       # packaged / `from services import ...`
+    from . import cfg_trif_map as _cfg_map           # type: ignore
+except Exception:                                    # pragma: no cover
+    try:
+        import cfg_trif_map as _cfg_map              # type: ignore
+    except Exception:
+        _cfg_map = None                              # decode_full_settings degrades
+
+# Curated multi-value enums (single-bit selectors in the requested tabs).
+# Evidence: ISM CfgTrifAU field names + 2026-05-19 audit + 2026-05-21
+# live cross-check against ISM page-2 screenshot ("DC Input Voltage
+# Reference: MPPT" for the bit-1 = 0 state, which we previously rendered
+# as "disabled" — wrong terminology for the field's actual semantics).
+_CURATED_ENUMS = {
+    "EnumMarchaParo":            {0: "Paro (stop)", 1: "Marcha (run)"},
+    "eReferenciaTensionEntrada": {0: "MPPT", 1: "Fixed"},
+    "eIdiomaLocalOIngles":       {0: "Local", 1: "English"},
+}
+
+# Boolean enums encode polarity in their type name — decode without the DLL.
+_BOOL_ENUM_PATTERNS = [
+    (re.compile(r"^e_?Si(\d)_No(\d)$"),                    ("YES", "no")),
+    (re.compile(r"^e(\d)Activado_(\d)Desactivado$"),       ("ON", "off")),
+    (re.compile(r"^e_(\d)OFF_(\d)ON$"),                    None),   # explicit
+    (re.compile(r"^e_(\d)ON_(\d)OFF$"),                    None),
+    (re.compile(r"^eHabilitado(\d)Deshab\d?$"),            ("ENABLED", "disabled")),
+    (re.compile(r"^eDeshabilitado(\d)Habilitado(\d)$"),    ("disabled", "ENABLED")),
+]
+
+
+def _decode_enum_bit(enum_name: Optional[str], bit_val: int) -> str:
+    if enum_name and enum_name in _CURATED_ENUMS:
+        return _CURATED_ENUMS[enum_name].get(bit_val, str(bit_val))
+    if enum_name:
+        n = enum_name
+        m = re.match(r"^e_?Si(\d)_No(\d)$", n)
+        if m:
+            return "YES" if bit_val == int(m.group(1)) else "no"
+        m = re.match(r"^e(\d)Activado_(\d)Desactivado$", n)
+        if m:
+            return "ON" if bit_val == int(m.group(1)) else "off"
+        m = re.match(r"^e_(\d)OFF_(\d)ON$", n)
+        if m:
+            return "OFF" if bit_val == int(m.group(1)) else "ON"
+        m = re.match(r"^e_(\d)ON_(\d)OFF$", n)
+        if m:
+            return "ON" if bit_val == int(m.group(1)) else "OFF"
+        m = re.match(r"^eHabilitado(\d)Deshab\d?$", n)
+        if m:
+            return "ENABLED" if bit_val == int(m.group(1)) else "disabled"
+        m = re.match(r"^eDeshabilitado(\d)Habilitado(\d)$", n)
+        if m:
+            return "disabled" if bit_val == int(m.group(1)) else "ENABLED"
+    return str(bit_val)
+
+
+def _decode_one(regs: List[int], f: Dict[str, Any]) -> Dict[str, Any]:
+    off = int(f["offset"])
+    n = len(regs)
+    raw = regs[off] & 0xFFFF if 0 <= off < n else None
+    kind = f["kind"]
+    decoded: Any = None
+    if raw is None:
+        decoded = None
+    elif kind == "u16":
+        decoded = raw
+    elif kind == "i16":
+        decoded = _signed16(raw)
+    elif kind == "x10":
+        decoded = raw * 10
+    elif kind == "c100":
+        decoded = round(_signed16(raw) / 100.0, 2)
+    elif kind == "recta":
+        decoded = round(raw / 63351.0 * 100.0, 2)
+    elif kind == "can":
+        # ISM HR_PutoNodoCanAttribute.Read (IL-verified 2026-05-20):
+        #   display = (raw - 1) as u16
+        # i.e. the inverter stores `(display + 1)` in the register. A
+        # display value of "CAN node 1" lives at raw 2. The earlier
+        # `raw & 0xFF` showed the raw register and was off-by-one
+        # against ISM. Match ISM's wrap behaviour exactly so values are
+        # bit-identical.
+        decoded = (raw - 1) & 0xFFFF
+    elif kind == "byte":
+        decoded = {"lo": raw & 0xFF, "hi": raw >> 8}
+    elif kind == "dt6" and off + 6 <= n:
+        y, mo, dy, hr, mi, se = (regs[off + i] & 0xFFFF for i in range(6))
+        decoded = f"{y:04d}-{mo:02d}-{dy:02d} {hr:02d}:{mi:02d}:{se:02d}"
+    elif kind == "bits" and f.get("bits") is not None:
+        spec = [int(b) for b in str(f["bits"]).split(";")]
+        if len(spec) == 1:
+            bv = (raw >> spec[0]) & 1
+            decoded = _decode_enum_bit(f.get("enum"), bv)
+        else:
+            start, width = spec[0], spec[1]
+            decoded = (raw >> start) & ((1 << width) - 1)
+    else:
+        decoded = raw
+    return {
+        "offset": off,
+        "field": f["field"],
+        "label": f.get("label") or f["field"],
+        "group": f["group"],
+        "unit": f.get("unit", ""),
+        "raw_u16": raw,
+        "raw_hex": (f"0x{raw:04X}" if raw is not None else None),
+        "decoded": decoded,
+        "writable": False,
+    }
+
+
+def decode_full_settings(regs: List[int]) -> Dict[str, Any]:
+    """Decode the full categorized settings map for the Utility Tool tabs.
+
+    Returns {available, group_titles, groups:{<letter>:[field,...]}}.
+    Read-only — no write metadata, never references offsets 81-94 here
+    (calibration scale factors stay owned by decode_calibration_block).
+    """
+    if _cfg_map is None or not getattr(_cfg_map, "FIELDS", None):
+        return {"available": False, "group_titles": {}, "groups": {}}
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for f in _cfg_map.FIELDS:
+        row = _decode_one(regs, f)
+        groups.setdefault(f["group"], []).append(row)
+    return {
+        "available": True,
+        "group_titles": dict(getattr(_cfg_map, "GROUP_TITLES", {})),
+        "groups": groups,
+    }
+
+
 def decode_config_block(regs: List[int]) -> Dict[str, Any]:
     """Decode the full 177-register config block when the caller requests it.
 
@@ -205,6 +351,7 @@ def decode_config_block(regs: List[int]) -> Dict[str, Any]:
         "rtc":        rtc,
         "context":    context,
         "calibration": calib,
+        "full":       decode_full_settings(regs),
         "block_len":   n,
     }
 
