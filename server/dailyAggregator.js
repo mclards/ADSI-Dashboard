@@ -837,6 +837,11 @@ function getSlotCoverage(inverterIp, slave, dateLocal) {
 
 // ─── Retention pruner ──────────────────────────────────────────────────────
 
+// Note (v2.11.1-beta.1) — inverter_5min_param archive deferred. The hot
+// table gains many Slice β diagnostic columns via ensureColumn migrations
+// that a static archive shard DDL would silently drop. Until the archive
+// shard mirrors the schema dynamically (PRAGMA table_info), this stays
+// DELETE-only with the existing 7-day floor (bounded loss).
 function pruneRetention(retainDays) {
   if (!_db) return { deleted: 0 };
   const days = Math.max(7, Math.min(3650, Number(retainDays) || 365));

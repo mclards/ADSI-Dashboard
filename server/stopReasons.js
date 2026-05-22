@@ -236,19 +236,34 @@ function getRecentForInverter(db, inverterId, limit = 50) {
   return rows.map(_decorateRow);
 }
 
-function getEventById(db, eventId) {
-  const row = db.prepare(`
+// v2.11.1-beta.1 — both lookups accept an optional `archiveLookup` function
+// that's tried after the hot SELECT returns null. The endpoint wires the
+// archive-aware finder from server/db.js (findStopReasonByIdArchiveAware /
+// findStopReasonByAlarmIdArchiveAware). _decorateRow is applied to the
+// raw archive row so the renderer never has to know whether the row came
+// from hot or an archived shard.
+function getEventById(db, eventId, { archiveLookup = null } = {}) {
+  const id = _safeInt(eventId, 0);
+  if (!id) return null;
+  let row = db.prepare(`
     SELECT * FROM inverter_stop_reasons WHERE id = ?
-  `).get(_safeInt(eventId, 0));
+  `).get(id);
+  if (!row && typeof archiveLookup === "function") {
+    try { row = archiveLookup(id); } catch (_) { row = null; }
+  }
   return row ? _decorateRow(row) : null;
 }
 
-function getEventByAlarmId(db, alarmId) {
-  if (!_safeInt(alarmId)) return null;
-  const row = db.prepare(`
+function getEventByAlarmId(db, alarmId, { archiveLookup = null } = {}) {
+  const id = _safeInt(alarmId, 0);
+  if (!id) return null;
+  let row = db.prepare(`
     SELECT * FROM inverter_stop_reasons WHERE alarm_id = ?
     ORDER BY read_at_ms DESC LIMIT 1
-  `).get(_safeInt(alarmId, 0));
+  `).get(id);
+  if (!row && typeof archiveLookup === "function") {
+    try { row = archiveLookup(id); } catch (_) { row = null; }
+  }
   return row ? _decorateRow(row) : null;
 }
 
@@ -320,18 +335,59 @@ function _decorateRow(row) {
 /**
  * Apply the configured retention window. Default 365 days for
  * inverter_stop_reasons, 90 days for inverter_stop_histogram.
- * Returns { reasons, histogram } counts of deleted rows.
+ *
+ * v2.11.1-beta.1 — `inverter_stop_reasons` now MIGRATES to monthly archive
+ * shards via archiveStopReasonsBeforeCutoff. Same close-of-data-loss-gap
+ * pattern as the v2.11.0-beta.10 alarms fix: an alarm whose row migrates
+ * to its archive shard (after `retainDays`) joins back to its captured
+ * StopReason snapshot via findStopReasonByIdArchiveAware so the drilldown
+ * panel stays populated indefinitely.
+ *
+ * Histogram rows remain DELETE-only — they're a low-value diagnostic
+ * snapshot, regenerable from the inverter on demand, with a hardcoded
+ * 90-day default that the operator can lower only down to 7 days (bounded
+ * loss, acceptable per the 2026-05-22 retention audit).
+ *
+ * Returns { reasons: migrated_count, histogram: deleted_count } so the
+ * cron log entry still reports activity. Callers that previously read the
+ * "deleted" semantics now see migration counts under the same key.
  */
-function pruneOldRows(db, {
+async function pruneOldRows(db, {
   reasonsRetainDays = 365,
   histogramRetainDays = 90,
+  archiveStopReasonsBeforeCutoff = null,
 } = {}) {
   const now = Date.now();
   const reasonsCutoff = now - Math.max(1, reasonsRetainDays) * 86_400_000;
   const histogramCutoff = now - Math.max(1, histogramRetainDays) * 86_400_000;
-  const r1 = db.prepare(`DELETE FROM inverter_stop_reasons WHERE read_at_ms < ?`).run(reasonsCutoff);
+  // Migrate (not delete) old stop_reasons rows. `archiveStopReasonsBeforeCutoff`
+  // is injected by the cron caller (server/index.js) to keep this module's
+  // ./db dependency surface narrow — same DI shape as the rest of stopReasons.
+  let reasonsCount = 0;
+  if (typeof archiveStopReasonsBeforeCutoff === "function") {
+    try {
+      reasonsCount = await archiveStopReasonsBeforeCutoff(reasonsCutoff);
+    } catch (err) {
+      // Surface as a warning but don't sink the histogram prune below.
+      console.warn(
+        "[stop-reasons] archiveStopReasonsBeforeCutoff failed:",
+        err?.message || err,
+      );
+    }
+  } else {
+    // Defensive fallback (caller forgot to inject): keep the legacy DELETE
+    // so a misconfigured deployment still bounds the table. Logged so the
+    // operator notices.
+    console.warn(
+      "[stop-reasons] archive injector missing — falling back to DELETE (data loss for cleared snapshots > retainDays).",
+    );
+    const r1 = db
+      .prepare(`DELETE FROM inverter_stop_reasons WHERE read_at_ms < ?`)
+      .run(reasonsCutoff);
+    reasonsCount = Number(r1.changes || 0);
+  }
   const r2 = db.prepare(`DELETE FROM inverter_stop_histogram WHERE read_at_ms < ?`).run(histogramCutoff);
-  return { reasons: Number(r1.changes || 0), histogram: Number(r2.changes || 0) };
+  return { reasons: reasonsCount, histogram: Number(r2.changes || 0) };
 }
 
 module.exports = {

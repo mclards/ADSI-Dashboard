@@ -5,7 +5,7 @@
  * Audit log: every control action (start/stop node/all) is persisted
  */
 
-const { db, stmts, getSetting } = require("./db");
+const { db, stmts, getSetting, queryAuditRangeArchiveAware } = require("./db");
 const { broadcastUpdate } = require("./ws");
 const { classifyAlarmTransition } = require("./alarmEpisodeCore");
 
@@ -1302,20 +1302,14 @@ function getAuditLog({ start, end, inverter, limit = 500 } = {}) {
   const e = end || Date.now();
   const safeLimit = Math.min(20000, Math.max(1, Math.trunc(Number(limit) || 5000)));
   const invNum = Math.trunc(Number(inverter || 0));
-  let rows;
-  if (Number.isFinite(invNum) && invNum > 0) {
-    rows = db
-      .prepare(
-        `SELECT * FROM audit_log WHERE inverter=? AND ts BETWEEN ? AND ? ORDER BY ts DESC LIMIT ?`,
-      )
-      .all(invNum, s, e, safeLimit);
-    return withAuditIpFallback(rows);
-  }
-  rows = db
-    .prepare(
-      `SELECT * FROM audit_log WHERE ts BETWEEN ? AND ? ORDER BY ts DESC LIMIT ?`,
-    )
-    .all(s, e, safeLimit);
+  // v2.11.1 — archive-aware so past-date /api/audit queries surface rows
+  // migrated out of hot by retention pruning. Same contract as
+  // queryAlarmsRangeArchiveAware: hot first, archive months merged in, sort
+  // ts DESC, cap applied AFTER the merge.
+  const rows = queryAuditRangeArchiveAware(s, e, {
+    inverter: Number.isFinite(invNum) && invNum > 0 ? invNum : null,
+    limit: safeLimit,
+  });
   return withAuditIpFallback(rows);
 }
 

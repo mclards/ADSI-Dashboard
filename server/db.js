@@ -180,6 +180,72 @@ const ARCHIVE_ALARM_TABLE_DDL = `
   updated_ts     INTEGER NOT NULL DEFAULT 0,
   stop_reason_id INTEGER
 `;
+// Mirrors the hot `audit_log` table column-for-column (minus AUTOINCREMENT —
+// archives preserve the hot id so cross-tier joins stay stable). Added in
+// v2.11.1 to close the same retention-deletes-data gap that alarms had in
+// v2.11.0-beta.10: pruneOldData() used to run unconditional
+// `DELETE FROM audit_log WHERE ts < auditCutoff` so the operator's control-
+// action history could evaporate permanently if `auditRetainDays` was ever
+// set low. Now audit rows migrate to the same monthly shards used for
+// alarms / readings / energy_5min, and queryAuditRangeArchiveAware() merges
+// hot + archive on read.
+const ARCHIVE_AUDIT_TABLE_DDL = `
+  id        INTEGER PRIMARY KEY,
+  ts        INTEGER NOT NULL,
+  operator  TEXT DEFAULT 'OPERATOR',
+  inverter  INTEGER NOT NULL,
+  node      INTEGER DEFAULT 0,
+  action    TEXT NOT NULL,
+  scope     TEXT DEFAULT 'single',
+  result    TEXT DEFAULT 'ok',
+  ip        TEXT DEFAULT '',
+  reason    TEXT DEFAULT ''
+`;
+// v2.11.1-beta.1 — mirror the hot `inverter_stop_reasons` schema column-for-
+// column (minus AUTOINCREMENT, so the hot id is preserved across migrations).
+// Drilldown panel resolves alarm.stop_reason_id via findStopReasonByIdArchiveAware
+// so an alarm whose row has migrated to the alarm shard still surfaces its
+// captured StopReason snapshot.
+const ARCHIVE_STOP_REASONS_TABLE_DDL = `
+  id              INTEGER PRIMARY KEY,
+  inverter_id     INTEGER NOT NULL,
+  inverter_ip     TEXT NOT NULL,
+  slave           INTEGER NOT NULL,
+  node            INTEGER NOT NULL,
+  read_at_ms      INTEGER NOT NULL,
+  event_at_ms     INTEGER,
+  trigger_source  TEXT NOT NULL DEFAULT 'manual',
+  alarm_id        INTEGER,
+  pot_ac          REAL,
+  vpv             REAL,
+  vac1            REAL, vac2 REAL, vac3 REAL,
+  iac1            REAL, iac2 REAL,
+  frec1           REAL, frec2 REAL, frec3 REAL,
+  cos             REAL,
+  temp            INTEGER,
+  alarma          INTEGER NOT NULL DEFAULT 0,
+  motparo         INTEGER NOT NULL DEFAULT 0,
+  motparo_label   TEXT,
+  alarmas1        INTEGER, alarmas2 INTEGER, flags INTEGER,
+  ref1            INTEGER, pos1 INTEGER,
+  ref2            INTEGER, pos2 INTEGER,
+  timeout_band    INTEGER,
+  debug_desc      INTEGER NOT NULL DEFAULT 0,
+  struct_month    INTEGER, struct_day INTEGER,
+  struct_hour     INTEGER, struct_min INTEGER,
+  raw_hex         TEXT NOT NULL,
+  fingerprint     TEXT NOT NULL,
+  updated_ts      INTEGER NOT NULL DEFAULT 0
+`;
+// Note (v2.11.1-beta.1) — inverter_5min_param archive deferred to a follow-
+// up beta. The hot table gains many Slice β diagnostic columns via
+// `ensureColumn` migrations (parce_kwh, qac_var_avg, tempint_c_*, zpos/zneg
+// kohm, vpv_n/p_v, time_to_connect_*, alarms_inst_32_max, analog_in_*,
+// pt100_*, inverter_state_raw_last, etc.) that a static archive DDL would
+// silently drop. A future release will mirror the schema dynamically from
+// PRAGMA table_info(inverter_5min_param) so the archive shard tracks every
+// column added by future migrations. Until then `paramRetainDays` keeps
+// its 7-day floor — bounded loss, acceptable per the 2026-05-22 audit.
 
 fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
 
@@ -3900,6 +3966,19 @@ function ensureArchiveSchema(archiveDb) {
     );
     CREATE INDEX IF NOT EXISTS idx_aa_ts     ON alarms(ts);
     CREATE INDEX IF NOT EXISTS idx_aa_inv_ts ON alarms(inverter, ts);
+
+    CREATE TABLE IF NOT EXISTS audit_log (
+      ${ARCHIVE_AUDIT_TABLE_DDL}
+    );
+    CREATE INDEX IF NOT EXISTS idx_aau_ts     ON audit_log(ts);
+    CREATE INDEX IF NOT EXISTS idx_aau_inv_ts ON audit_log(inverter, ts);
+
+    CREATE TABLE IF NOT EXISTS inverter_stop_reasons (
+      ${ARCHIVE_STOP_REASONS_TABLE_DDL}
+    );
+    CREATE INDEX IF NOT EXISTS idx_asr_read_at  ON inverter_stop_reasons(read_at_ms);
+    CREATE INDEX IF NOT EXISTS idx_asr_alarm_id ON inverter_stop_reasons(alarm_id);
+    CREATE INDEX IF NOT EXISTS idx_asr_inv_read ON inverter_stop_reasons(inverter_id, read_at_ms);
   `);
 }
 
@@ -3981,6 +4060,63 @@ function createArchiveEntry(filePath) {
         WHERE inverter=? AND ts BETWEEN ? AND ?
         ORDER BY ts DESC`,
     ),
+    // ─── Audit log shard (v2.11.1) ─────────────────────────────────────
+    // Mirrors the hot DB's audit_log row shape so the archive-aware
+    // reader can merge hot + archive results with a stable column
+    // projection. Range queries are ORDER BY ts DESC because the
+    // /api/audit endpoint and operator log UI both consume newest-first.
+    insertAudit: archiveDb.prepare(`
+      INSERT OR IGNORE INTO audit_log
+      (id, ts, operator, inverter, node, action, scope, result, ip, reason)
+      VALUES (@id, @ts, @operator, @inverter, @node, @action, @scope,
+              @result, @ip, @reason)
+    `),
+    selectAuditRangeAll: archiveDb.prepare(
+      `SELECT id, ts, operator, inverter, node, action, scope, result, ip, reason
+         FROM audit_log
+        WHERE ts BETWEEN ? AND ?
+        ORDER BY ts DESC`,
+    ),
+    selectAuditRangeByInv: archiveDb.prepare(
+      `SELECT id, ts, operator, inverter, node, action, scope, result, ip, reason
+         FROM audit_log
+        WHERE inverter=? AND ts BETWEEN ? AND ?
+        ORDER BY ts DESC`,
+    ),
+    // ─── Stop-reason snapshots shard (v2.11.1-beta.1) ──────────────────
+    // Mirror of hot stop_reasons row shape so findStopReasonByIdArchiveAware
+    // can fall back to archives when an alarm's drilldown click lands on a
+    // row that's already migrated out of hot.
+    insertStopReason: archiveDb.prepare(`
+      INSERT OR IGNORE INTO inverter_stop_reasons
+        (id, inverter_id, inverter_ip, slave, node,
+         read_at_ms, event_at_ms, trigger_source, alarm_id,
+         pot_ac, vpv, vac1, vac2, vac3, iac1, iac2,
+         frec1, frec2, frec3, cos, temp,
+         alarma, motparo, motparo_label,
+         alarmas1, alarmas2, flags,
+         ref1, pos1, ref2, pos2,
+         timeout_band, debug_desc,
+         struct_month, struct_day, struct_hour, struct_min,
+         raw_hex, fingerprint, updated_ts)
+      VALUES (@id, @inverter_id, @inverter_ip, @slave, @node,
+              @read_at_ms, @event_at_ms, @trigger_source, @alarm_id,
+              @pot_ac, @vpv, @vac1, @vac2, @vac3, @iac1, @iac2,
+              @frec1, @frec2, @frec3, @cos, @temp,
+              @alarma, @motparo, @motparo_label,
+              @alarmas1, @alarmas2, @flags,
+              @ref1, @pos1, @ref2, @pos2,
+              @timeout_band, @debug_desc,
+              @struct_month, @struct_day, @struct_hour, @struct_min,
+              @raw_hex, @fingerprint, @updated_ts)
+    `),
+    selectStopReasonById: archiveDb.prepare(
+      `SELECT * FROM inverter_stop_reasons WHERE id = ?`,
+    ),
+    selectStopReasonsByAlarmId: archiveDb.prepare(
+      `SELECT * FROM inverter_stop_reasons WHERE alarm_id = ?
+         ORDER BY read_at_ms DESC LIMIT 1`,
+    ),
   };
   entry.insertReadingsTx = archiveDb.transaction((rows) => {
     for (const row of rows || []) entry.insertReading.run(row);
@@ -3990,6 +4126,12 @@ function createArchiveEntry(filePath) {
   });
   entry.insertAlarmsTx = archiveDb.transaction((rows) => {
     for (const row of rows || []) entry.insertAlarm.run(row);
+  });
+  entry.insertAuditTx = archiveDb.transaction((rows) => {
+    for (const row of rows || []) entry.insertAudit.run(row);
+  });
+  entry.insertStopReasonsTx = archiveDb.transaction((rows) => {
+    for (const row of rows || []) entry.insertStopReason.run(row);
   });
   return entry;
 }
@@ -4641,6 +4783,65 @@ function findAlarmByIdArchiveAware(alarmId) {
   return null;
 }
 
+// v2.11.1 — audit_log archive-aware range reader. Merges hot DB with every
+// monthly archive shard whose [s,e] overlaps the query window. Mirrors
+// queryAlarmsRangeArchiveAware exactly so the same retention-deletion
+// behaviour that broke alarms (rows vanishing from /api/audit when an
+// operator-tightened auditRetainDays kicked in) can no longer recur.
+// Caller-supplied `limit` is applied AFTER the merge so an old+new union
+// still respects the response cap.
+function auditNaturalKey(row) {
+  return Number(row?.id || 0);
+}
+function sortAuditDesc(a, b) {
+  return (
+    Number(b?.ts || 0) - Number(a?.ts || 0) ||
+    Number(b?.id || 0) - Number(a?.id || 0)
+  );
+}
+function queryAuditRangeArchiveAware(startTs, endTs, { inverter, limit } = {}) {
+  const s = Number(startTs || 0);
+  const e = Number(endTs || 0);
+  if (!(e >= s)) return [];
+  const invNum = Math.trunc(Number(inverter || 0));
+  const hasInv = Number.isFinite(invNum) && invNum > 0;
+  const cap = Math.max(1, Math.min(20000, Math.trunc(Number(limit) || 5000)));
+  const out = new Map();
+  // Hot first so the newest rows seed the map; archive rows fill in older
+  // months without overwriting (pushUniqueRows is first-write-wins).
+  pushUniqueRows(
+    out,
+    hasInv
+      ? db
+          .prepare(
+            `SELECT id, ts, operator, inverter, node, action, scope, result, ip, reason
+               FROM audit_log WHERE inverter=? AND ts BETWEEN ? AND ?
+               ORDER BY ts DESC LIMIT ?`,
+          )
+          .all(invNum, s, e, cap)
+      : db
+          .prepare(
+            `SELECT id, ts, operator, inverter, node, action, scope, result, ip, reason
+               FROM audit_log WHERE ts BETWEEN ? AND ?
+               ORDER BY ts DESC LIMIT ?`,
+          )
+          .all(s, e, cap),
+    auditNaturalKey,
+  );
+  for (const monthKey of iterateMonthKeys(s, e)) {
+    const entry = getArchiveEntry(monthKey, false);
+    if (!entry) continue;
+    pushUniqueRows(
+      out,
+      hasInv
+        ? entry.selectAuditRangeByInv.all(invNum, s, e)
+        : entry.selectAuditRangeAll.all(s, e),
+      auditNaturalKey,
+    );
+  }
+  return Array.from(out.values()).sort(sortAuditDesc).slice(0, cap);
+}
+
 function queryAlarmsRangeArchiveAware(startTs, endTs, { inverter, limit } = {}) {
   const s = Number(startTs || 0);
   const e = Number(endTs || 0);
@@ -4903,6 +5104,8 @@ function rebuildDailyReadingsSummaryForDate(dayInput) {
 const deleteReadingById = db.prepare(`DELETE FROM readings WHERE id=?`);
 const deleteEnergy5ById = db.prepare(`DELETE FROM energy_5min WHERE id=?`);
 const deleteAlarmById = db.prepare(`DELETE FROM alarms WHERE id=?`);
+const deleteAuditById = db.prepare(`DELETE FROM audit_log WHERE id=?`);
+const deleteStopReasonById = db.prepare(`DELETE FROM inverter_stop_reasons WHERE id=?`);
 const deleteReadingsBatchTx = db.transaction((ids) => {
   for (const id of ids || []) deleteReadingById.run(id);
 });
@@ -4911,6 +5114,12 @@ const deleteEnergyBatchTx = db.transaction((ids) => {
 });
 const deleteAlarmsBatchTx = db.transaction((ids) => {
   for (const id of ids || []) deleteAlarmById.run(id);
+});
+const deleteAuditBatchTx = db.transaction((ids) => {
+  for (const id of ids || []) deleteAuditById.run(id);
+});
+const deleteStopReasonsBatchTx = db.transaction((ids) => {
+  for (const id of ids || []) deleteStopReasonById.run(id);
 });
 const selectOldReadingsBatch = db.prepare(`
   SELECT id, ts, inverter, unit, pac, kwh, alarm, online
@@ -4940,11 +5149,49 @@ const selectOldAlarmsBatch = db.prepare(`
    ORDER BY ts ASC, id ASC
    LIMIT ?
 `);
+// v2.11.1 — audit_log archive selector. Audit rows are immutable once
+// inserted (no UPDATE path) so every row older than the cutoff is eligible.
+// Mirrors selectOldReadingsBatch / selectOldAlarmsBatch — same chunked
+// pattern, same column projection as the archive shard insert.
+const selectOldAuditBatch = db.prepare(`
+  SELECT id, ts, operator, inverter, node, action, scope, result, ip, reason
+    FROM audit_log
+   WHERE ts < ?
+   ORDER BY ts ASC, id ASC
+   LIMIT ?
+`);
+// v2.11.1-beta.1 — stop_reasons archive selector. Snapshot rows are
+// immutable (no UPDATE path). Cutoff is read_at_ms (NOT ts). The same
+// chunked pattern as the audit / alarms selectors so the prune loop yields
+// the event-loop between batches.
+const selectOldStopReasonsBatch = db.prepare(`
+  SELECT id, inverter_id, inverter_ip, slave, node,
+         read_at_ms, event_at_ms, trigger_source, alarm_id,
+         pot_ac, vpv, vac1, vac2, vac3, iac1, iac2,
+         frec1, frec2, frec3, cos, temp,
+         alarma, motparo, motparo_label,
+         alarmas1, alarmas2, flags,
+         ref1, pos1, ref2, pos2,
+         timeout_band, debug_desc,
+         struct_month, struct_day, struct_hour, struct_min,
+         raw_hex, fingerprint, updated_ts
+    FROM inverter_stop_reasons
+   WHERE read_at_ms < ?
+   ORDER BY read_at_ms ASC, id ASC
+   LIMIT ?
+`);
 
 function archiveRowsByMonth(rows, type) {
   const groups = new Map();
+  // v2.11.1-beta.1 — different archive row types key on different columns.
+  // Most use numeric ts; stop_reasons uses read_at_ms. The dispatch table
+  // picks the right extractor so shards stay consistent with the hot row's
+  // natural time column.
+  const monthKeyFn =
+    type === "stop_reasons" ? (row) => monthKeyFromTs(row?.read_at_ms) :
+                              (row) => monthKeyFromTs(row?.ts);
   for (const row of rows || []) {
-    const monthKey = monthKeyFromTs(row?.ts);
+    const monthKey = monthKeyFn(row);
     if (!groups.has(monthKey)) groups.set(monthKey, []);
     groups.get(monthKey).push(row);
   }
@@ -4954,6 +5201,8 @@ function archiveRowsByMonth(rows, type) {
     if (type === "readings") entry.insertReadingsTx(groupedRows);
     else if (type === "energy") entry.insertEnergyTx(groupedRows);
     else if (type === "alarms") entry.insertAlarmsTx(groupedRows);
+    else if (type === "audit") entry.insertAuditTx(groupedRows);
+    else if (type === "stop_reasons") entry.insertStopReasonsTx(groupedRows);
     else throw new Error(`Unknown archive row type: ${type}`);
   }
 }
@@ -5070,12 +5319,128 @@ async function archiveTelemetryBeforeCutoff(cutoffTs) {
   return stats;
 }
 
+// v2.11.1 — audit_log archive migrator (own cutoff, distinct from telemetry).
+// Audit retention is controlled by `auditRetainDays` (default 365), separate
+// from `retainDays` (default 90) — the operator typically keeps control-action
+// history far longer than telemetry. Prior to v2.11.1 pruneOldData() ran an
+// unconditional `DELETE FROM audit_log WHERE ts < auditCutoff` which is the
+// same data-loss pattern the v2.11.0-beta.10 alarms work eliminated; if
+// `auditRetainDays` ever shrunk (operator typo, stray DB write, future UI
+// knob) every "who started/stopped what" record would evaporate. The archive
+// migration mirrors the alarm path: chunked select → monthly-shard insert →
+// hot-DB delete by id, with event-loop yields between batches.
+async function archiveAuditBeforeCutoff(cutoffTs) {
+  const cutoff = Number(cutoffTs || 0);
+  let migrated = 0;
+  if (!(cutoff > 0)) return migrated;
+  while (true) {
+    const rows = selectOldAuditBatch.all(cutoff, ARCHIVE_BATCH_SIZE);
+    if (!rows.length) break;
+    archiveRowsByMonth(rows, "audit");
+    deleteAuditBatchTx(rows.map((row) => Number(row.id || 0)).filter((id) => id > 0));
+    migrated += rows.length;
+    await _yieldEventLoop();
+  }
+  return migrated;
+}
+
+// v2.11.1-beta.1 — stop_reasons archive migrator. Replaces the unconditional
+// `DELETE FROM inverter_stop_reasons WHERE read_at_ms < ?` previously run
+// inside stopReasons.pruneOldRows. Same pattern as alarms / audit: chunked
+// select → monthly-shard insert → hot-DB delete by id, with event-loop
+// yields between batches.
+async function archiveStopReasonsBeforeCutoff(cutoffMs) {
+  const cutoff = Number(cutoffMs || 0);
+  let migrated = 0;
+  if (!(cutoff > 0)) return migrated;
+  while (true) {
+    const rows = selectOldStopReasonsBatch.all(cutoff, ARCHIVE_BATCH_SIZE);
+    if (!rows.length) break;
+    archiveRowsByMonth(rows, "stop_reasons");
+    deleteStopReasonsBatchTx(rows.map((row) => Number(row.id || 0)).filter((id) => id > 0));
+    migrated += rows.length;
+    await _yieldEventLoop();
+  }
+  return migrated;
+}
+
+// v2.11.1-beta.1 — single-row archive-aware lookup for stop_reasons.
+// Used by the alarm-drilldown so when the alarm row has already been pulled
+// from the alarm shard (alarms-archive resolves it), the joined StopReason
+// snapshot resolves too — no orphan rows visible in the UI even though
+// both tables have separately migrated to their archive shards.
+function findStopReasonByIdArchiveAware(stopReasonId) {
+  const id = Math.trunc(Number(stopReasonId || 0));
+  if (!(id > 0)) return null;
+  const hot = db.prepare(`SELECT * FROM inverter_stop_reasons WHERE id = ?`).get(id);
+  if (hot) return hot;
+  let monthKeys = [];
+  try {
+    monthKeys = fs
+      .readdirSync(ARCHIVE_DIR)
+      .filter((name) => /^\d{4}-\d{2}\.db$/.test(name))
+      .map((name) => name.replace(/\.db$/i, ""))
+      .sort()
+      .reverse();
+  } catch (_) {
+    return null;
+  }
+  for (const monthKey of monthKeys) {
+    const entry = getArchiveEntry(monthKey, false);
+    if (!entry) continue;
+    const row = entry.selectStopReasonById.get(id);
+    if (row) return row;
+  }
+  return null;
+}
+
+// v2.11.1-beta.1 — by-alarm-id archive-aware lookup for the backfill
+// path (stopReasons.getEventByAlarmId). Same shard iteration as
+// findStopReasonByIdArchiveAware but uses the alarm_id index on each
+// archive shard so the lookup is O(log n) per month.
+function findStopReasonByAlarmIdArchiveAware(alarmId) {
+  const id = Math.trunc(Number(alarmId || 0));
+  if (!(id > 0)) return null;
+  const hot = db
+    .prepare(
+      `SELECT * FROM inverter_stop_reasons WHERE alarm_id = ?
+         ORDER BY read_at_ms DESC LIMIT 1`,
+    )
+    .get(id);
+  if (hot) return hot;
+  let monthKeys = [];
+  try {
+    monthKeys = fs
+      .readdirSync(ARCHIVE_DIR)
+      .filter((name) => /^\d{4}-\d{2}\.db$/.test(name))
+      .map((name) => name.replace(/\.db$/i, ""))
+      .sort()
+      .reverse();
+  } catch (_) {
+    return null;
+  }
+  for (const monthKey of monthKeys) {
+    const entry = getArchiveEntry(monthKey, false);
+    if (!entry) continue;
+    const row = entry.selectStopReasonsByAlarmId.get(id);
+    if (row) return row;
+  }
+  return null;
+}
+
+
 async function pruneOldData(options = {}) {
   const opts =
     options && typeof options === "object" ? options : {};
   try {
     const retainDays = Math.max(1, Number(getSetting("retainDays", 90)));
-    const auditRetainDays = Math.max(1, Number(getSetting("auditRetainDays", 365)));
+    // v2.11.1 — hard floor bumped 1 → 90 d. The previous max(1,…) replicated
+    // the exact unbounded-loss pattern that broke alarms on v2.11.0-beta.9
+    // (operator retention=1 → daily DELETE of everything). Even with audit
+    // now archived (so the floor is theoretically belt-and-braces), keeping
+    // a 90-day hot tier guarantees fast /api/audit responses without a
+    // mid-call archive-shard fan-out.
+    const auditRetainDays = Math.max(90, Number(getSetting("auditRetainDays", 365)));
     const cutoff = Date.now() - retainDays * 24 * 60 * 60 * 1000;
     const auditCutoff = Date.now() - auditRetainDays * 24 * 60 * 60 * 1000;
     const mainDbBytesBefore = safeFileSize(DB_PATH);
@@ -5090,7 +5455,12 @@ async function pruneOldData(options = {}) {
     // catch it. Active alarms (cleared_ts IS NULL) still stay hot
     // indefinitely — pruner never touches them.
     await _yieldEventLoop();
-    db.prepare("DELETE FROM audit_log WHERE ts < ?").run(auditCutoff);
+    // v2.11.1 — audit_log now MIGRATES to monthly archive shards instead of
+    // being permanently DELETE'd. Same data-loss pattern as the v2.11.0-beta.10
+    // alarms fix: a low `auditRetainDays` setting used to evaporate the
+    // operator's control-action history daily. Archive-aware /api/audit
+    // re-merges hot + archive for past-date queries.
+    const auditMigrated = await archiveAuditBeforeCutoff(auditCutoff);
     await _yieldEventLoop();
     // v2.9.0 Slice B/D: retention for new counter + clock-sync tables.
     try {
@@ -5137,7 +5507,7 @@ async function pruneOldData(options = {}) {
       ok: true,
       retainDays,
       auditRetainDays,
-      archived,
+      archived: { ...archived, audit: auditMigrated },
       checkpointed,
       vacuumed,
       mainDbBytesBefore,
@@ -5148,7 +5518,7 @@ async function pruneOldData(options = {}) {
       archiveBytesAfter: archiveAfter.totalBytes,
     };
     console.log(
-      `[DB] Old data pruned. Archived readings=${archived.readings}, energy_5min=${archived.energy5}, vacuumed=${vacuumed}.`,
+      `[DB] Old data pruned. Archived readings=${archived.readings}, energy_5min=${archived.energy5}, alarms=${archived.alarms}, audit=${auditMigrated}, vacuumed=${vacuumed}.`,
     );
     return result;
   } catch (err) {
@@ -5156,7 +5526,7 @@ async function pruneOldData(options = {}) {
     return {
       ok: false,
       error: err.message || "Unknown prune error.",
-      archived: { readings: 0, energy5: 0 },
+      archived: { readings: 0, energy5: 0, alarms: 0, audit: 0 },
       checkpointed: false,
       vacuumed: false,
       mainDbBytesBefore: safeFileSize(DB_PATH),
@@ -6142,6 +6512,10 @@ module.exports = {
   getLatestReadingDate,
   queryAlarmsRangeArchiveAware,
   findAlarmByIdArchiveAware,
+  queryAuditRangeArchiveAware,
+  findStopReasonByIdArchiveAware,
+  findStopReasonByAlarmIdArchiveAware,
+  archiveStopReasonsBeforeCutoff,
   archiveReadingsRows,
   archiveEnergyRows,
   getDailyReadingsSummaryRows,

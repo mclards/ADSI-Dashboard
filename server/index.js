@@ -54,6 +54,9 @@ const {
   getLatestReadingDate,
   queryAlarmsRangeArchiveAware,
   findAlarmByIdArchiveAware,
+  findStopReasonByIdArchiveAware,
+  findStopReasonByAlarmIdArchiveAware,
+  archiveStopReasonsBeforeCutoff,
   archiveReadingsRows,
   archiveEnergyRows,
   getDailyReadingsSummaryRows,
@@ -16156,13 +16159,20 @@ app.get("/api/alarms/:alarm_id/stop-reason", (req, res) => {
     if (!alarmRow) return res.status(404).json({ ok: false, error: "alarm not found" });
 
     let stopReason = null;
+    // v2.11.1-beta.1 — archive-aware fallback. When alarm migrates to its
+    // archive shard, the joined stop_reason snapshot now resolves out of
+    // its own (potentially different) archive shard rather than 404'ing.
     if (alarmRow.stop_reason_id) {
-      stopReason = stopReasons.getEventById(db, alarmRow.stop_reason_id);
+      stopReason = stopReasons.getEventById(db, alarmRow.stop_reason_id, {
+        archiveLookup: findStopReasonByIdArchiveAware,
+      });
     }
     if (!stopReason) {
       // Backfill: try the reverse FK in case the snapshot row exists but the
       // alarm row's FK column wasn't populated (e.g. race during shutdown).
-      stopReason = stopReasons.getEventByAlarmId(db, alarmId);
+      stopReason = stopReasons.getEventByAlarmId(db, alarmId, {
+        archiveLookup: findStopReasonByAlarmIdArchiveAware,
+      });
     }
     res.json({
       ok: true,
@@ -24361,13 +24371,30 @@ setInterval(_refreshTier1NextScheduled, 2 * 60 * 60 * 1000).unref();
 // Defaults: 365 d for inverter_stop_reasons, 90 d for inverter_stop_histogram.
 // Operator-tunable via the `stopReasonsRetainDays` / `stopHistogramRetainDays`
 // settings.  Runs every 6 h to keep growth bounded without a startup spike.
-function _prunStopReasonRetention() {
+async function _prunStopReasonRetention() {
   try {
-    const reasonsRetainDays = Math.max(7, Number(getSetting("stopReasonsRetainDays", 365)) || 365);
+    // v2.11.1 — floor bumped 7 → 90 d. The stop_reasons rows are joined with
+    // `alarms.stop_reason_id` for the alarm-drilldown's "Captured at the moment
+    // of the alarm" panel. Alarms archive after `retainDays` (default 90 d),
+    // so a 7-day stop_reasons floor would silently break drilldowns for any
+    // alarm older than 7 days even though the archive-aware /api/alarms
+    // resolves the row itself. Keeping stop_reasons ≥ 90 d guarantees the
+    // panel stays populated for the entire alarm hot window.
+    // v2.11.1-beta.1 — stop_reasons rows now MIGRATE to monthly archive
+    // shards (via the injected archiveStopReasonsBeforeCutoff worker)
+    // instead of permanently DELETE'ing. Histogram stays DELETE-only —
+    // regenerable from the inverter on demand.
+    const reasonsRetainDays = Math.max(90, Number(getSetting("stopReasonsRetainDays", 365)) || 365);
     const histogramRetainDays = Math.max(7, Number(getSetting("stopHistogramRetainDays", 90)) || 90);
-    const r = stopReasons.pruneOldRows(db, { reasonsRetainDays, histogramRetainDays });
+    const r = await stopReasons.pruneOldRows(db, {
+      reasonsRetainDays,
+      histogramRetainDays,
+      archiveStopReasonsBeforeCutoff,
+    });
     if (r.reasons || r.histogram) {
-      console.log(`[stop-reasons] retention pruned: reasons=${r.reasons} histogram=${r.histogram}`);
+      console.log(
+        `[stop-reasons] retention applied: reasons archived=${r.reasons} histogram deleted=${r.histogram}`,
+      );
     }
   } catch (err) {
     console.warn("[stop-reasons] retention prune failed:", err.message);
