@@ -127,6 +127,12 @@ const {
   insertGridControlVerifyLog,
   getLatestGridControlVerify,
   getLatestGridControlVerifyAll,
+  pruneGridControlVerifyLog,
+  // v2.11.0 Active Power Control — ramp log retention (orphan-cron wired v2.11.2).
+  pruneRampLog,
+  // v2.11.2 — universal archive-by-PRAGMA helper (used by daily aggregator,
+  // stop-reasons histogram, and firmware drift log).
+  archiveTableBeforeCutoff,
   // v2.11.x — running per-day per-node MWh logger; backs /api/energy/daily-running.
   getDailyRunningSummaryRange,
   // v2.11.x Slice κ.3 — critical-pattern auto-block ledger DAO.
@@ -12504,13 +12510,41 @@ const complianceOrchestrator = new compliance.Orchestrator.OrchestratorRegistry(
 
 // Reap stale in-memory orchestrator handles every 30 min (rows persist in DB).
 setInterval(() => complianceOrchestrator.reapStaleRuns(3600), 30 * 60_000).unref?.();
-// Prune APC verify log older than 90 days, weekly Sunday 04:30.
-cron.schedule("30 4 * * 0", () => {
+// Archive APC verify log older than 90 days, weekly Sunday 04:30.
+// v2.11.2 — rows now MIGRATE to monthly archive shards (was DELETE-only).
+cron.schedule("30 4 * * 0", async () => {
   try {
-    const removed = pruneApcVerifyLog(90);
-    if (removed > 0) console.log(`[apc-verify] pruned ${removed} old rows`);
+    const archived = await pruneApcVerifyLog(90);
+    if (archived > 0) console.log(`[apc-verify] archived ${archived} old rows`);
   } catch (err) {
-    console.error("[apc-verify] prune failed:", err.message);
+    console.error("[apc-verify] archive failed:", err.message);
+  }
+});
+
+// Archive grid-control verify log on the same Sunday-04:35 cadence (v2.11.2).
+// Previously orphaned: the prune function existed but no cron called it, so
+// the table grew unbounded. Wiring it now closes that gap and routes the
+// rows through the universal archive helper (no DELETE-only path).
+cron.schedule("35 4 * * 0", async () => {
+  try {
+    const retain = Number(getSetting("gridControlVerifyRetainDays", 90)) || 90;
+    const archived = await pruneGridControlVerifyLog(retain);
+    if (archived > 0) console.log(`[gc-verify] archived ${archived} old rows`);
+  } catch (err) {
+    console.error("[gc-verify] archive failed:", err.message);
+  }
+});
+
+// Archive curtailment ramp-log rows on Sunday-04:40 (v2.11.2). Same
+// orphan-fix as gc-verify above: pruneRampLog existed but no cron called
+// it, so the per-job detail trail grew unbounded.
+cron.schedule("40 4 * * 0", async () => {
+  try {
+    const retain = Number(getSetting("curtailmentRampLogRetainDays", 90)) || 90;
+    const archived = await pruneRampLog(retain);
+    if (archived > 0) console.log(`[ramp-log] archived ${archived} old rows`);
+  } catch (err) {
+    console.error("[ramp-log] archive failed:", err.message);
   }
 });
 
@@ -14944,13 +14978,14 @@ cron.schedule("55 23 * * *", () => {
   }
 });
 
-// Weekly prune of stale rows (keep ≥ 2 years).
-cron.schedule("0 4 * * 0", () => {
+// Weekly archive of stale rows (keep ≥ 2 years hot, then migrate to archive).
+// v2.11.2 — rows MIGRATE to monthly archive shards (was DELETE-only).
+cron.schedule("0 4 * * 0", async () => {
   try {
-    const removed = pruneIgbtThermalBaseline(800);
-    if (removed > 0) console.log(`[IGBT thermal] pruned ${removed} old rows`);
+    const archived = await pruneIgbtThermalBaseline(800);
+    if (archived > 0) console.log(`[IGBT thermal] archived ${archived} old rows`);
   } catch (err) {
-    console.error("[IGBT thermal] prune failed:", err.message);
+    console.error("[IGBT thermal] archive failed:", err.message);
   }
 });
 
@@ -16969,7 +17004,8 @@ app.post(
         }
         drift_logged = driftEvents.length;
         const retain = Number(getSetting("firmwareDriftLogRetainDays", 365)) || 365;
-        firmwareMap.pruneFirmwareDriftLog(db, retain);
+        // v2.11.2 — pass archive helper so the drift log MIGRATES (was DELETE-only).
+        await firmwareMap.pruneFirmwareDriftLog(db, retain, archiveTableBeforeCutoff);
       } catch (persistErr) {
         // Persistence must never sink the live classification result.
         console.error("[firmware] persist failed:", persistErr.message);
@@ -23316,11 +23352,14 @@ cron.schedule("30 21 * * *", pruneOldData);
 // Prune solcast_snapshot_history rows older than 90 days (v2.8+).
 // v2.8.14 — moved from 03:35 to 21:35, keeping the 5-minute offset from
 // pruneOldData so any long-running VACUUM has released its write lock.
-cron.schedule("35 21 * * *", () => {
+cron.schedule("35 21 * * *", async () => {
   try {
-    const deleted = pruneSnapshotHistory(90);
-    if (deleted > 0) {
-      console.log(`[Cron:history-prune] Deleted ${deleted} solcast_snapshot_history rows older than 90 days`);
+    // v2.11.2 — pruneSnapshotHistory now MIGRATES to monthly archive shard
+    // (was DELETE-only). The Solcast trajectory rows are the only post-hoc
+    // record of pulled vs realised drift; archiving keeps them indefinitely.
+    const archived = await pruneSnapshotHistory(90);
+    if (archived > 0) {
+      console.log(`[Cron:history-prune] Archived ${archived} solcast_snapshot_history rows older than 90 days`);
     }
   } catch (e) {
     console.warn("[Cron:history-prune] failed:", e.message);
@@ -24390,10 +24429,11 @@ async function _prunStopReasonRetention() {
       reasonsRetainDays,
       histogramRetainDays,
       archiveStopReasonsBeforeCutoff,
+      archiveTableBeforeCutoff,
     });
     if (r.reasons || r.histogram) {
       console.log(
-        `[stop-reasons] retention applied: reasons archived=${r.reasons} histogram deleted=${r.histogram}`,
+        `[stop-reasons] retention applied: reasons archived=${r.reasons} histogram archived=${r.histogram}`,
       );
     }
   } catch (err) {
@@ -24411,12 +24451,15 @@ try {
 } catch (err) {
   console.warn("[dailyAgg] init failed:", err?.message || err);
 }
-function _prunDailyParamRetention() {
+async function _prunDailyParamRetention() {
   try {
     const days = Math.max(7, Number(getSetting("paramRetainDays", 365)) || 365);
-    const r = dailyAggregator.pruneRetention(days);
-    if (r?.deleted) {
-      console.log(`[dailyAgg] retention pruned: ${r.deleted} rows older than ${r.cutoff}`);
+    // v2.11.2 — injection turns this from DELETE-only into archive-then-delete.
+    const r = await dailyAggregator.pruneRetention(days, { archiveTableBeforeCutoff });
+    if (r?.archived) {
+      console.log(`[dailyAgg] retention archived: ${r.archived} rows older than ${r.cutoff}`);
+    } else if (r?.deleted) {
+      console.log(`[dailyAgg] retention pruned (fallback): ${r.deleted} rows older than ${r.cutoff}`);
     }
   } catch (err) {
     console.warn("[dailyAgg] retention prune failed:", err?.message || err);

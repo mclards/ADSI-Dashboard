@@ -3859,13 +3859,22 @@ const bulkInsertSnapshotHistory = db.transaction((rows) => {
 });
 
 /**
- * Delete snapshot history rows older than `retainDays`. Returns rows deleted.
+ * Migrate snapshot history rows older than `retainDays` to monthly archive
+ * shards. v2.11.2 — was DELETE-only; the rows are the only forensic record
+ * of Solcast trajectory drift per-pull, so a low operator retention setting
+ * used to permanently lose the very data the forecast Performance Monitor
+ * relies on for post-hoc diagnosis. Returns rows migrated.
  */
-function pruneSnapshotHistory(retainDays = 90) {
+async function pruneSnapshotHistory(retainDays = 90) {
   const days = Math.max(1, Math.min(3650, Math.trunc(Number(retainDays || 90))));
   const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
-  const info = stmts.pruneSnapshotHistoryBefore.run(cutoff);
-  return Number(info?.changes || 0);
+  return archiveTableBeforeCutoff({
+    tableName: "solcast_snapshot_history",
+    cutoffColumn: "captured_ts",
+    cutoffValue: cutoff,
+    monthKeyColumn: "captured_ts",
+    monthKeyKind: "ms",
+  });
 }
 
 function getSnapshotHistoryDayTrajectory(day) {
@@ -4221,6 +4230,17 @@ function closeArchiveDbForMonth(monthKey) {
     // Ignore archive close failures during targeted close.
   }
   ARCHIVE_DB_CACHE.delete(key);
+  // Drop the generic schema cache for this month so a future open re-runs
+  // ensureArchiveTableSchema (in case the file was replaced atomically by
+  // a transfer or recovery worker between close and re-open). Also clear
+  // any prepared INSERT statements bound to the just-closed handle —
+  // calling them post-close would crash with SQLITE_MISUSE.
+  ARCHIVE_GENERIC_SCHEMA_CACHE.delete(key);
+  for (const stmtKey of Array.from(ARCHIVE_PER_SHARD_INSERT_CACHE.keys())) {
+    if (stmtKey.startsWith(`${key}|`)) {
+      ARCHIVE_PER_SHARD_INSERT_CACHE.delete(stmtKey);
+    }
+  }
   return true;
 }
 
@@ -5215,6 +5235,377 @@ function archiveEnergyRows(rows) {
   archiveRowsByMonth(rows, "energy");
 }
 
+// ─── Universal archive helper (v2.11.2) ─────────────────────────────────────
+//
+// Generic migrator for hot tables that previously DELETE'd on retention.
+// Mirrors the hot-table schema dynamically (via sqlite_master.sql so even
+// partial indexes / WITHOUT ROWID survive) so the archive shard absorbs
+// every column — including the many ensureColumn() additions on
+// inverter_5min_param — without a static DDL drift bug.
+//
+// The helper opens (or creates) the monthly archive shard for each row,
+// CREATEs the table there if missing, ALTER ADD COLUMNs any new columns
+// the hot side has gained since the shard was last touched, INSERT OR
+// IGNOREs the rows, then DELETEs them from hot — exactly the same
+// archive-then-delete contract as ARCHIVE_READING_TABLE_DDL / alarms /
+// audit / stop_reasons, but expressed once instead of per-table.
+//
+// Row identity for delete is `rowid` for default tables; for WITHOUT ROWID
+// tables (inverter_5min_param, igbt_thermal_baseline) the compound PK is
+// used. The probe + schema discovery is cached per tableName, so the only
+// per-call SQLite work is the batched SELECT / INSERT / DELETE.
+//
+// Concurrency / freeze prevention (v2.11.2 hardening):
+//   - Per-table single-flight gate (_ARCHIVE_RUNNING_LOCK): if a second
+//     caller invokes archive on the same table while the first is still
+//     running, the second returns 0 immediately. Different tables can
+//     still archive in parallel.
+//   - Per-call batch ceiling (ARCHIVE_MAX_BATCHES_PER_CALL): when first
+//     deploying this fix on a long-idle gateway, the first sweep might
+//     have months of backlog. The ceiling caps the wall-clock at
+//     ~ ARCHIVE_MAX_BATCHES_PER_CALL × (batch select+insert+delete +
+//     event-loop yield) — typically under 30 s — so a single invocation
+//     never holds the foreground busy for minutes. The next cron tick
+//     continues from where this one stopped.
+//   - Schema / statement caches keyed by tableName + (monthKey, tableName)
+//     so PRAGMA / sqlite_master lookups happen exactly once per process
+//     per table, and INSERT prepared statements stay hot inside the
+//     archive entry across batches.
+const ARCHIVE_GENERIC_SCHEMA_CACHE = new Map();   // monthKey → Set<tableName>
+const ARCHIVE_HOT_SCHEMA_CACHE = new Map();      // tableName → { cols, ... }
+const ARCHIVE_HOT_STMT_CACHE = new Map();        // tableName → { selectStmt, deleteStmt, deleteBatchTx }
+const ARCHIVE_PER_SHARD_INSERT_CACHE = new Map(); // `${monthKey}|${tableName}` → preparedStmt
+const ARCHIVE_RUNNING_LOCK = new Set();          // tableName currently being archived
+// Bound the wall-clock of a single archive invocation. 100 batches ×
+// 2000 rows = 200_000 rows per sweep; at ~50ms per batch + yield, the
+// whole call stays under ~ 20s. On a long backlog the remaining rows
+// drain over subsequent cron ticks.
+const ARCHIVE_MAX_BATCHES_PER_CALL = 100;
+
+function _readPragmaTableInfo(database, tableName) {
+  try {
+    return database.prepare(`PRAGMA table_info("${tableName}")`).all();
+  } catch (_) {
+    return [];
+  }
+}
+
+function _readSqliteMasterSql(database, type, name) {
+  try {
+    const row = database
+      .prepare(`SELECT sql FROM sqlite_master WHERE type = ? AND name = ?`)
+      .get(String(type || ""), String(name || ""));
+    return row && typeof row.sql === "string" ? row.sql : "";
+  } catch (_) {
+    return "";
+  }
+}
+
+function _isWithoutRowidFromMaster(tableSql) {
+  // Definitive — string match against the CREATE TABLE DDL. Avoids a
+  // SELECT roundtrip on every archive call.
+  return /\)\s*WITHOUT\s+ROWID\s*;?\s*$/i.test(String(tableSql || ""));
+}
+
+function _readHotSchemaCached(tableName) {
+  const cached = ARCHIVE_HOT_SCHEMA_CACHE.get(tableName);
+  if (cached) return cached;
+  const cols = _readPragmaTableInfo(db, tableName);
+  if (!cols.length) {
+    // Don't cache a miss — table may not exist yet (created later by
+    // an ensureColumn or migration). Future calls will retry.
+    return null;
+  }
+  const colNames = cols.map((c) => c.name);
+  const pkColNames = cols
+    .filter((c) => c.pk > 0)
+    .sort((a, b) => a.pk - b.pk)
+    .map((c) => c.name);
+  const tableSql = _readSqliteMasterSql(db, "table", tableName);
+  const isWithoutRowid = _isWithoutRowidFromMaster(tableSql);
+  const colList = colNames.map((n) => `"${n}"`).join(", ");
+  const insertPlaceholders = colNames.map((n) => `@${n}`).join(", ");
+  const entry = {
+    cols,
+    colNames,
+    pkColNames,
+    isWithoutRowid,
+    colList,
+    insertPlaceholders,
+    tableSql,
+  };
+  ARCHIVE_HOT_SCHEMA_CACHE.set(tableName, entry);
+  return entry;
+}
+
+function _readHotStmtsCached(tableName, cutoffColumn, schema) {
+  const key = `${tableName}|${cutoffColumn}`;
+  const cached = ARCHIVE_HOT_STMT_CACHE.get(key);
+  if (cached) return cached;
+  const { colList, isWithoutRowid, pkColNames } = schema;
+  const selectStmt = db.prepare(
+    isWithoutRowid
+      ? `SELECT ${colList} FROM "${tableName}"
+           WHERE "${cutoffColumn}" < ?
+           ORDER BY "${cutoffColumn}" ASC
+           LIMIT ?`
+      : `SELECT rowid AS __rid, ${colList} FROM "${tableName}"
+           WHERE "${cutoffColumn}" < ?
+           ORDER BY "${cutoffColumn}" ASC
+           LIMIT ?`,
+  );
+  const deleteStmt = db.prepare(
+    isWithoutRowid
+      ? `DELETE FROM "${tableName}" WHERE ${pkColNames
+          .map((n) => `"${n}" = ?`)
+          .join(" AND ")}`
+      : `DELETE FROM "${tableName}" WHERE rowid = ?`,
+  );
+  const deleteBatchTx = db.transaction((idents) => {
+    for (const ident of idents || []) {
+      if (Array.isArray(ident)) deleteStmt.run(...ident);
+      else deleteStmt.run(ident);
+    }
+  });
+  const entry = { selectStmt, deleteStmt, deleteBatchTx };
+  ARCHIVE_HOT_STMT_CACHE.set(key, entry);
+  return entry;
+}
+
+function ensureArchiveTableSchema(archiveDb, monthKey, tableName, schema) {
+  // Per (monthKey, tableName) cache so we touch PRAGMA exactly once per
+  // open archive entry. The Map is cleared whenever the LRU evicts an
+  // archive entry (see closeArchiveDbForMonth below).
+  let perMonth = ARCHIVE_GENERIC_SCHEMA_CACHE.get(monthKey);
+  if (!perMonth) {
+    perMonth = new Set();
+    ARCHIVE_GENERIC_SCHEMA_CACHE.set(monthKey, perMonth);
+  }
+  if (perMonth.has(tableName)) return;
+
+  const hotCols = schema?.cols || _readPragmaTableInfo(db, tableName);
+  if (!hotCols.length) {
+    perMonth.add(tableName);
+    return;
+  }
+
+  // Prefer the verbatim CREATE TABLE from sqlite_master (preserves WITHOUT
+  // ROWID, composite PK ordering, etc.). Fall back to a reconstructed DDL
+  // only if sqlite_master is unavailable (shouldn't happen in production).
+  const hotTableSql = schema?.tableSql || _readSqliteMasterSql(db, "table", tableName);
+  let createTableSql = "";
+  if (hotTableSql) {
+    // Strip NOT NULL + DEFAULT clauses for two safety reasons:
+    //   1. Archive INSERTs replay row contents verbatim from the hot side,
+    //      so a NULL where a NOT NULL was declared can appear (e.g. column
+    //      was added later via ensureColumn before any NOT NULL backfill).
+    //   2. DEFAULT (CAST((julianday('now')...) AS INTEGER)) clauses would
+    //      generate fresh values on archive INSERT, hiding the original
+    //      hot timestamp — but we always provide the explicit value.
+    createTableSql = String(hotTableSql)
+      .replace(/\bNOT\s+NULL\b/gi, "")
+      .replace(/\bDEFAULT\s*\([^)]*(?:\([^)]*\)[^)]*)*\)/gi, "")
+      .replace(/\bDEFAULT\s+[^,)\s]+/gi, "")
+      .replace(/\bAUTOINCREMENT\b/gi, "")
+      .replace(/^\s*CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?"?[\w]+"?/i,
+        `CREATE TABLE IF NOT EXISTS "${tableName}"`);
+  } else {
+    // Defensive fallback (sqlite_master miss): reconstruct from PRAGMA.
+    const pkCols = hotCols.filter((c) => c.pk > 0).sort((a, b) => a.pk - b.pk);
+    const singleIntPk = pkCols.length === 1 && /INT/i.test(pkCols[0].type || "");
+    const lines = hotCols.map((c) => {
+      const type = c.type || "";
+      if (singleIntPk && c.name === pkCols[0].name) {
+        return `"${c.name}" ${type || "INTEGER"} PRIMARY KEY`;
+      }
+      return `"${c.name}" ${type}`.trim();
+    });
+    if (pkCols.length > 1) {
+      lines.push(`PRIMARY KEY (${pkCols.map((c) => `"${c.name}"`).join(", ")})`);
+    }
+    createTableSql = `CREATE TABLE IF NOT EXISTS "${tableName}" (${lines.join(", ")})`;
+  }
+  try {
+    archiveDb.exec(createTableSql);
+  } catch (err) {
+    // Surfaced loudly — a malformed CREATE TABLE is a real bug worth
+    // catching in logs even though we continue (archive shard may already
+    // have the table from a previous version).
+    console.warn(`[archive] CREATE TABLE failed for ${tableName} in ${monthKey}:`, err.message);
+  }
+
+  // Backfill any columns the hot table has gained since the shard was last
+  // touched (ensureColumn migrations on the hot side).
+  const archCols = _readPragmaTableInfo(archiveDb, tableName);
+  const archNames = new Set(archCols.map((c) => c.name));
+  for (const c of hotCols) {
+    if (archNames.has(c.name)) continue;
+    try {
+      archiveDb.exec(`ALTER TABLE "${tableName}" ADD COLUMN "${c.name}" ${c.type || ""}`.trim());
+    } catch (_) {
+      // ignore — ALTER may race with another writer; retry next sweep.
+    }
+  }
+
+  // Mirror non-PK indexes by reading the verbatim CREATE INDEX SQL from
+  // sqlite_master (preserves WHERE clauses for partial indexes like
+  // idx_p5m_solar). PRAGMA index_list + index_info would lose the partial
+  // predicate, leaving the archive with a non-partial index that wastes
+  // space without the same query selectivity.
+  let idxRows = [];
+  try {
+    idxRows = db
+      .prepare(
+        `SELECT name, sql FROM sqlite_master
+           WHERE type = 'index' AND tbl_name = ?
+             AND sql IS NOT NULL
+             AND name NOT LIKE 'sqlite_autoindex_%'`,
+      )
+      .all(tableName);
+  } catch (_) {
+    idxRows = [];
+  }
+  for (const r of idxRows) {
+    const sql = String(r?.sql || "");
+    if (!sql) continue;
+    const safeSql = sql.replace(/^\s*CREATE\s+(UNIQUE\s+)?INDEX\s+/i,
+      (m, u) => `CREATE ${u ? "UNIQUE " : ""}INDEX IF NOT EXISTS `);
+    try {
+      archiveDb.exec(safeSql);
+    } catch (_) {
+      // Best-effort: archive shard read paths still work via table scan.
+    }
+  }
+
+  perMonth.add(tableName);
+}
+
+function _monthKeyFor(value, kind) {
+  if (kind === "date_string") {
+    // "YYYY-MM-DD..." → "YYYY-MM". Fallback to current month so an
+    // unexpectedly malformed date_local string still archives instead
+    // of throwing.
+    const s = String(value || "").slice(0, 7);
+    return /^\d{4}-\d{2}$/.test(s) ? s : monthKeyFromTs(Date.now());
+  }
+  return monthKeyFromTs(Number(value || 0));
+}
+
+function _getArchiveInsertStmt(entry, monthKey, tableName, schema) {
+  const key = `${monthKey}|${tableName}`;
+  const cached = ARCHIVE_PER_SHARD_INSERT_CACHE.get(key);
+  if (cached) return cached;
+  const { colList, insertPlaceholders } = schema;
+  const stmt = entry.db.prepare(
+    `INSERT OR IGNORE INTO "${tableName}" (${colList}) VALUES (${insertPlaceholders})`,
+  );
+  ARCHIVE_PER_SHARD_INSERT_CACHE.set(key, stmt);
+  return stmt;
+}
+
+// archiveTableBeforeCutoff({ tableName, cutoffColumn, cutoffValue,
+//   monthKeyColumn, monthKeyKind: 'ms' | 'date_string',
+//   maxBatches: number (default ARCHIVE_MAX_BATCHES_PER_CALL) })
+//
+// Returns the number of rows migrated. Yields the event loop between
+// batches (ARCHIVE_BATCH_SIZE rows) so polling, WS, and HTTP requests
+// continue to make progress while a backlog drains. Bounded by
+// `maxBatches` so no single call can run for more than ~20 s — the next
+// cron tick continues with the remaining rows.
+async function archiveTableBeforeCutoff({
+  tableName,
+  cutoffColumn,
+  cutoffValue,
+  monthKeyColumn,
+  monthKeyKind = "ms",
+  maxBatches = ARCHIVE_MAX_BATCHES_PER_CALL,
+} = {}) {
+  if (!tableName || !cutoffColumn || !monthKeyColumn) return 0;
+  if (cutoffValue == null) return 0;
+
+  // Per-table single-flight. Prevents overlapping crons (21:30 pruneOldData
+  // + 21:35 history-prune + 6h dailyAgg) from racing on the same shard.
+  if (ARCHIVE_RUNNING_LOCK.has(tableName)) return 0;
+
+  const schema = _readHotSchemaCached(tableName);
+  if (!schema) return 0;
+  const { colNames, pkColNames, isWithoutRowid } = schema;
+
+  if (isWithoutRowid && !pkColNames.length) {
+    // No way to safely delete a single row — refuse rather than risk
+    // dropping the wrong row.
+    console.warn(`[archive] ${tableName} WITHOUT ROWID but no PK — skipping`);
+    return 0;
+  }
+
+  ARCHIVE_RUNNING_LOCK.add(tableName);
+  try {
+    const { selectStmt, deleteBatchTx } = _readHotStmtsCached(
+      tableName,
+      cutoffColumn,
+      schema,
+    );
+
+    let migrated = 0;
+    let batchCount = 0;
+    while (batchCount < maxBatches) {
+      const rows = selectStmt.all(cutoffValue, ARCHIVE_BATCH_SIZE);
+      if (!rows.length) break;
+      batchCount += 1;
+
+      const groups = new Map();
+      for (const row of rows) {
+        const monthKey = _monthKeyFor(row[monthKeyColumn], monthKeyKind);
+        if (!groups.has(monthKey)) groups.set(monthKey, []);
+        groups.get(monthKey).push(row);
+      }
+
+      for (const [monthKey, grp] of groups.entries()) {
+        const entry = getArchiveEntry(monthKey, true);
+        if (!entry) throw new Error(`Archive DB open failed for month ${monthKey}`);
+        ensureArchiveTableSchema(entry.db, monthKey, tableName, schema);
+        const insertStmt = _getArchiveInsertStmt(entry, monthKey, tableName, schema);
+        const insTx = entry.db.transaction((batch) => {
+          for (const r of batch) {
+            // Drop synthetic __rid before binding so SQLite doesn't complain
+            // about an extra named parameter.
+            const clean = {};
+            for (const n of colNames) clean[n] = r[n];
+            insertStmt.run(clean);
+          }
+        });
+        insTx(grp);
+      }
+
+      const idents = isWithoutRowid
+        ? rows.map((r) => pkColNames.map((n) => r[n]))
+        : rows.map((r) => Number(r.__rid || 0)).filter((v) => v > 0);
+      deleteBatchTx(idents);
+      migrated += rows.length;
+      await _yieldEventLoop();
+    }
+    if (batchCount >= maxBatches) {
+      console.log(
+        `[archive] ${tableName} hit per-call batch cap (${batchCount} × ${ARCHIVE_BATCH_SIZE}); next sweep will continue`,
+      );
+    }
+    return migrated;
+  } finally {
+    ARCHIVE_RUNNING_LOCK.delete(tableName);
+  }
+}
+
+// Test-only helper: drop the in-process caches so an in-memory db swap
+// (ABI-agnostic tests use a fresh better-sqlite3 :memory: per test)
+// doesn't see stale prepared statements bound to a closed db handle.
+function _resetArchiveCachesForTest() {
+  ARCHIVE_HOT_SCHEMA_CACHE.clear();
+  ARCHIVE_HOT_STMT_CACHE.clear();
+  ARCHIVE_PER_SHARD_INSERT_CACHE.clear();
+  ARCHIVE_GENERIC_SCHEMA_CACHE.clear();
+  ARCHIVE_RUNNING_LOCK.clear();
+}
+
 function safeFileSize(filePath) {
   try {
     return Number(fs.statSync(filePath).size || 0);
@@ -5462,7 +5853,15 @@ async function pruneOldData(options = {}) {
     // re-merges hot + archive for past-date queries.
     const auditMigrated = await archiveAuditBeforeCutoff(auditCutoff);
     await _yieldEventLoop();
-    // v2.9.0 Slice B/D: retention for new counter + clock-sync tables.
+    // v2.9.0 Slice B/D — v2.11.2: counter baselines + clock-sync log now
+    // MIGRATE to monthly archive shards instead of permanent DELETE. The
+    // baseline rows are the only record of the per-day Etotal/parcE seed
+    // used for crash-recovery; losing them after `counterBaselineRetainDays`
+    // permanently breaks any post-hoc audit of "what did the hardware say at
+    // midnight on YYYY-MM-DD?". Clock-sync log is the operator's only
+    // forensic trail for drift incidents — same data-loss class.
+    let baselineMigrated = 0;
+    let clockSyncMigrated = 0;
     try {
       const baselineRetainDays = Math.max(30, Number(getSetting("counterBaselineRetainDays", 90)));
       const baselineCutoffDate = (() => {
@@ -5472,14 +5871,25 @@ async function pruneOldData(options = {}) {
         const day = String(d.getDate()).padStart(2, "0");
         return `${y}-${m}-${day}`;
       })();
-      db.prepare(
-        "DELETE FROM inverter_counter_baseline WHERE date_key < ?",
-      ).run(baselineCutoffDate);
+      baselineMigrated = await archiveTableBeforeCutoff({
+        tableName: "inverter_counter_baseline",
+        cutoffColumn: "date_key",
+        cutoffValue: baselineCutoffDate,
+        monthKeyColumn: "date_key",
+        monthKeyKind: "date_string",
+      });
+      await _yieldEventLoop();
       const clockSyncRetainDays = Math.max(30, Number(getSetting("clockSyncLogRetainDays", 365)));
       const clockSyncCutoff = Date.now() - clockSyncRetainDays * 24 * 60 * 60 * 1000;
-      db.prepare("DELETE FROM inverter_clock_sync_log WHERE ts < ?").run(clockSyncCutoff);
+      clockSyncMigrated = await archiveTableBeforeCutoff({
+        tableName: "inverter_clock_sync_log",
+        cutoffColumn: "ts",
+        cutoffValue: clockSyncCutoff,
+        monthKeyColumn: "ts",
+        monthKeyKind: "ms",
+      });
     } catch (err) {
-      console.warn("[DB] counter/clock-sync retention skipped:", err.message);
+      console.warn("[DB] counter/clock-sync archive skipped:", err.message);
     }
     await _yieldEventLoop();
     checkpointArchiveDbs("PASSIVE");
@@ -5507,7 +5917,12 @@ async function pruneOldData(options = {}) {
       ok: true,
       retainDays,
       auditRetainDays,
-      archived: { ...archived, audit: auditMigrated },
+      archived: {
+        ...archived,
+        audit: auditMigrated,
+        counter_baseline: baselineMigrated,
+        clock_sync_log: clockSyncMigrated,
+      },
       checkpointed,
       vacuumed,
       mainDbBytesBefore,
@@ -5518,7 +5933,7 @@ async function pruneOldData(options = {}) {
       archiveBytesAfter: archiveAfter.totalBytes,
     };
     console.log(
-      `[DB] Old data pruned. Archived readings=${archived.readings}, energy_5min=${archived.energy5}, alarms=${archived.alarms}, audit=${auditMigrated}, vacuumed=${vacuumed}.`,
+      `[DB] Old data pruned. Archived readings=${archived.readings}, energy_5min=${archived.energy5}, alarms=${archived.alarms}, audit=${auditMigrated}, counter_baseline=${baselineMigrated}, clock_sync_log=${clockSyncMigrated}, vacuumed=${vacuumed}.`,
     );
     return result;
   } catch (err) {
@@ -5526,7 +5941,7 @@ async function pruneOldData(options = {}) {
     return {
       ok: false,
       error: err.message || "Unknown prune error.",
-      archived: { readings: 0, energy5: 0, alarms: 0, audit: 0 },
+      archived: { readings: 0, energy5: 0, alarms: 0, audit: 0, counter_baseline: 0, clock_sync_log: 0 },
       checkpointed: false,
       vacuumed: false,
       mainDbBytesBefore: safeFileSize(DB_PATH),
@@ -5675,9 +6090,19 @@ function markStaleRampsAborted() {
   return rows.length;
 }
 
-function pruneRampLog(retainDays = 90) {
-  const cutoff = Date.now() - retainDays * 86400000;
-  return db.prepare("DELETE FROM inverter_curtailment_ramp_log WHERE ts < ?").run(cutoff).changes;
+async function pruneRampLog(retainDays = 90) {
+  // v2.11.2 — was DELETE-only (and orphaned, never called); now migrates
+  // ramp-log rows to the monthly archive shard. The ramp log is the per-
+  // write detail trail for every curtailment job — same compliance class
+  // as apc_verify_log, must survive operator retention tightening.
+  const cutoff = Date.now() - Math.max(7, Number(retainDays) || 90) * 86400000;
+  return archiveTableBeforeCutoff({
+    tableName: "inverter_curtailment_ramp_log",
+    cutoffColumn: "ts",
+    cutoffValue: cutoff,
+    monthKeyColumn: "ts",
+    monthKeyKind: "ms",
+  });
 }
 
 /* ── IGBT Health Phase 2.1 — thermal baseline helpers ────────────────────── */
@@ -6001,9 +6426,19 @@ function getLatestApcVerifyAll() {
   return stmtLatestApcVerifyAll.all();
 }
 
-function pruneApcVerifyLog(retainDays = 90) {
+async function pruneApcVerifyLog(retainDays = 90) {
+  // v2.11.2 — was DELETE-only; the APC verify trail is the compliance
+  // record proving each %P setpoint write was acknowledged by the
+  // inverter, so retention now MIGRATES the rows to the monthly archive
+  // shard instead of dropping them.
   const cutoff = Date.now() - Math.max(7, Number(retainDays) || 90) * 86400_000;
-  return stmtPruneApcVerify.run(cutoff).changes;
+  return archiveTableBeforeCutoff({
+    tableName: "apc_verify_log",
+    cutoffColumn: "write_ts_ms",
+    cutoffValue: cutoff,
+    monthKeyColumn: "write_ts_ms",
+    monthKeyKind: "ms",
+  });
 }
 
 /* ── v2.11.x Phase 3 — grid_control_verify_log helpers (Slice ζ verify) ── */
@@ -6052,19 +6487,39 @@ function getLatestGridControlVerifyAll() {
   return stmtLatestGcVerifyAll.all();
 }
 
-function pruneGridControlVerifyLog(retainDays = 90) {
+async function pruneGridControlVerifyLog(retainDays = 90) {
+  // v2.11.2 — was DELETE-only (and orphaned, never called); now migrates
+  // grid-control verify rows to the monthly archive shard. The cron in
+  // server/index.js now wires this on the same Sunday-04:30 cadence as
+  // the APC verify log so both Plant-Controller audit trails decay
+  // together.
   const cutoff = Date.now() - Math.max(7, Number(retainDays) || 90) * 86400_000;
-  return stmtPruneGcVerify.run(cutoff).changes;
+  return archiveTableBeforeCutoff({
+    tableName: "grid_control_verify_log",
+    cutoffColumn: "write_ts_ms",
+    cutoffValue: cutoff,
+    monthKeyColumn: "write_ts_ms",
+    monthKeyKind: "ms",
+  });
 }
 
-function pruneIgbtThermalBaseline(retainDays = 800) {
+async function pruneIgbtThermalBaseline(retainDays = 800) {
   // Keep ≥ 2 years so YoY comparisons still work after a long uptime.
+  // v2.11.2 — rows now MIGRATE to monthly archive shards (was DELETE-only).
+  // Thermal baselines are the only IGBT-aging audit trail; once they age
+  // out of the hot table they're irreplaceable (the 5-min source rows that
+  // computed them have already moved to readings archives). The universal
+  // archive helper supports WITHOUT ROWID + composite-PK tables.
   const cutoffDays = Math.max(400, Math.floor(Number(retainDays) || 800));
   const cutoffDate = new Date(Date.now() - cutoffDays * 86400_000)
     .toISOString().slice(0, 10);
-  return db.prepare(
-    "DELETE FROM igbt_thermal_baseline WHERE date_local < ?"
-  ).run(cutoffDate).changes;
+  return archiveTableBeforeCutoff({
+    tableName: "igbt_thermal_baseline",
+    cutoffColumn: "date_local",
+    cutoffValue: cutoffDate,
+    monthKeyColumn: "date_local",
+    monthKeyKind: "date_string",
+  });
 }
 
 // ── v2.11.x Slice κ.3 — inverter_critical_blocks DAO ────────────────────────
@@ -6516,6 +6971,8 @@ module.exports = {
   findStopReasonByIdArchiveAware,
   findStopReasonByAlarmIdArchiveAware,
   archiveStopReasonsBeforeCutoff,
+  archiveTableBeforeCutoff,
+  _resetArchiveCachesForTest,
   archiveReadingsRows,
   archiveEnergyRows,
   getDailyReadingsSummaryRows,

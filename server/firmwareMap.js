@@ -362,9 +362,35 @@ function getFirmwareDriftLog(db, { limit = 200, inverterIp = null } = {}) {
   `).all(...args);
 }
 
-function pruneFirmwareDriftLog(db, retainDays = 365) {
+// v2.11.2 — archive-then-delete via the injected `archiveTableBeforeCutoff`
+// worker (db.js). The drift log is the only auditable record of fleet
+// firmware-tuple changes detected by scans; permanently DELETE'ing it on
+// retention used to silently lose that history.
+//
+// Returns:
+//   - Promise<number> (rows migrated) when archiveTableBeforeCutoff is
+//     provided (production path — server/index.js wires it in).
+//   - number (rows deleted) on the sync fallback path (used only by the
+//     ABI-agnostic in-memory test in tests/firmwareMap.test.js, where the
+//     archive shard machinery isn't loaded).
+function pruneFirmwareDriftLog(db, retainDays = 365, archiveTableBeforeCutoff = null) {
   const days = Math.max(1, Math.min(3650, Number(retainDays) || 365));
   const cutoff = Date.now() - days * 86400000;
+  if (typeof archiveTableBeforeCutoff === "function") {
+    return archiveTableBeforeCutoff({
+      tableName: "firmware_drift_log",
+      cutoffColumn: "detected_at_ms",
+      cutoffValue: cutoff,
+      monthKeyColumn: "detected_at_ms",
+      monthKeyKind: "ms",
+    });
+  }
+  // Defensive fallback: callers must inject the archive helper. Keeping the
+  // legacy DELETE so a misconfigured deployment still bounds the table —
+  // logged so the operator notices.
+  console.warn(
+    "[firmwareMap] archiveTableBeforeCutoff missing — falling back to DELETE (drift log data loss).",
+  );
   const r = db.prepare(
     `DELETE FROM firmware_drift_log WHERE detected_at_ms < ?`
   ).run(cutoff);

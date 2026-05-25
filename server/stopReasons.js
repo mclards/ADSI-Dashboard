@@ -336,19 +336,21 @@ function _decorateRow(row) {
  * Apply the configured retention window. Default 365 days for
  * inverter_stop_reasons, 90 days for inverter_stop_histogram.
  *
- * v2.11.1-beta.1 — `inverter_stop_reasons` now MIGRATES to monthly archive
+ * v2.11.1-beta.1 — `inverter_stop_reasons` MIGRATES to monthly archive
  * shards via archiveStopReasonsBeforeCutoff. Same close-of-data-loss-gap
  * pattern as the v2.11.0-beta.10 alarms fix: an alarm whose row migrates
  * to its archive shard (after `retainDays`) joins back to its captured
  * StopReason snapshot via findStopReasonByIdArchiveAware so the drilldown
  * panel stays populated indefinitely.
  *
- * Histogram rows remain DELETE-only — they're a low-value diagnostic
- * snapshot, regenerable from the inverter on demand, with a hardcoded
- * 90-day default that the operator can lower only down to 7 days (bounded
- * loss, acceptable per the 2026-05-22 retention audit).
+ * v2.11.2 — `inverter_stop_histogram` ALSO MIGRATES (was DELETE-only) via
+ * the injected universal archive helper. The histogram is a per-pull
+ * snapshot of the inverter's lifetime stop-counter tally; even though it's
+ * "regenerable on demand", a regenerated read only captures the current
+ * tally and CANNOT reconstruct intermediate values, so DELETE-on-retention
+ * permanently lost the time series the analytics panel uses.
  *
- * Returns { reasons: migrated_count, histogram: deleted_count } so the
+ * Returns { reasons: migrated_count, histogram: migrated_count } so the
  * cron log entry still reports activity. Callers that previously read the
  * "deleted" semantics now see migration counts under the same key.
  */
@@ -356,6 +358,7 @@ async function pruneOldRows(db, {
   reasonsRetainDays = 365,
   histogramRetainDays = 90,
   archiveStopReasonsBeforeCutoff = null,
+  archiveTableBeforeCutoff = null,
 } = {}) {
   const now = Date.now();
   const reasonsCutoff = now - Math.max(1, reasonsRetainDays) * 86_400_000;
@@ -386,8 +389,30 @@ async function pruneOldRows(db, {
       .run(reasonsCutoff);
     reasonsCount = Number(r1.changes || 0);
   }
-  const r2 = db.prepare(`DELETE FROM inverter_stop_histogram WHERE read_at_ms < ?`).run(histogramCutoff);
-  return { reasons: reasonsCount, histogram: Number(r2.changes || 0) };
+  let histogramCount = 0;
+  if (typeof archiveTableBeforeCutoff === "function") {
+    try {
+      histogramCount = await archiveTableBeforeCutoff({
+        tableName: "inverter_stop_histogram",
+        cutoffColumn: "read_at_ms",
+        cutoffValue: histogramCutoff,
+        monthKeyColumn: "read_at_ms",
+        monthKeyKind: "ms",
+      });
+    } catch (err) {
+      console.warn(
+        "[stop-reasons] archive histogram failed:",
+        err?.message || err,
+      );
+    }
+  } else {
+    console.warn(
+      "[stop-reasons] archive injector missing — falling back to DELETE for histogram.",
+    );
+    const r2 = db.prepare(`DELETE FROM inverter_stop_histogram WHERE read_at_ms < ?`).run(histogramCutoff);
+    histogramCount = Number(r2.changes || 0);
+  }
+  return { reasons: reasonsCount, histogram: histogramCount };
 }
 
 module.exports = {

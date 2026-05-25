@@ -837,22 +837,46 @@ function getSlotCoverage(inverterIp, slave, dateLocal) {
 
 // ─── Retention pruner ──────────────────────────────────────────────────────
 
-// Note (v2.11.1-beta.1) — inverter_5min_param archive deferred. The hot
-// table gains many Slice β diagnostic columns via ensureColumn migrations
-// that a static archive shard DDL would silently drop. Until the archive
-// shard mirrors the schema dynamically (PRAGMA table_info), this stays
-// DELETE-only with the existing 7-day floor (bounded loss).
-function pruneRetention(retainDays) {
-  if (!_db) return { deleted: 0 };
+// v2.11.2 — inverter_5min_param archive is finally wired. The hot table
+// keeps gaining diagnostic columns via ensureColumn migrations (parce_kwh,
+// qac_var_avg, tempint_c_*, zpos/zneg kohm, vpv_n/p_v, time_to_connect_*,
+// alarms_inst_32_max, analog_in_*, pt100_*, inverter_state_raw_last, etc.),
+// so the archive shard mirrors the hot schema DYNAMICALLY via PRAGMA
+// table_info inside server/db.js#archiveTableBeforeCutoff — every future
+// ensureColumn flows through automatically without a static-DDL bug.
+//
+// The archive helper is injected by the cron caller (server/index.js) to
+// keep this module free of a circular ./db require. If injection is
+// missing we fall back to the legacy DELETE — bounded by the 7-day floor
+// — and log loudly so the operator sees it.
+async function pruneRetention(retainDays, opts = {}) {
+  if (!_db) return { archived: 0 };
+  const archiveTableBeforeCutoff =
+    opts && typeof opts.archiveTableBeforeCutoff === "function"
+      ? opts.archiveTableBeforeCutoff
+      : null;
   const days = Math.max(7, Math.min(3650, Number(retainDays) || 365));
   const cutoff = new Date(Date.now() - days * 86400_000);
   const cutoffStr = `${cutoff.getFullYear()}-${String(cutoff.getMonth() + 1).padStart(2, "0")}-${String(cutoff.getDate()).padStart(2, "0")}`;
   try {
+    if (archiveTableBeforeCutoff) {
+      const migrated = await archiveTableBeforeCutoff({
+        tableName: "inverter_5min_param",
+        cutoffColumn: "date_local",
+        cutoffValue: cutoffStr,
+        monthKeyColumn: "date_local",
+        monthKeyKind: "date_string",
+      });
+      return { archived: migrated || 0, cutoff: cutoffStr };
+    }
+    console.warn(
+      "[dailyAgg] archive injector missing — falling back to DELETE (5-min param data loss).",
+    );
     const r = _db.prepare(`DELETE FROM inverter_5min_param WHERE date_local < ?`).run(cutoffStr);
-    return { deleted: r.changes || 0, cutoff: cutoffStr };
+    return { archived: 0, deleted: r.changes || 0, cutoff: cutoffStr };
   } catch (err) {
     console.warn("[dailyAgg] prune failed:", err?.message || err);
-    return { deleted: 0, error: String(err?.message || err) };
+    return { archived: 0, error: String(err?.message || err) };
   }
 }
 
