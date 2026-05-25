@@ -30085,18 +30085,65 @@ function _fcalReadConfigInput(field) {
 // One-prompt-per-page auth cache for L2 config writes. Lives only in
 // memory — reset on reload. Mirrors the existing _fcalAuthedFetch pattern
 // from the calibration page.
+//
+// Why NOT window.prompt: the Utility Tool runs in a standalone Electron
+// BrowserWindow, where window.prompt() is silently disabled
+// ("prompt() is and will not be supported"). Reuse the existing
+// #bulkAuthModal (initBulkAuthModal / requestBulkAuthorization) which is
+// part of the dashboard shell HTML and works in both contexts.
+//
+// Cache layering: prefer the page-wide bulk-auth cache primed by
+// _fcalEnsureUnlock() when Calibration Mode was enabled — that key is
+// `sacupsMM`, identical to what /api/calibration/config-write requires —
+// so the operator only ever types it once per visit.
 let _fcalConfigAuthKey = null;
 async function _fcalEnsureConfigAuth() {
   if (_fcalConfigAuthKey) return _fcalConfigAuthKey;
-  const k = window.prompt(
-    "Enter authorization key (sacupsMM) to enable inverter config writes for this session:",
-    "",
-  );
+
+  // Reuse the bulk-auth key already cached by Calibration Mode unlock.
+  if (typeof getCachedBulkAuthKey === "function") {
+    const cached = String(getCachedBulkAuthKey() || "").trim();
+    if (cached) {
+      _fcalConfigAuthKey = cached;
+      return _fcalConfigAuthKey;
+    }
+  }
+
+  let k = null;
+  if (
+    typeof initBulkAuthModal === "function" &&
+    typeof requestBulkAuthorization === "function"
+  ) {
+    try {
+      initBulkAuthModal();
+      k = await requestBulkAuthorization(
+        "Enable inverter config writes",
+        "— enter your bulk-control key (sacupsMM)",
+        1,
+      );
+    } catch (_) {
+      k = null;
+    }
+  } else {
+    // Last-ditch fallback for dev/test contexts without the modal HTML.
+    try {
+      k = window.prompt(
+        "Enter authorization key (sacupsMM) to enable inverter config writes for this session:",
+        "",
+      );
+    } catch (_) {
+      k = null;
+    }
+  }
+
   if (!k) throw new Error("Authorization cancelled.");
-  _fcalConfigAuthKey = String(k).trim();
-  if (!_fcalConfigAuthKey) {
-    _fcalConfigAuthKey = null;
-    throw new Error("Authorization key is empty.");
+  const trimmed = String(k).trim();
+  if (!trimmed) throw new Error("Authorization key is empty.");
+  _fcalConfigAuthKey = trimmed;
+  // Mirror into the page-wide cache so subsequent calls (and other
+  // calibration handlers) reuse the key without re-prompting.
+  if (typeof setCachedBulkAuthKey === "function") {
+    try { setCachedBulkAuthKey(trimmed); } catch (_) {}
   }
   return _fcalConfigAuthKey;
 }
@@ -30144,8 +30191,13 @@ async function _fcalConfigWriteOne(fieldName) {
     });
     const body = await resp.json().catch(() => ({}));
     if (resp.status === 403) {
-      // Auth rejected — drop the cached key so the next click reprompts.
+      // Auth rejected — drop BOTH the local + page-wide cache (the
+      // latter is shared with Calibration Mode unlock) so the next
+      // click re-prompts via the modal.
       _fcalConfigAuthKey = null;
+      if (typeof clearBulkAuthCache === "function") {
+        try { clearBulkAuthCache(); } catch (_) {}
+      }
       throw new Error(body.error || "Authorization rejected.");
     }
     if (resp.status === 423) {
@@ -30267,6 +30319,9 @@ async function _fcalConfigWriteAll() {
     // whole loop — every subsequent write would otherwise spam 403s.
     if (resp.status === 403) {
       _fcalConfigAuthKey = null;
+      if (typeof clearBulkAuthCache === "function") {
+        try { clearBulkAuthCache(); } catch (_) {}
+      }
       try {
         authKey = await _fcalEnsureConfigAuth();
       } catch (_) {
@@ -30288,6 +30343,9 @@ async function _fcalConfigWriteAll() {
         const retryBody = await retry.json().catch(() => ({}));
         if (retry.status === 403) {
           _fcalConfigAuthKey = null;
+          if (typeof clearBulkAuthCache === "function") {
+            try { clearBulkAuthCache(); } catch (_) {}
+          }
           abortedReason = "Authorization still rejected after re-entry — remaining writes skipped.";
           break;
         }
