@@ -1045,10 +1045,10 @@
   </div>
   <p>ADSI Inverter Dashboard provides centralized operational visibility for a utility-scale solar inverter fleet. The application consolidates live status, interval energy accumulation, alarms, audit activity, day-ahead generation forecasting, and formal reporting into one workstation interface built on Electron.</p>
   <div class="stat-row">
-    <div class="stat-card"><div class="stat-value">997</div><div class="stat-label">kW Per Inverter</div></div>
+    <div class="stat-card"><div class="stat-value">997.64</div><div class="stat-label">kW Per Inverter (Pmax)</div></div>
     <div class="stat-card"><div class="stat-value">4</div><div class="stat-label">Nodes / Inverter</div></div>
-    <div class="stat-card"><div class="stat-value">249.25</div><div class="stat-label">kW Per Node</div></div>
-    <div class="stat-card"><div class="stat-value">917</div><div class="stat-label">kW Dependable</div></div>
+    <div class="stat-card"><div class="stat-value">249.41</div><div class="stat-label">kW Per Node (Pmax)</div></div>
+    <div class="stat-card"><div class="stat-value">906.92</div><div class="stat-label">kW Dependable (Pnom)</div></div>
   </div>
   <div class="feat-grid">
     <div class="feat-item"><div class="feat-item-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M13 2L3 14h7l-1 6 10-12h-7l1-6z" stroke="#fbbf24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></div><h4>Live Monitoring</h4><p>Real-time inverter and node-level telemetry with supervised START/STOP control actions.</p></div>
@@ -1595,7 +1595,7 @@
 <section id="s23">
   <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="3" y="3" width="16" height="16" rx="2" stroke="#fbbf24" stroke-width="1.8"/><path d="M7 8h8M7 11h6M7 14h7" stroke="#fbbf24" stroke-width="1.5" stroke-linecap="round"/></svg></div><h2>Quick Reference</h2></div>
   <h3>Defaults &amp; Constants</h3>
-  <table><thead><tr><th>Item</th><th>Value</th></tr></thead><tbody><tr><td>Default Credentials</td><td><code>admin</code> / <code>1234</code></td></tr><tr><td>Plant Name</td><td>ADSI Plant</td></tr><tr><td>Inverter Rated / Dependable</td><td>997.0 kW / 917.0 kW</td></tr><tr><td>Nodes per Inverter</td><td>4 (249.25 kW each)</td></tr><tr><td>Solar Window</td><td>5:00 AM &ndash; 6:00 PM</td></tr><tr><td>Alarm Sound Threshold</td><td>5 seconds sustained</td></tr><tr><td>Ports</td><td>3500 (Express), 9000 (FastAPI)</td></tr><tr><td>ML Features</td><td>68 columns (with tri-band)</td></tr></tbody></table>
+  <table><thead><tr><th>Item</th><th>Value</th></tr></thead><tbody><tr><td>Default Credentials</td><td><code>admin</code> / <code>1234</code></td></tr><tr><td>Plant Name</td><td>ADSI Plant</td></tr><tr><td>Inverter Rated (Pmax) / Dependable (Pnom)</td><td>997.64 kW / 906.92 kW</td></tr><tr><td>Nodes per Inverter</td><td>4 (249.41 kW Pmax / 226.73 kW Pnom each)</td></tr><tr><td>Solar Window</td><td>5:00 AM &ndash; 6:00 PM</td></tr><tr><td>Alarm Sound Threshold</td><td>5 seconds sustained</td></tr><tr><td>Ports</td><td>3500 (Express), 9000 (FastAPI)</td></tr><tr><td>ML Features</td><td>68 columns (with tri-band)</td></tr></tbody></table>
   <h3>Page Quick Finder</h3>
   <table><thead><tr><th>Need</th><th>Best Page</th></tr></thead><tbody><tr><td>Live status</td><td>Inverters</td></tr><tr><td>Plant output capping</td><td>Plant Cap</td></tr><tr><td>Cap schedules</td><td>Plant Cap &rarr; Scheduled Auto-Cap</td></tr><tr><td>Interval analysis</td><td>Analytics + Energy</td></tr><tr><td>Day-ahead comparison</td><td>Analytics + Export</td></tr><tr><td>Forecast setup</td><td>Forecast</td></tr><tr><td>Forecast accuracy</td><td>Forecast Performance Monitor</td></tr><tr><td>Alarm review</td><td>Alarms</td></tr><tr><td>Action traceability</td><td>Audit</td></tr><tr><td>Daily summary</td><td>Report</td></tr><tr><td>File generation</td><td>Export</td></tr><tr><td>Mode / sync</td><td>Settings &rarr; Connectivity</td></tr><tr><td>License / updates</td><td>Settings &rarr; License / Updates</td></tr><tr><td>Backup</td><td>Settings &rarr; Cloud Backup</td></tr><tr><td>Network config</td><td>IP Configuration</td></tr><tr><td>Messaging</td><td>Floating bubble</td></tr><tr><td>Live camera feed</td><td>Camera card (Dashboard)</td></tr><tr><td>Camera / go2rtc config</td><td>Camera Settings modal</td></tr></tbody></table>
   <h3>Data Units</h3>

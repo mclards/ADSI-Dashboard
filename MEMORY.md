@@ -232,7 +232,7 @@ Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
 
 ## v2.4.0 Changes - Plant Cap, Remote Proxying, and Forecast/UI Refinements (2026-03-14)
 - **Plant output cap controller added:** the Inverters page now has a gateway-side plant-wide MW cap workflow with upper/lower MW banding, whole-inverter sequential stop/start decisions, exemption lists, preview/status reporting, authorization, and controller-owned release handling.
-- **Plant cap planning is node-aware:** inverter step size uses current live `Pac` as the primary estimate and scales rated (`997.0 kW`) plus dependable (`917.0 kW`) capacity by enabled node count for fallback and deadband warnings.
+- **Plant cap planning is node-aware:** inverter step size uses current live `Pac` as the primary estimate and scales rated Pmax (`997.64 kW`) plus dependable/nominal Pnom (`906.92 kW`) capacity by enabled node count for fallback and deadband warnings. Values from official Ingeteam `Plantilla Parámetros_DIGOS` template (`docs/Inverter-Parameters.pdf`).
 - **Remote plant-cap actions are gateway-proxied:** a remote workstation can open the panel and call plant-cap routes through the configured gateway, but a `404` / `Cannot POST /api/plant-cap/...` response means the gateway build is older than the client feature or the remote target is wrong.
 - **Plant-cap UI behavior tightened:** the panel is default-collapsed behind the inverter-toolbar toggle, uses theme-token styling in all themes, and exposes hover descriptions on controls, metrics, warnings, and preview headers.
 - **Solcast preview export button was rethemed:** the forecast export action now uses a theme-aware export treatment so light-theme forecasting UI stays readable.

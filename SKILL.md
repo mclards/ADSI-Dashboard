@@ -154,8 +154,11 @@ Switching from `remote` to `gateway` must immediately abort in-flight remote fet
 | Metric | Value |
 |---|---|
 | Full inverter node count | 4 |
-| Baseline max inverter power | 997.0 kW |
-| Per node at 4 nodes | 249.25 kW |
-| Dependable baseline | 917.0 kW |
+| Baseline max inverter power (Pmax) | 997.64 kW |
+| Per node at 4 nodes (Pmax) | 249.41 kW |
+| Dependable / nominal baseline (Pnom) | 906.92 kW |
+| Per node at 4 nodes (Pnom) | 226.73 kW |
+
+Source: official Ingeteam `Plantilla Parámetros_DIGOS` template (`docs/Inverter-Parameters.pdf`).
 
 Availability: inverter-level uptime only, window 05:00–18:00. All 4 nodes offline = 0%.

@@ -146,7 +146,7 @@ def parse_stop_reason(raw: bytes) -> StopReasonRecord:
         #   207 V phase × 38.9 A × √3 ≈ 13.95 kW per phase
         #   Total 3-phase active power ≈ 24 kW with PF=1
         #   PotAC raw 23545 ÷ 1000 = 23.5 kW ← matches measured power
-        #   PotAC raw 23545 ÷ 10    = 2354 kW ← exceeds 997 kW rated cap
+        #   PotAC raw 23545 ÷ 10    = 2354 kW ← exceeds 997.64 kW rated cap
         #
         # So PotAC is reported in raw watts (signed), NOT ×0.1 kW.
         # Vpv is raw volts (DC bus typically 600-900 V on INGECON SUN PE).

@@ -61,12 +61,12 @@ console.log("\n  complianceTestT5Core.test.js — Slice θ.2\n");
       sampleNode: async () => ({
         ts_ms: Date.now(),
         // Achieved tracks lastSetpoint exactly: pac_w = pct/100 × rated × 1000
-        pac_w: (lastSetpoint / 100) * 244.25 * 1000,
+        pac_w: (lastSetpoint / 100) * 249.41 * 1000,
       }),
       sleepMs: () => Promise.resolve(),
       nowFn: (() => { let t = 1_000_000; return () => t++; })(),  // collapse waits to no-op
     };
-    const r = await runApcSweep(run, 244.25, fns);
+    const r = await runApcSweep(run, 249.41, fns);
     assert.strictEqual(r.ok, true);
     assert.strictEqual(r.status, "completed");
     assert.strictEqual(r.steps.length, 3);
@@ -83,11 +83,11 @@ console.log("\n  complianceTestT5Core.test.js — Slice θ.2\n");
     const fns = {
       sendSetpointPct: async () => true,
       // Always report 100 % regardless of setpoint → deviation will trigger fail.
-      sampleNode: async () => ({ ts_ms: Date.now(), pac_w: 244.25 * 1000 }),
+      sampleNode: async () => ({ ts_ms: Date.now(), pac_w: 249.41 * 1000 }),
       sleepMs: () => Promise.resolve(),
       nowFn: (() => { let t = 1_000_000; return () => t++; })(),
     };
-    const r = await runApcSweep(run, 244.25, fns);
+    const r = await runApcSweep(run, 249.41, fns);
     assert.strictEqual(r.status, "failed");
     assert.ok(r.steps.every(s => s.pass === false));
   });
@@ -105,7 +105,7 @@ console.log("\n  complianceTestT5Core.test.js — Slice θ.2\n");
       sleepMs: () => Promise.resolve(),
       nowFn: (() => { let t = 1_000_000; return () => t++; })(),
     };
-    await runApcSweep(run, 244.25, fns);
+    await runApcSweep(run, 249.41, fns);
     // When the write fails the step is recorded on the orchestrator (with
     // pass=0) but skipped from stepResults — assert against run.steps so we
     // catch the regression on either side.
@@ -124,11 +124,11 @@ console.log("\n  complianceTestT5Core.test.js — Slice θ.2\n");
     let stepsBegun = 0;
     const fns = {
       sendSetpointPct: async () => { stepsBegun++; if (stepsBegun >= 2) run.abortRequested = true; return true; },
-      sampleNode: async () => ({ ts_ms: Date.now(), pac_w: 244.25 * 1000 }),
+      sampleNode: async () => ({ ts_ms: Date.now(), pac_w: 249.41 * 1000 }),
       sleepMs: () => Promise.resolve(),
       nowFn: (() => { let t = 1_000_000; return () => t++; })(),
     };
-    const r = await runApcSweep(run, 244.25, fns);
+    const r = await runApcSweep(run, 249.41, fns);
     assert.strictEqual(r.status, "aborted");
     assert.ok(r.steps.length < 4, `expected <4 steps before abort, got ${r.steps.length}`);
   });
@@ -136,7 +136,7 @@ console.log("\n  complianceTestT5Core.test.js — Slice θ.2\n");
   await test("runApcSweep — empty target list → finalize failed without I/O", async () => {
     const reg = new OrchestratorRegistry();
     const run = reg.start({ test_kind: "t5_apc_sweep", target_inverters: [], params: {} });
-    const r = await runApcSweep(run, 244.25, {
+    const r = await runApcSweep(run, 249.41, {
       sendSetpointPct: async () => { throw new Error("should not be called"); },
       sampleNode: async () => null,
       sleepMs: () => Promise.resolve(),
@@ -169,11 +169,11 @@ console.log("\n  complianceTestT5Core.test.js — Slice θ.2\n");
         lastSetpoint = pct;
         return true;
       },
-      sampleNode: async () => ({ ts_ms: Date.now(), pac_w: (lastSetpoint / 100) * 244.25 * 1000 }),
+      sampleNode: async () => ({ ts_ms: Date.now(), pac_w: (lastSetpoint / 100) * 249.41 * 1000 }),
       sleepMs: () => Promise.resolve(),
       nowFn: (() => { let t = 1_000_000; return () => t++; })(),
     };
-    const r = await runApcSweep(run, 244.25, fns);
+    const r = await runApcSweep(run, 249.41, fns);
     assert.strictEqual(r.ok, true, "sweep itself should still report ok");
     assert.strictEqual(r.status, "completed_with_warnings",
       "status must surface restoration failure; got " + r.status);

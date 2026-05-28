@@ -33,7 +33,7 @@ test("constants exposed", () => {
 
 test("_decodeRow handles null row → all nulls", () => {
   const v = new ApcVerifier();
-  const r = v._decodeRow(null, 244.25, 0);
+  const r = v._decodeRow(null, 249.41, 0);
   assert.strictEqual(r.observed_pct, null);
   assert.strictEqual(r.bit1_active, null);
   assert.ok(r.sample_age_ms === Infinity);
@@ -42,9 +42,9 @@ test("_decodeRow handles null row → all nulls", () => {
 test("_decodeRow handles full row → observed_pct", () => {
   const v = new ApcVerifier();
   const now = 10_000;
-  const row = { ts_ms: 9_000, pac_w: 122_125, pwr_red_bits: 0b10 }; // bit 1 set
-  const r = v._decodeRow(row, 244.25, now);
-  // pac_w / (244.25 × 1000) × 100 = 122125 / 244250 × 100 = 50.0
+  const row = { ts_ms: 9_000, pac_w: 124_705, pwr_red_bits: 0b10 }; // bit 1 set
+  const r = v._decodeRow(row, 249.41, now);
+  // pac_w / (249.41 × 1000) × 100 = 124705 / 249410 × 100 = 50.0
   assert.ok(Math.abs(r.observed_pct - 50.0) < 0.01, `expected ≈50, got ${r.observed_pct}`);
   assert.strictEqual(r.bit1_active, 1);
   assert.strictEqual(r.sample_age_ms, 1_000);
@@ -96,7 +96,7 @@ test("scheduleVerify inserts pending row + schedules timer", () => {
     insertApcVerifyLog: (row) => log.push(["insert", row.result, row.requested_pct]),
     setTimeoutFn: fakeTimer,
   });
-  v.scheduleVerify({ inverter_ip: "1.1.1.1", slave: 1, requested_pct: 75, rated_kw: 244.25 });
+  v.scheduleVerify({ inverter_ip: "1.1.1.1", slave: 1, requested_pct: 75, rated_kw: 249.41 });
   assert.ok(log.some(l => l[0] === "insert" && l[1] === "pending" && l[2] === 75), "expected pending row insert");
   assert.ok(log.some(l => l[0] === "scheduled"), "expected timer schedule");
 });
@@ -110,9 +110,9 @@ test("scheduleVerify cancels prior pending verify for same node (anti-thrash)", 
     insertApcVerifyLog: () => {},
     setTimeoutFn: fakeTimer,
   });
-  v.scheduleVerify({ inverter_ip: "1.1.1.1", slave: 1, requested_pct: 50, rated_kw: 244.25 });
-  v.scheduleVerify({ inverter_ip: "1.1.1.1", slave: 1, requested_pct: 75, rated_kw: 244.25 });
-  v.scheduleVerify({ inverter_ip: "1.1.1.1", slave: 2, requested_pct: 80, rated_kw: 244.25 });
+  v.scheduleVerify({ inverter_ip: "1.1.1.1", slave: 1, requested_pct: 50, rated_kw: 249.41 });
+  v.scheduleVerify({ inverter_ip: "1.1.1.1", slave: 1, requested_pct: 75, rated_kw: 249.41 });
+  v.scheduleVerify({ inverter_ip: "1.1.1.1", slave: 2, requested_pct: 80, rated_kw: 249.41 });
   assert.strictEqual(v.pendingByKey.size, 2, "two unique nodes should be pending");
 });
 
@@ -130,14 +130,14 @@ test("end-to-end: scheduleVerify → fired → ok result", () => {
   const v = new ApcVerifier({
     db: {
       prepare: () => ({
-        get: () => ({ ts_ms: Date.now(), pac_w: 122_125, pwr_red_bits: 0b10 }), // 50% of 244.25 kW
+        get: () => ({ ts_ms: Date.now(), pac_w: 124_705, pwr_red_bits: 0b10 }), // 50% of 249.41 kW
       }),
     },
     insertApcVerifyLog: (row) => log.push(row),
     setTimeoutFn: fakeTimer,
     delayMs: 0,
   });
-  v.scheduleVerify({ inverter_ip: "10.0.0.1", slave: 1, requested_pct: 50, rated_kw: 244.25 });
+  v.scheduleVerify({ inverter_ip: "10.0.0.1", slave: 1, requested_pct: 50, rated_kw: 249.41 });
   assert.ok(firedCb, "timer callback should be set");
   firedCb();
   // First insert is "pending", second is the verify result
@@ -161,7 +161,7 @@ test("end-to-end: stale sample (older than 5 min) → no_response", () => {
     setTimeoutFn: fakeTimer,
     delayMs: 0,
   });
-  v.scheduleVerify({ inverter_ip: "x", slave: 1, requested_pct: 75, rated_kw: 244.25 });
+  v.scheduleVerify({ inverter_ip: "x", slave: 1, requested_pct: 75, rated_kw: 249.41 });
   firedCb();
   assert.strictEqual(log[log.length - 1].result, "no_response");
 });
@@ -178,7 +178,7 @@ test("end-to-end: timeout when current time exceeds timeoutMs", () => {
     timeoutMs: 5_000,
     delayMs: 0,
   });
-  v.scheduleVerify({ inverter_ip: "x", slave: 1, requested_pct: 75, rated_kw: 244.25 });
+  v.scheduleVerify({ inverter_ip: "x", slave: 1, requested_pct: 75, rated_kw: 249.41 });
   // Advance the clock past timeout BEFORE firing
   currentNow += 10_000;
   firedCb();

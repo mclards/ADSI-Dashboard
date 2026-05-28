@@ -1,7 +1,11 @@
 "use strict";
 
-const UNIT_KW_MAX = 997.0;
-const UNIT_KW_DEPENDABLE = 917.0;
+// Per-inverter ratings from official Ingeteam "Plantilla Parámetros" (DIGOS/ADSI):
+//   Per-stage Maximum Power = 249.41 kW → 4 stages × 249.41 = 997.64 kW per inverter
+//   Per-stage Nominal Power = 226.73 kW → 4 stages × 226.73 = 906.92 kW per inverter
+// "Dependable" maps to template "Nominal" (continuous nameplate, not boost peak).
+const UNIT_KW_MAX = 997.64;
+const UNIT_KW_DEPENDABLE = 906.92;
 const MAX_UNITS_PER_INVERTER = 4;
 const DEFAULT_TICK_MS = 2000;
 const DEFAULT_BREACH_HOLD_MS = 8000;

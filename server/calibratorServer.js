@@ -489,7 +489,7 @@ function startCalibratorServer({
 
   // ── Firmware Upgrade (EXPERIMENTAL — gated per-node flash) ────────────
   //
-  // Brick-risk / irreversible on a live 997 kW plant. Defence in depth:
+  // Brick-risk / irreversible on a live 997.64 kW plant. Defence in depth:
   //   • All real safety refusals are enforced in Python
   //     (firmware_transport.flash_inverter_node — the single choke point).
   //   • Dry-run / listing / identity / job-poll / abort are READ-ONLY or

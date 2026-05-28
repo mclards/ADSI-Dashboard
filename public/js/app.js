@@ -303,9 +303,9 @@ const State = {
 };
 const TAB_STALE_MS = 60000; // 60 s — prefetch on startup keeps cache warm; re-fetch after that
 const MAX_INV_UNITS = 4;
-const NODE_RATED_W  = Math.round(997000 / MAX_INV_UNITS); // 249,250 W — rated per-node (997 kW ÷ 4)
-const INV_RATED_KW  = 997;                                 // rated per-inverter capacity kW
-const INV_DEPENDABLE_KW = 917;
+const NODE_RATED_W  = 249410;                              // per-stage Pmax (Ingeteam template: 249.41 kW × 1000)
+const INV_RATED_KW  = 997.64;                              // rated per-inverter capacity kW (4 × 249.41)
+const INV_DEPENDABLE_KW = 906.92;                          // per-inverter nominal/dependable kW (4 × 226.73)
 const DATA_FRESH_MS = 15000;
 const CARD_OFFLINE_HOLD_MS = 15000;
 const CARD_RENDER_MIN_INTERVAL_MS = 220;
@@ -9851,13 +9851,14 @@ async function _onT5Start() {
       $("t5StepResult").textContent = `${summary.passes ?? 0} / ${(summary.passes ?? 0) + (summary.fails ?? 0)}`;
     }
     // Live achieved-% — mean of pac_w in the recent tail relative to rated
-    // 244.25 kW per node. Lets operator confirm the setpoint took effect
-    // mid-hold instead of waiting for endStep() to compute the final value.
+    // 249.41 kW per node (Ingeteam template Pmax). Lets operator confirm the
+    // setpoint took effect mid-hold instead of waiting for endStep() to
+    // compute the final value.
     if (status === "running" && tail.length > 0) {
       const watts = tail.map(s => Number(s.pac_w)).filter(v => Number.isFinite(v));
       if (watts.length > 0) {
         const meanW = watts.reduce((a, b) => a + b, 0) / watts.length;
-        const ratedW = 244.25 * 1000 * (target ? 1 : 0);
+        const ratedW = 249.41 * 1000 * (target ? 1 : 0);
         if (ratedW > 0) {
           const pct = (meanW / ratedW) * 100;
           $("t5LastAchieved").textContent = pct.toFixed(2) + ` % (live, n=${live.sample_count_total})`;

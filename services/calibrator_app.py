@@ -900,7 +900,7 @@ async def api_calibration_lockdown(req: Request):
 # ═══════════════════════════════════════════════════════════════════════════
 #  EXPERIMENTAL — Gated per-node firmware upgrade (Phase 3 wiring)
 #
-#  Irreversible / brick-risk on a live 997 kW plant. Every safety gate is
+#  Irreversible / brick-risk on a live 997.64 kW plant. Every safety gate is
 #  enforced by services.firmware_transport.flash_inverter_node (the single
 #  choke point) — this layer ONLY: (a) confines the firmware path to a known
 #  directory, (b) bridges HTTP ⇄ that orchestrator, (c) carries the prior

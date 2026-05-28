@@ -594,11 +594,13 @@ function _signedInt16(raw) {
 }
 
 /* ── β-4 — Nominal-power mismatch detector ───────────────────────────────
- * Compares the inverter's self-reported rated power (Modbus reg 30077, decoded
- * to watts) against the operator-configured NODE_KW_MAX. Emits an audit row
- * the first time a > 5 % drift is observed per (inverter,unit) per hour.
- * Source: plans/2026-05-10-modbus-registers-official-revamp.md §9 β-4. */
-const _NOMINAL_POWER_EXPECTED_W = 244250;       // NODE_KW_MAX (244.25 kW) × 1000
+ * Compares the inverter's self-reported nominal power (Modbus reg 30077,
+ * decoded to watts) against the Ingeteam template Pnom per stage. Emits an
+ * audit row the first time a > 5 % drift is observed per (inverter,unit)
+ * per hour. Source: plans/2026-05-10-modbus-registers-official-revamp.md
+ * §9 β-4 and docs/Inverter-Parameters.pdf (Plantilla Parámetros_DIGOS:
+ * Nominal Power = 226,730 W per stage). */
+const _NOMINAL_POWER_EXPECTED_W = 226730;       // template Pnom per stage (226.73 kW × 1000)
 const _NOMINAL_POWER_TOLERANCE  = 0.05;          // ±5 % per acceptance criterion β-4
 const _NOMINAL_POWER_WARN_DEDUP_MS = 60 * 60 * 1000; // 1 h
 const _nominalPowerLastWarnAt = new Map();      // key `${inv}_${unit}` → ts ms
@@ -1551,11 +1553,11 @@ async function poll() {
 
     integratePacToday(parsed);
 
-    // β-4 — Nominal-power cross-check (Modbus reg 30077 vs configured ratedKw).
-    // The slow-poll captures the inverter's self-reported rated power. Compare
-    // against the operator-configured NODE_KW_MAX × 1000 W; if the relative
-    // error exceeds 5 %, emit ONE audit row per (inverter,unit) per hour so
-    // the operator can investigate a config drift or a hardware/firmware
+    // β-4 — Nominal-power cross-check (Modbus reg 30077 vs Ingeteam Pnom).
+    // The slow-poll captures the inverter's self-reported nominal power. Compare
+    // against the template Pnom per stage (226,730 W); if the relative error
+    // exceeds 5 %, emit ONE audit row per (inverter,unit) per hour so the
+    // operator can investigate a config drift or a hardware/firmware
     // re-provisioning event without spamming the audit log.
     try {
       _maybeEmitNominalPowerMismatch(parsed);

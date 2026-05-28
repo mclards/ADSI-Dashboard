@@ -418,8 +418,8 @@ const SOLCAST_SOLAR_START_H = 5;
 const SOLCAST_SOLAR_END_H = 18;
 const FORECAST_SOLAR_SLOT_COUNT =
   ((SOLCAST_SOLAR_END_H - SOLCAST_SOLAR_START_H) * 60) / SOLCAST_SLOT_MIN;
-const SOLCAST_UNIT_KW_MAX = 997.0;
-const NODE_KW_MAX = 244.25;  // per-node maximum (250 kW × 97.7%)
+const SOLCAST_UNIT_KW_MAX = 997.64;
+const NODE_KW_MAX = 249.41;  // per-stage Maximum Power from Ingeteam template (4 × 249.41 = 997.64 kW per inverter)
 const SOLCAST_ACCESS_MODE_API = "api";
 const SOLCAST_ACCESS_MODE_TOOLKIT = "toolkit";
 const SOLCAST_TOOLKIT_RECENT_HOURS = 48;
@@ -8864,7 +8864,7 @@ function computePlantMaxKwFromConfig() {
     const enabledNodes = getConfiguredNodeSet(loadIpConfigFromDb()).size;
     return Math.max(0, Number(enabledNodes || 0) * NODE_KW_MAX);
   } catch {
-    // Safe fallback: ~108 nodes × 244.25 kW = 26.4 MW
+    // Safe fallback: ~108 nodes × 249.41 kW = 26.94 MW
     return 108 * NODE_KW_MAX;
   }
 }
@@ -14872,7 +14872,7 @@ app.get("/api/contactor/fleet.csv", (req, res) => {
 // Plan: plans/igbt-health-phase1.md §6.5 + manual §5.2.
 
 const IGBT_THERMAL_BACKFILL_DAYS = 365;     // align with YoY target
-const IGBT_THERMAL_RATED_KW_PER_NODE = NODE_KW_MAX;  // 244.25 kW (per existing convention)
+const IGBT_THERMAL_RATED_KW_PER_NODE = NODE_KW_MAX;  // 249.41 kW (Ingeteam Pmax per stage)
 
 function _enumerateConfiguredNodePairs(ipConfig) {
   // Returns [{ inverter, ip, slave }, ...].

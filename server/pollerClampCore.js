@@ -9,9 +9,12 @@
 // Background and rationale: see memory/v292_recovery_seed_clamp.md and
 // CLAUDE.md "Hardware Counter Recovery + Clock Sync (v2.9.0)".
 
-// Per-Ingeteam-INGECON unit physical max (≈ REPORT_INVERTER_KW / 4 in exporter.js).
-// One inverter = 1–4 units depending on configuration; the per-bucket ceiling
-// scales linearly with the inverter's actual unit count.
+// Per-Ingeteam-INGECON unit physical max — held at 250 for exact integer
+// clamp math (4 × 250 × 5 × 1.2 / 60 = 100 kWh exact). The official Ingeteam
+// "Plantilla Parámetros" template Pmax per stage is 249.41 kW; rounding the
+// safety ceiling up to 250 keeps the clamp conservative (legitimate readings
+// can never exceed Pmax) and preserves the test-suite's exact-25/50/75/100
+// kWh assertions. One inverter = 1–4 units; per-bucket ceiling scales linearly.
 const UNIT_RATED_KW = 250;
 
 // 1 MW physical max for a default 4-unit inverter (legacy alias kept for the

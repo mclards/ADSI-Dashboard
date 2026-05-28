@@ -74,13 +74,13 @@ async function run() {
   );
   assert.strictEqual(
     partialProfiles[1].ratedKw,
-    498.5,
-    "Rated capacity should scale with the configured node count.",
+    498.82,
+    "Rated capacity should scale with the configured node count (997.64 × 2/4).",
   );
   assert.strictEqual(
     partialProfiles[1].dependableKw,
-    458.5,
-    "Dependable capacity should scale with the configured node count.",
+    453.46,
+    "Dependable capacity should scale with the configured node count (906.92 × 2/4).",
   );
 
   const stopPreview = buildPlantCapPreview({
@@ -126,16 +126,16 @@ async function run() {
         stoppedAt: nowTs - 5000,
         pacBeforeStopKw: 400,
         enabledNodes: 4,
-        ratedKw: 997,
-        dependableKw: 917,
+        ratedKw: 997.64,
+        dependableKw: 906.92,
       },
       3: {
         inverter: 3,
         stoppedAt: nowTs - 1000,
         pacBeforeStopKw: 300,
         enabledNodes: 4,
-        ratedKw: 997,
-        dependableKw: 917,
+        ratedKw: 997.64,
+        dependableKw: 906.92,
       },
     },
   });
@@ -307,8 +307,8 @@ async function run() {
       stoppedAt: nowTs,
       pacBeforeStopKw: 600,
       enabledNodes: 4,
-      ratedKw: 997,
-      dependableKw: 917,
+      ratedKw: 997.64,
+      dependableKw: 906.92,
     }],
   ]);
   controller.handleManualWrite({

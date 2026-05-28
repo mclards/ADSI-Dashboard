@@ -78,7 +78,7 @@ Replicated raw `readings` or `energy_5min` older than local `retainDays` cutoff 
 
 Plant cap controller runs on **gateway only**. Whole-inverter sequential STOP/START to keep plant output within a configured ceiling. Exempted inverter numbers excluded from automatic stop selection.
 
-Live inverter `Pac` is the primary shed estimate. Planning scales `997.0 kW` rated and `917.0 kW` dependable baselines by enabled node count.
+Live inverter `Pac` is the primary shed estimate. Planning scales `997.64 kW` rated (Pmax) and `906.92 kW` dependable/nominal (Pnom) baselines by enabled node count — values sourced from official Ingeteam `Plantilla Parámetros_DIGOS` template.
 
 While cap monitoring is active, all non-exempted inverters are under controller authority — manual control must be blocked at the API layer. Cap panel defaults collapsed behind `Show Cap` button. STOP/START commands recorded in `audit_log` with `scope = "plant-cap"`.
 

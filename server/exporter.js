@@ -146,7 +146,7 @@ function annotateReadingsWithComputedEnergy(rowsRaw) {
 
 // Daily report metric constants aligned with dashboard computation semantics.
 const REPORT_SOLAR_WINDOW_H = 13;     // 05:00Ã¢â‚¬â€œ18:00
-const REPORT_INVERTER_KW = 997;       // one inverter rated capacity in kW
+const REPORT_INVERTER_KW = 997.64;    // per Ingeteam template Pmax (4 stages × 249.41 kW)
 
 function clampPct(v) {
   return Math.max(0, Math.min(100, safeNum(v, 0)));

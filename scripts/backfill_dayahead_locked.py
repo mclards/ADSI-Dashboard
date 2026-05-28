@@ -32,16 +32,16 @@ LIVE_DB = r"C:\ProgramData\InverterDashboard\db\adsi.db"
 DEFAULT_SOURCE_DB = r"C:\ProgramData\InverterDashboard\db\backups\adsi_backup_1.db"
 
 # Plant capacity fallback if settings query fails (matches computePlantMaxKwFromConfig default)
-FALLBACK_PLANT_CAP_MW = 26.4
+FALLBACK_PLANT_CAP_MW = 26.94  # 108 nodes × 249.41 kW (Ingeteam template Pmax per stage) / 1000
 
 
 def read_plant_cap_mw(db_path: str) -> float:
-    """Read plant capacity from live settings. Fall back to 26.4 MW if unavailable."""
+    """Read plant capacity from live settings. Fall back to 26.94 MW if unavailable."""
     try:
         uri = f"file:{db_path}?mode=ro"
         conn = sqlite3.connect(uri, uri=True, timeout=5.0)
         try:
-            # Node computes this from ipconfig node count × 244.25 kW.
+            # Node computes this from ipconfig node count × 249.41 kW (Ingeteam Pmax).
             # We don't have that logic in Python, so we read a hint if available.
             row = conn.execute(
                 "SELECT value FROM settings WHERE key = 'plantMaxKwMw'"

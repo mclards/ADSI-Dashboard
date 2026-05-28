@@ -248,9 +248,13 @@ EXPORT_MW          = 24.0   # fallback export ceiling when no explicit setting e
 FORECAST_EXPORT_LIMIT_SETTING_KEY = "forecastExportLimitMw"
 IPCONFIG_SETTING_KEY = "ipConfigJson"
 DEFAULT_INVERTER_LOSS_PCT = 3.0   # midpoint of observed 2.5%-3.6% range
-UNIT_KW_MAX        = 997.0   # kW peak per inverter (4-node complete)
-UNIT_KW_DEPENDABLE = 917.0   # kW dependable per inverter
-PLANT_MW_FALLBACK  = 26.4    # used when ipconfig absent (108 nodes × NODE_KW_MAX = 26.4 MW)
+# Official Ingeteam "Plantilla Parámetros" template (DIGOS/ADSI):
+#   Per-stage Pmax = 249.41 kW → 4 stages × 249.41 = 997.64 kW per inverter
+#   Per-stage Pnom = 226.73 kW → 4 stages × 226.73 = 906.92 kW per inverter
+# "Dependable" maps to template "Nominal" (continuous nameplate, not boost peak).
+UNIT_KW_MAX        = 997.64  # kW peak per inverter (4-node complete) — Ingeteam Pmax
+UNIT_KW_DEPENDABLE = 906.92  # kW nominal/dependable per inverter — Ingeteam Pnom
+PLANT_MW_FALLBACK  = 26.94   # used when ipconfig absent (108 nodes × NODE_KW_MAX = 26.94 MW)
 
 # Physics thresholds
 RAD_MIN_WM2   = 8.0    # W/m " ignore radiation below this
@@ -284,9 +288,15 @@ ACTIVITY_MIN_FRACTION = 0.0022
 LOW_POWER_STAGE_FRACTION = 0.16
 STAGING_BLEND_MAX = 0.72
 MODULES_PER_INVERTER = 4
-NODE_KW_NOMINAL    = 250.0                                   # per-node nameplate (kW)
-NODE_KW_MAX        = round(NODE_KW_NOMINAL * 0.977, 2)       # per-node maximum (250 × 97.7% = 244.25 kW)
-NODE_KW_DEPENDABLE = 91.75                                   # per-node dependable (kW)
+# Per-stage values from Ingeteam "Plantilla Parámetros" template (DIGOS/ADSI):
+#   Nominal Power (Pnom) = 226,730 W = 226.73 kW per stage
+#   Maximum Power (Pmax) = 249,410 W = 249.41 kW per stage
+# Pnom < Pmax as expected (continuous nameplate vs boost peak). Previous
+# `NODE_KW_MAX = NODE_KW_NOMINAL × 0.977` formula and `NODE_KW_DEPENDABLE = 91.75`
+# were placeholders/typos that pre-dated the official template.
+NODE_KW_NOMINAL    = 226.73                                  # per-stage Pnom (kW) — Ingeteam template
+NODE_KW_MAX        = 249.41                                  # per-stage Pmax (kW) — Ingeteam template
+NODE_KW_DEPENDABLE = 226.73                                  # per-stage dependable = Pnom (kW)
 REGIME_MODEL_MIN_DAYS = 6
 REGIME_MODEL_MIN_SAMPLES = 320
 REGIME_BLEND_BASE = 0.52
@@ -11811,7 +11821,7 @@ def main() -> None:
     log.info("=" * 70)
     log.info("Inverter Dashboard - Day-Ahead Forecast Service  v3.0")
     log.info("Site          : Configured  (%.6f N  %.6f E)", LAT_DEG, LON_DEG)
-    log.info("Inverters     : %.0f kW max / %.0f kW dependable each", UNIT_KW_MAX, UNIT_KW_DEPENDABLE)
+    log.info("Inverters     : %.2f kW max / %.2f kW dependable each", UNIT_KW_MAX, UNIT_KW_DEPENDABLE)
     log.info(
         "Configured    : %d inverter rows  |  enabled nodes=%d  (loss-adj nodes=%.3f)",
         profile["configured_inverters"],
