@@ -5097,6 +5097,151 @@ function sumEnergy5minByInverterRange(startTs, endTs, inverter = null) {
   return out;
 }
 
+// ─── Tier 0.1: startup recovery of today's lost energy slots ────────────────
+// audits/2026-05-30/energy-logging-integrity-hardening.md
+//
+// energy_5min is committed only at 5-min slot rollover (poller.update5minBucket),
+// so the in-progress slot lives only in memory until the boundary crosses. A
+// freeze that ends in a hard kill loses that slot plant-wide: the event loop is
+// frozen, so the graceful partial-flush in poller.flushPending() can never run.
+// But the raw `readings` rows for the slot were persisted at ~1 s cadence and
+// survive. This re-integrates PAC from those readings into any COMPLETED today
+// slot that is missing from energy_5min, before the poller resumes live
+// integration — turning a permanent plant-wide gap into a self-heal on restart.
+//
+// Safety properties (see audit §4 / §6):
+//   • Today-only + hot-DB-only (today is never archived same-day) → bounded, so a
+//     synchronous read at boot is fine; it runs once, before the server serves.
+//   • COMPLETED slots only (bucketTs < the current 5-min slot). The in-progress
+//     slot is owned by the live poller and never touched here → no duplicate-row
+//     or double-count race with the live writer (energy_5min has no UNIQUE).
+//   • Idempotent: only (inverter, slot_ts) pairs NOT already present are written,
+//     so re-running (e.g. a remote→gateway switch later in the day) is a no-op
+//     for already-covered slots.
+//   • PAC trapezoid with the same 30 s dt cap as buildPacEnergyBuckets and the
+//     live integrator → a gap in readings (the freeze window) adds no energy, so
+//     there is no counter catch-up spike and no classifyBucketInc() clamp needed.
+//   • Caller is the gateway branch of applyRuntimeMode() only → never in remote.
+function recoverTodayEnergyFromReadings(nowTs = Date.now()) {
+  const now = Number(nowTs) || Date.now();
+  const startOfDay = new Date(now);
+  startOfDay.setHours(0, 0, 0, 0);
+  const dayStart = startOfDay.getTime();
+  const FIVE_MIN = 5 * 60 * 1000;
+  const currentSlotStart = Math.floor(now / FIVE_MIN) * FIVE_MIN;
+  // No fully-elapsed slot yet today (within the first 5 min after midnight).
+  if (!(currentSlotStart > dayStart)) return { recovered: 0, kwh: 0, inverters: 0 };
+  const windowEnd = currentSlotStart - 1; // inclusive BETWEEN upper bound
+  // Defense-in-depth (adversarial review nit): the recovery window must end
+  // strictly before the in-progress slot. This holds by construction today, but
+  // a future change to FIVE_MIN / the floor logic must never let recovery reach
+  // the slot the live poller is about to own.
+  if (!(windowEnd < currentSlotStart)) return { recovered: 0, kwh: 0, inverters: 0 };
+
+  // 1) Integrate PAC from persisted readings into per-(inverter, slot) kWh.
+  //    Mirrors buildPacEnergyBuckets exactly (online-gated, 30 s dt cap, summed
+  //    across a node's units into one per-inverter bucket). getReadingsRangeAll
+  //    orders by inverter,unit,ts so each node's samples arrive ts-ascending.
+  let readingRows;
+  try {
+    readingRows = stmts.getReadingsRangeAll.all(dayStart, windowEnd);
+  } catch (err) {
+    console.warn("[energy-recovery] readings read failed:", err?.message || err);
+    return { recovered: 0, kwh: 0, inverters: 0 };
+  }
+  if (!readingRows || !readingRows.length) return { recovered: 0, kwh: 0, inverters: 0 };
+
+  const dtCapSec = 30;
+  const nodeState = new Map(); // `${inv}_${unit}` -> { ts, pac }
+  const bucketMap = new Map(); // `${inv}|${bucketTs}` -> kwh
+  for (const r of readingRows) {
+    const inv = Number(r?.inverter || 0);
+    const unit = Number(r?.unit || 0);
+    const ts = Number(r?.ts || 0);
+    if (!inv || !unit || !ts) continue;
+    const key = `${inv}_${unit}`;
+    const online = Number(r?.online || 0) === 1;
+    const pacW = Math.max(0, Number(online ? r?.pac : 0) || 0);
+    const prev = nodeState.get(key);
+    if (prev && ts > prev.ts) {
+      const dtSecRaw = (ts - prev.ts) / 1000;
+      if (dtSecRaw > 0) {
+        const dtSec = Math.min(dtCapSec, dtSecRaw);
+        const avgPac = (Number(prev.pac || 0) + pacW) / 2;
+        const kwhInc = (avgPac * dtSec) / 3600000; // W*s -> kWh
+        if (kwhInc > 0) {
+          const bucketTs = Math.floor(ts / FIVE_MIN) * FIVE_MIN;
+          const bKey = `${inv}|${bucketTs}`;
+          bucketMap.set(bKey, Number(bucketMap.get(bKey) || 0) + kwhInc);
+        }
+      }
+    }
+    nodeState.set(key, { ts, pac: pacW });
+  }
+  if (!bucketMap.size) return { recovered: 0, kwh: 0, inverters: 0 };
+
+  // 2) (inverter, slot_ts) pairs already present in energy_5min for the window.
+  const existing = new Set();
+  try {
+    for (const er of stmts.get5minRangeAll.all(dayStart, windowEnd)) {
+      existing.add(`${Number(er.inverter)}|${Number(er.ts)}`);
+    }
+  } catch (err) {
+    console.warn("[energy-recovery] energy_5min read failed:", err?.message || err);
+    return { recovered: 0, kwh: 0, inverters: 0 };
+  }
+
+  // 3) Insert only the missing slots (idempotent), in one transaction.
+  const toInsert = [];
+  for (const [bKey, kwh] of bucketMap.entries()) {
+    if (existing.has(bKey)) continue; // already logged — never double-write
+    const kwhInc = Number(Number(kwh || 0).toFixed(6));
+    if (!(kwhInc > 0)) continue;
+    const [invStr, tsStr] = bKey.split("|");
+    toInsert.push({ inverter: Number(invStr), ts: Number(tsStr), kwh_inc: kwhInc });
+  }
+  if (!toInsert.length) return { recovered: 0, kwh: 0, inverters: 0 };
+
+  let totalKwh = 0;
+  const insertTx = db.transaction((rows) => {
+    for (const row of rows) {
+      stmts.insertEnergy5.run(row.ts, row.inverter, row.kwh_inc);
+      totalKwh += row.kwh_inc;
+    }
+  });
+  try {
+    insertTx(toInsert);
+  } catch (err) {
+    console.error("[energy-recovery] insert failed:", err?.message || err);
+    return { recovered: 0, kwh: 0, inverters: 0 };
+  }
+
+  totalKwh = Number(totalKwh.toFixed(6));
+  const inverters = new Set(toInsert.map((r) => r.inverter)).size;
+  try {
+    insertAuditLogRow({
+      ts: now,
+      operator: "SYSTEM",
+      action: "energy_slot_recovery",
+      scope: "plant",
+      result: "warn",
+      reason:
+        `Startup recovery re-integrated ${toInsert.length} missing completed energy_5min ` +
+        `slot(s) (${totalKwh.toFixed(3)} kWh) across ${inverters} inverter(s) from persisted ` +
+        `readings — energy that was unflushed when a prior session ended without a graceful ` +
+        `shutdown (freeze / hard-kill / power-loss). PAC-integrated, 30 s dt cap, today-only.`,
+    });
+  } catch (err) {
+    console.warn("[energy-recovery] audit row failed:", err?.message || err);
+  }
+
+  console.log(
+    `[energy-recovery] backfilled ${toInsert.length} energy_5min slot(s), ` +
+    `${totalKwh.toFixed(3)} kWh across ${inverters} inverter(s) from persisted readings.`,
+  );
+  return { recovered: toInsert.length, kwh: totalKwh, inverters };
+}
+
 function rebuildDailyReadingsSummaryForDate(dayInput) {
   const day = String(dayInput || "").trim();
   if (!day) return [];
@@ -6963,6 +7108,7 @@ module.exports = {
   readingsNaturalKey,
   energyNaturalKey,
   sumEnergy5minByInverterRange,
+  recoverTodayEnergyFromReadings,
   countDistinctReadingBuckets,
   getLatestReadingDate,
   queryAlarmsRangeArchiveAware,

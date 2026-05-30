@@ -47,6 +47,8 @@ const {
   getTelemetryHotCutoffTs,
   queryReadingsRangeAll,
   queryReadingsRange,
+  listReadingsRangeSources,
+  recoverTodayEnergyFromReadings,
   queryEnergy5minRangeAll,
   queryEnergy5minRange,
   sumEnergy5minByInverterRange,
@@ -7298,6 +7300,25 @@ function applyRuntimeMode() {
         remoteHealth: buildRemoteHealthSnapshot(),
       });
     }
+    // Tier 0.1 (2026-05-30, audits/2026-05-30/energy-logging-integrity-hardening.md):
+    // Before the poller resumes live PAC integration, recover any of today's
+    // COMPLETED 5-min energy slots that are missing from energy_5min because a
+    // prior session ended without a graceful flush (freeze / hard-kill /
+    // power-loss). Re-integrates the surviving `readings` for those slots. Runs
+    // synchronously and once here (gateway activation only); idempotent and
+    // today/hot-only, so it can never touch the in-progress slot the live poller
+    // is about to own, and never double-writes an already-logged slot.
+    try {
+      const rec = recoverTodayEnergyFromReadings();
+      if (rec && rec.recovered > 0) {
+        console.log(
+          `[startup] energy recovery: ${rec.recovered} slot(s), ` +
+          `${Number(rec.kwh || 0).toFixed(3)} kWh, ${rec.inverters} inverter(s).`,
+        );
+      }
+    } catch (err) {
+      console.warn("[startup] energy recovery skipped:", err?.message || err);
+    }
     poller.start();
   }
 }
@@ -11248,7 +11269,7 @@ function startOfLocalDayMs(ts = Date.now()) {
   return d.getTime();
 }
 
-function buildPacEnergyBuckets({ inverter, startTs, endTs, bucketMin = 5 }) {
+async function buildPacEnergyBuckets({ inverter, startTs, endTs, bucketMin = 5 }) {
   const s = Number(startTs) || Date.now() - 86400000;
   const e = Number(endTs) || Date.now();
   const bucketMs = Math.max(1, Number(bucketMin) || 5) * 60000;
@@ -11256,54 +11277,68 @@ function buildPacEnergyBuckets({ inverter, startTs, endTs, bucketMin = 5 }) {
   // the energy_5min table written by the live integrator.
   const dtCapSec = 30;
 
-  let rows = [];
-  if (!inverter || inverter === "all") {
-    rows = queryReadingsRangeAll(s, e).map((r) => ({
-      inverter: r.inverter,
-      unit: r.unit,
-      ts: r.ts,
-      pac: r.pac,
-      online: r.online,
-    }));
-  } else {
-    rows = queryReadingsRange(Number(inverter), s, e).map((r) => ({
-      inverter: r.inverter,
-      unit: r.unit,
-      ts: r.ts,
-      pac: r.pac,
-      online: r.online,
-    }));
-  }
+  const invFilter = !inverter || inverter === "all" ? null : Number(inverter);
 
   const nodeState = new Map(); // `${inv}_${unit}` -> { ts, pac }
   const bucketMap = new Map(); // `${inv}|${bucketTs}` -> kwh_inc
 
-  for (const r of rows) {
-    const inv = Number(r?.inverter || 0);
-    const unit = Number(r?.unit || 0);
-    const ts = Number(r?.ts || 0);
-    if (!inv || !unit || !ts) continue;
+  // Tier 1.1 (2026-05-30, audits/2026-05-30/energy-logging-integrity-hardening.md):
+  // stream the range shard-by-shard (archive months oldest→newest, then the hot
+  // DB last) instead of materializing the whole range into heap via
+  // queryReadingsRangeAll(). Each src.run() is one bounded SQL burst, and we
+  // yield the event loop between shards so the poller can flush its persist
+  // backlog and the WebSocket loop can service ticks — eliminating the
+  // multi-second freeze a wide all-inverter range used to cause.
+  //
+  // Numerical parity with the old materialize-then-loop is preserved: nodeState
+  // persists ACROSS shards, listReadingsRangeSources yields shards in
+  // chronological order, and the per-node `ts > prev.ts` guard below makes any
+  // duplicate reading at an archive/hot boundary contribute 0 energy — so no
+  // per-row dedup Set is needed and heap stays O(nodes + buckets), not O(rows).
+  const sources = listReadingsRangeSources(s, e, invFilter);
+  let _rowsSinceYield = 0;
+  for (const src of sources) {
+    await _yieldToLibuv();
+    let shardRows;
+    try {
+      shardRows = src.run() || [];
+    } catch (err) {
+      console.error(
+        `[buildPacEnergyBuckets] shard ${src.monthKey || "hot"} read failed:`,
+        err?.message || err,
+      );
+      continue;
+    }
+    for (const r of shardRows) {
+      const inv = Number(r?.inverter || 0);
+      const unit = Number(r?.unit || 0);
+      const ts = Number(r?.ts || 0);
+      if (!inv || !unit || !ts) continue;
 
-    const key = `${inv}_${unit}`;
-    const online = Number(r?.online || 0) === 1;
-    const pacW = Math.max(0, Number(online ? r?.pac : 0) || 0);
-    const prev = nodeState.get(key);
+      const key = `${inv}_${unit}`;
+      const online = Number(r?.online || 0) === 1;
+      const pacW = Math.max(0, Number(online ? r?.pac : 0) || 0);
+      const prev = nodeState.get(key);
 
-    if (prev && ts > prev.ts) {
-      const dtSecRaw = (ts - prev.ts) / 1000;
-      if (dtSecRaw > 0) {
-        const dtSec = Math.min(dtCapSec, dtSecRaw);
-        const avgPac = (Number(prev.pac || 0) + pacW) / 2;
-        const kwhInc = (avgPac * dtSec) / 3600000; // W*s -> kWh
-        if (kwhInc > 0) {
-          const bucketTs = Math.floor(ts / bucketMs) * bucketMs;
-          const bKey = `${inv}|${bucketTs}`;
-          bucketMap.set(bKey, Number(bucketMap.get(bKey) || 0) + kwhInc);
+      if (prev && ts > prev.ts) {
+        const dtSecRaw = (ts - prev.ts) / 1000;
+        if (dtSecRaw > 0) {
+          const dtSec = Math.min(dtCapSec, dtSecRaw);
+          const avgPac = (Number(prev.pac || 0) + pacW) / 2;
+          const kwhInc = (avgPac * dtSec) / 3600000; // W*s -> kWh
+          if (kwhInc > 0) {
+            const bucketTs = Math.floor(ts / bucketMs) * bucketMs;
+            const bKey = `${inv}|${bucketTs}`;
+            bucketMap.set(bKey, Number(bucketMap.get(bKey) || 0) + kwhInc);
+          }
         }
       }
-    }
 
-    nodeState.set(key, { ts, pac: pacW });
+      nodeState.set(key, { ts, pac: pacW });
+      // Yield within very large shards too so a single high-row month can't
+      // monopolize the loop between shard boundaries.
+      if ((++_rowsSinceYield % 5000) === 0) await _yieldToLibuv();
+    }
   }
 
   const out = [];
@@ -20691,7 +20726,7 @@ app.get("/api/energy/5min", (req, res) => {
 
 // Analytics-specific energy source:
 // Always PAC-integrated kWh buckets (never register kWh deltas).
-app.get("/api/analytics/energy", (req, res) => {
+app.get("/api/analytics/energy", async (req, res) => {
   if (isRemoteMode()) {
     return proxyToRemote(req, res);
   }
@@ -20748,13 +20783,23 @@ app.get("/api/analytics/energy", (req, res) => {
   }
 
   // Fallback only when energy_5min is empty/unavailable for the requested range.
-  const rebuilt = buildPacEnergyBuckets({
-    inverter: inverter || "all",
-    startTs: s,
-    endTs: e,
-    bucketMin: bm,
-  });
-  return res.json(rebuilt);
+  // buildPacEnergyBuckets is now async (Tier 1.1 chunked streaming) — wrap in
+  // try/catch because Express 4 does not catch rejected promises from an async
+  // handler, so an uncaught reject here would surface as an unhandledRejection
+  // instead of a 500.
+  try {
+    const rebuilt = await buildPacEnergyBuckets({
+      inverter: inverter || "all",
+      startTs: s,
+      endTs: e,
+      bucketMin: bm,
+    });
+    return res.json(rebuilt);
+  } catch (err) {
+    return res
+      .status(500)
+      .json({ ok: false, error: err?.message || "energy recompute failed" });
+  }
 });
 
 app.get("/api/analytics/dayahead", (req, res) => {
