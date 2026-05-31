@@ -110,7 +110,6 @@
     </div>
     <aside id="sideNav" class="side-nav">
       <nav class="tb-nav" id="mainNav">
-        <div class="nav-section-label">Navigation</div>
         <button class="nav-btn active" data-page="inverters" title="Live inverter status, node-level control, and real-time output monitoring.">
           <span class="nav-icon"><span class="mdi mdi-flash"></span></span><span>INVERTERS</span>
         </button>
@@ -152,10 +151,11 @@
           <span class="nav-icon"><span class="mdi mdi-cog-outline"></span></span><span>SETTINGS</span>
         </button>
         <section id="aboutSection" class="side-about-card" aria-label="About">
-          <div class="side-about-title"><span class="mdi mdi-information-outline" aria-hidden="true"></span><span>ABOUT</span></div>
           <div class="side-about-info">
-            <div class="side-about-appname"><b>ADSI Inverter Dashboard</b> <span class="side-about-ver">v2.11.2</span></div>
-            <div class="side-about-desc">Operational monitoring, performance review, forecast support, and gateway-linked remote viewing for the plant.</div>
+            <div class="side-about-head">
+              <span class="side-about-appname">ADSI Inverter Dashboard</span>
+              <span class="side-about-ver">v2.11.2</span>
+            </div>
             <a
               class="side-about-link"
               href="https://www.alterpowerdigos.com/"
@@ -164,22 +164,22 @@
               aria-label="Open Alterpower Digos Solar Plant website"
             >
               <span class="mdi mdi-web" aria-hidden="true"></span>
-              <span>www.alterpowerdigos.com</span>
+              <span>alterpowerdigos.com</span>
             </a>
-            <div class="side-about-sep"></div>
-            <div class="side-about-author-block">
-              <div class="side-about-author-label">Designed &amp; Developed by</div>
-              <div class="side-about-author-name">Engr. Clariden Montaño, REE</div>
-              <div class="side-about-copyright">© 2026 Engr. M.<br>All rights reserved.</div>
+            <div class="side-about-meta">
+              <div class="side-about-row">
+                <span>License</span>
+                <b id="aboutLicenseStatus" class="side-about-inline-status">—</b>
+              </div>
+              <div class="side-about-row">
+                <span>Updates</span>
+                <b id="aboutUpdateStatus">—</b>
+              </div>
+              <div class="side-about-row side-about-row-path">
+                <span>Data Directory</span>
+                <code id="setDataDir">—</code>
+              </div>
             </div>
-            <div class="side-about-sep"></div>
-            <div class="side-about-hw"><b>Installed Platform:</b> Ingeteam central inverter fleet</div>
-            <div class="side-about-hw"><b>Reference:</b> Site maintenance documentation</div>
-            <div class="side-about-sep"></div>
-            <div class="side-about-db">Data Directory: <code id="setDataDir">—</code></div>
-            <div class="side-about-hw"><b>Installed Version:</b> <span id="aboutAppVersion">—</span></div>
-            <div class="side-about-hw"><b>License State:</b> <span id="aboutLicenseStatus" class="side-about-inline-status">—</span></div>
-            <div class="side-about-hw"><b>Update State:</b> <span id="aboutUpdateStatus">—</span></div>
           </div>
           <div class="side-about-actions">
             <button id="btnAboutCheckUpdate" class="btn btn-outline" title="Check if a newer version is available on the release channel.">
@@ -188,13 +188,14 @@
             </button>
             <button id="btnOpenGuide" class="btn btn-outline" title="Open the built-in operator guide for this application.">
               <span class="mdi mdi-book-open-page-variant-outline" aria-hidden="true"></span>
-              <span>Open User Guide</span>
+              <span>User Guide</span>
             </button>
             <button id="btnOpenCredentials" class="btn btn-outline" title="View credentials and authorization keys (requires admin auth key).">
               <span class="mdi mdi-shield-key-outline" aria-hidden="true"></span>
-              <span>Credentials Reference</span>
+              <span>Credentials</span>
             </button>
           </div>
+          <div class="side-about-credit"><b>Engr. Clariden Montaño, REE</b> · © 2026</div>
         </section>
       </nav>
     </aside>
@@ -292,7 +293,6 @@
             <span class="toolbar-info" title="Most recent interval with recorded data.">Latest Interval: <b>—</b></span>
           </div>
         </div>
-        <div id="analyticsPageSections"></div>
         <div class="chart-grid analytics-grid" id="analyticsCharts"></div>
       </section>
 
@@ -1251,7 +1251,7 @@
                      loads the full config block; on the Calibration tab it
                      loads the scale-factor block. -->
                 <button id="btnFcalConfigWriteAll" class="btn btn-danger" type="button"
-                        title="Write every row whose New value column is non-empty. Requires sacupsMM authorization (one prompt per page visit).">
+                        title="Write every row whose New value column is non-empty. Requires adsiMM authorization (one prompt per page visit).">
                   <span class="mdi mdi-content-save-all-outline icon-inline" aria-hidden="true"></span>
                   <span>Write all changed</span>
                 </button>
@@ -1419,7 +1419,7 @@
             <!-- ── Per-node configuration backup (snapshots + restore) ──
                  Always visible (read-only): the operator can capture a manual
                  backup any time. "Restore" requires an active session + the
-                 cached sacupsMM bulk-auth (same flow as inline writes). -->
+                 cached adsiMM bulk-auth (same flow as inline writes). -->
             <div class="fcal-backup-panel" id="fcalBackupPanel" role="region" aria-label="Configuration backup">
               <div class="fcal-backup-header">
                 <div class="fcal-backup-title">
@@ -1648,58 +1648,65 @@
         <div class="settings-shell">
           <aside class="settings-sidebar">
             <div class="settings-sidebar-card">
-              <div class="settings-kicker">Settings Center</div>
-              <div class="settings-current-title">Select a Section</div>
-              <div class="settings-current-copy">
-                Review one settings area at a time, confirm the values in the main panel, then save when the changes are ready.
+              <div class="settings-sidebar-head">
+                <span class="mdi mdi-cog-outline" aria-hidden="true"></span>
+                <span>Settings</span>
               </div>
-              <div class="settings-current-chip" id="settingsSidebarCurrentChip">Plant Configuration</div>
               <div class="settings-menu" id="settingsSectionMenu" role="tablist" aria-label="Settings sections">
-                <button class="settings-menu-btn active" type="button" data-settings-section="plantConfigSection">
+                <!-- Reordered + grouped by type/purpose (2026-05-30):
+                     Plant & Data → Inverter Hardware → Connectivity & Backup → System.
+                     The .settings-menu-group-label divs are decorative (aria-hidden) — the
+                     buttons keep their own accessible names, and the nav JS matches on
+                     .settings-menu-btn / data-settings-section, so the extra label nodes and
+                     DOM order never affect behavior. -->
+                <div class="settings-menu-group-label" aria-hidden="true">Plant &amp; Data</div>
+                <button class="settings-menu-btn active" type="button" data-settings-section="plantConfigSection" title="Site identity, operator naming, and core fleet sizing.">
+                  <span class="mdi mdi-factory settings-menu-ico" aria-hidden="true"></span>
                   <span class="settings-menu-label">Plant</span>
-                  <span class="settings-menu-copy">Site identity, operator naming, and core fleet sizing.</span>
                 </button>
-                <button class="settings-menu-btn" type="button" data-settings-section="opsCompactSection">
+                <button class="settings-menu-btn" type="button" data-settings-section="opsCompactSection" title="Operational endpoints, export storage, and polling timing.">
+                  <span class="mdi mdi-tune-variant settings-menu-ico" aria-hidden="true"></span>
                   <span class="settings-menu-label">Data &amp; Polling</span>
-                  <span class="settings-menu-copy">Operational endpoints, export storage, and polling timing.</span>
                 </button>
-                <button class="settings-menu-btn" type="button" data-settings-section="connectivitySection">
-                  <span class="settings-menu-label">Connectivity &amp; Sync</span>
-                  <span class="settings-menu-copy">Gateway mode, remote access, gateway link status, and diagnostics.</span>
-                </button>
-                <button class="settings-menu-btn" type="button" data-settings-section="licenseSection">
-                  <span class="settings-menu-label">License</span>
-                  <span class="settings-menu-copy">Entitlement status, remaining term, and license activity.</span>
-                </button>
-                <button class="settings-menu-btn" type="button" data-settings-section="appUpdateSection">
-                  <span class="settings-menu-label">App Updates</span>
-                  <span class="settings-menu-copy">Installed build status, release checks, and update actions.</span>
-                </button>
-                <button class="settings-menu-btn" type="button" data-settings-section="cloudBackupSection">
-                  <span class="settings-menu-label">Cloud Backup</span>
-                  <span class="settings-menu-copy">Provider access, backup policy, restore actions, and history.</span>
-                </button>
-                <button class="settings-menu-btn" type="button" data-settings-section="localBackupSection">
-                  <span class="settings-menu-label">Local Backup</span>
-                  <span class="settings-menu-copy">Portable .adsibak export and restore for OS migration.</span>
-                </button>
-                <button class="settings-menu-btn" type="button" data-settings-section="inverterClockSection">
+                <div class="settings-menu-group-label" aria-hidden="true">Inverter Hardware</div>
+                <button class="settings-menu-btn" type="button" data-settings-section="inverterClockSection" title="Scheduled time sync, drift triggers, and per-unit counter health.">
+                  <span class="mdi mdi-clock-outline settings-menu-ico" aria-hidden="true"></span>
                   <span class="settings-menu-label">Inverter Clocks</span>
-                  <span class="settings-menu-copy">Scheduled time sync, drift triggers, and per-unit counter health.</span>
                 </button>
-                <button class="settings-menu-btn" type="button" data-settings-section="stopReasonsSection">
+                <button class="settings-menu-btn" type="button" data-settings-section="stopReasonsSection" title="DebugDesc snapshots and lifetime motive counters via vendor SCOPE peek.">
+                  <span class="mdi mdi-stop-circle-outline settings-menu-ico" aria-hidden="true"></span>
                   <span class="settings-menu-label">Stop Reasons</span>
-                  <span class="settings-menu-copy">DebugDesc snapshots and lifetime motive counters via vendor SCOPE peek.</span>
                 </button>
-                <button class="settings-menu-btn" type="button" data-settings-section="serialNumberSection">
-                  <span class="settings-menu-label">Serial Number Setting</span>
-                  <span class="settings-menu-copy">Read, edit, and send the inverter serial via FC11 read + FC16 unlock+write+verify.</span>
+                <button class="settings-menu-btn" type="button" data-settings-section="serialNumberSection" title="Read, edit, and send the inverter serial via FC11 read + FC16 unlock+write+verify.">
+                  <span class="mdi mdi-barcode settings-menu-ico" aria-hidden="true"></span>
+                  <span class="settings-menu-label">Serial Number</span>
+                </button>
+                <div class="settings-menu-group-label" aria-hidden="true">Connectivity &amp; Backup</div>
+                <button class="settings-menu-btn" type="button" data-settings-section="connectivitySection" title="Gateway mode, remote access, gateway link status, and diagnostics.">
+                  <span class="mdi mdi-transit-connection-variant settings-menu-ico" aria-hidden="true"></span>
+                  <span class="settings-menu-label">Connectivity &amp; Sync</span>
+                </button>
+                <button class="settings-menu-btn" type="button" data-settings-section="cloudBackupSection" title="Provider access, backup policy, restore actions, and history.">
+                  <span class="mdi mdi-cloud-upload-outline settings-menu-ico" aria-hidden="true"></span>
+                  <span class="settings-menu-label">Cloud Backup</span>
+                </button>
+                <button class="settings-menu-btn" type="button" data-settings-section="localBackupSection" title="Portable .adsibak export and restore for OS migration.">
+                  <span class="mdi mdi-folder-zip-outline settings-menu-ico" aria-hidden="true"></span>
+                  <span class="settings-menu-label">Local Backup</span>
+                </button>
+                <div class="settings-menu-group-label" aria-hidden="true">System</div>
+                <button class="settings-menu-btn" type="button" data-settings-section="licenseSection" title="Entitlement status, remaining term, and license activity.">
+                  <span class="mdi mdi-certificate-outline settings-menu-ico" aria-hidden="true"></span>
+                  <span class="settings-menu-label">License</span>
+                </button>
+                <button class="settings-menu-btn" type="button" data-settings-section="appUpdateSection" title="Installed build status, release checks, and update actions.">
+                  <span class="mdi mdi-cloud-download-outline settings-menu-ico" aria-hidden="true"></span>
+                  <span class="settings-menu-label">App Updates</span>
                 </button>
               </div>
             </div>
 
             <div class="settings-sidebar-card settings-utility-card" id="settingsGlobalActions">
-              <div class="settings-kicker">Common Actions</div>
               <button id="btnSaveSettings" class="btn btn-accent" title="Save all pending changes across every settings section to the server.">
                 <span class="mdi mdi-content-save-outline" aria-hidden="true"></span>
                 <span>Save Settings</span>
@@ -1744,11 +1751,7 @@
 
           <div class="settings-main">
             <div class="settings-main-header">
-              <div class="settings-main-eyebrow">Current Section</div>
               <div class="settings-main-title" id="settingsMainSectionTitle">Plant Configuration</div>
-              <div class="settings-main-copy" id="settingsMainSectionCopy">
-                Review the selected configuration area and apply changes when complete.
-              </div>
             </div>
 
             <div class="settings-sections">
@@ -2149,6 +2152,10 @@
                 <span class="mdi mdi-source-branch icon-inline" aria-hidden="true"></span>
                 <span class="card-tab-label">Provider</span>
               </button>
+              <button id="fcTabTuning" class="card-tab" type="button" role="tab" aria-selected="false" aria-controls="fcPanelTuning" data-card-tab="tuning" title="Manual ML tuning overrides — est-actual training weight and intraday blend cap. Blank fields use engine defaults.">
+                <span class="mdi mdi-tune-vertical icon-inline" aria-hidden="true"></span>
+                <span class="card-tab-label">Tuning</span>
+              </button>
               <button id="fcTabAccess" class="card-tab" type="button" role="tab" aria-selected="false" aria-controls="fcPanelAccess" data-card-tab="access" title="Solcast access mode (Toolkit/API), base URL, and timezone alignment.">
                 <span class="mdi mdi-key-outline icon-inline" aria-hidden="true"></span>
                 <span class="card-tab-label">Solcast Access</span>
@@ -2371,6 +2378,34 @@
               <span class="smsg" id="solcastPreviewMsg"></span>
             </div>
             </div><!-- /#fcPanelToolkit -->
+            <div id="fcPanelTuning" class="card-tab-panel" data-card-tab-panel="tuning" role="tabpanel" aria-labelledby="fcTabTuning" hidden>
+            <div class="settings-subsection forecast-tuning-panel">
+              <div class="srow">
+                <label
+                  >Est-actual Weight<input
+                    type="number"
+                    id="setForecastEstActualWeight"
+                    class="inp"
+                    step="0.01"
+                    min="0.5"
+                    max="1"
+                    placeholder="auto"
+                    title="Manual override of the satellite est-actual training weight (0.50–1.00). Leave blank to let the engine auto-tune from metered accuracy. Validate with a backtest."
+                /></label>
+                <label
+                  >Intraday Blend Max<input
+                    type="number"
+                    id="setForecastIntradayBlendMax"
+                    class="inp"
+                    step="0.01"
+                    min="0"
+                    max="1"
+                    placeholder="0.72"
+                    title="Caps how strongly intraday observed-vs-day-ahead corrections are applied (0.00–1.00). Blank = engine default 0.72. Validate with a backtest."
+                /></label>
+              </div>
+            </div>
+            </div><!-- /#fcPanelTuning -->
             <div class="sgroup-actions">
               <button
                 id="btnSolcastSaveTest"
@@ -2839,7 +2874,7 @@
             <!-- Export -->
             <div class="cb-subsection">
               <div class="sgroup-actions">
-                <button id="btnLocalBackupExport" class="btn btn-accent" type="button" title="Creates a complete snapshot of all ProgramData and packs it into a single portable .adsibak file.">
+                <button id="btnLocalBackupExport" class="btn btn-accent" type="button" title="Creates a complete snapshot of all ProgramData and packs it into a single portable .adsibak file." aria-label="Export portable backup to .adsibak file">
                   <span class="mdi mdi-export icon-inline" aria-hidden="true"></span><span>Export .adsibak</span>
                 </button>
                 <span class="smsg" id="localBackupExportMsg"></span>
@@ -2863,7 +2898,7 @@
             <!-- Import & Restore -->
             <div class="cb-subsection">
               <div class="sgroup-actions">
-                <button id="btnLocalBackupImport" class="btn btn-outline" type="button" title="Browse for a .adsibak file to import and preview its contents. Restore replaces all dashboard data and restarts the app.">
+                <button id="btnLocalBackupImport" class="btn btn-outline" type="button" title="Browse for a .adsibak file to import and preview its contents. Restore replaces all dashboard data and restarts the app." aria-label="Import portable backup from .adsibak file">
                   <span class="mdi mdi-import icon-inline" aria-hidden="true"></span><span>Import .adsibak</span>
                 </button>
                 <span class="smsg" id="localBackupImportMsg"></span>

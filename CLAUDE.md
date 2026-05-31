@@ -37,8 +37,8 @@ Detailed history and working notes live in `MEMORY.md`.
 | Login username | `admin` |
 | Login password | `1234` |
 | Admin auth key | `ADSI-2026` (resets to `admin` / `1234`) |
-| Bulk inverter control | `sacupsMM` (MM = current minute ±1) |
-| Topology / IP Config auth | `adsiM` or `adsiMM` |
+| Bulk inverter control | `adsiMM` (MM = current minute ±1; unified with topology key as of 2026-05-31) |
+| Topology / IP Config auth | `adsiM` or `adsiMM` (same rolling key as bulk control) |
 | IP Config session | 1 hour |
 | Topology session | 10 minutes |
 
@@ -134,14 +134,44 @@ and `plans/2026-04-17-power-loss-resilience.md` for full rationale. Short versio
   auto-restores from the newer of the two rotating backups under
   `backups/adsi_backup_{0,1}.db`, quarantines the corrupt file, emits an
   `audit_log` row, and sets `startupIntegrityResult.restored = true`.
-- `GET /api/health/db-integrity` exposes the snapshot. Renderer shows a red
-  banner via `checkBootIntegrityBanner()` in `public/js/app.js`.
+- `GET /api/health/db-integrity` exposes the snapshot (now including an
+  explicit `mode` field: `ok` | `restored` | `failed` | `skipped`). Renderer
+  shows a red banner via `checkBootIntegrityBanner()` in `public/js/app.js`;
+  in `remote` mode the banner is reworded to "Local viewer cache" framing so
+  the operator does not misread a viewer-cache event as a plant-data incident.
+- **Shutdown-marker fallback (2026-05-18, v2.8.x):** `requestAppShutdown()`
+  writes the graceful-shutdown marker, but it never ran on hung / force-killed
+  / relaunch exits, so the "Unexpected prior shutdown" banner false-fired on
+  every clean exit. Fixed with a synchronous `process.on('exit')` +
+  `app.on('quit')` `PROCESS_EXIT` fallback marker plus a 20 s hard-ceiling
+  self-exit watchdog in `electron/main.js`. Real kills / BSOD still correctly
+  classify as "unexpected" (see `electron/shutdownReason.js`). Committed in
+  `49406b1`.
 - Tests: `server/tests/crashRecovery.test.js` covers integrity gate + auto-
-  restore under the Node-ABI smoke harness.
+  restore under the Node-ABI smoke harness; `server/tests/shutdownReason.test.js`
+  covers the marker classification.
 
 Do NOT remove the `app.asar.sha512` sidecar, the stash path, or the hoisted
 `uncaughtException` handler — they are the chain that converts a torn-write
 into a 60-second recovery.
+
+---
+
+## Supported Platforms (Windows-only by design)
+
+The product is **Windows-only** — Electron + NSIS installer + `.exe` Python
+services, deployed on the gateway PC. There is no cross-OS build (no Linux/Mac
+path resolver, NSIS installer, or `wevtutil.exe` event-log abstraction); this
+is intentional, not a gap (audit `audits/2026-05-28/subsystem-deep-audit.md`
+§3.3 reframes the prior "cross-OS Critical" as an audit false positive).
+
+| Scenario | Status |
+|---|---|
+| Supported OS | **Windows 10 21H2+** and **Windows 11 21H2+** (x64) |
+| Same-OS reinstall, same machine | Fully supported — bootstrap-restore wizard + cloud restore |
+| Different machine, same Windows version | DB/settings/config restore works; **license re-bind + cloud re-auth are manual** (hardware-bound license, credentials excluded from restore by security boundary) |
+| Win10 → Win11 migration | Untested; integrity gate degrades to `mode=skipped` if the event log is inaccessible (safe but invisible) |
+| Cross-OS (Win → Linux/Mac) | **Not supported — by design** |
 
 ---
 
@@ -189,7 +219,7 @@ full spec and `audits/2026-04-24/counter-integrity/` for scan evidence.
   - `POST /api/sync-clock/:inv/:unit`       (bulk auth — operator)
   - `POST /api/sync-clock/broadcast`        (bulk auth — operator)
   - `POST /api/sync-clock-internal`         (loopback only — Python triggers)
-  - `POST /api/sync-clock/inverter/:inverter` (no operator auth — per-inverter daisy-chain broadcast; client auto-derives `sacupsMM` and Node injects upstream)
+  - `POST /api/sync-clock/inverter/:inverter` (no operator auth — per-inverter daisy-chain broadcast; client auto-derives `adsiMM` and Node injects upstream)
   - `GET  /admin/inverter-clock`            (topology-gated admin page)
 - Export enhancement: [server/exporter.js](server/exporter.js)
   `exportInverterData` accepts `includeEtotal` / `includeParce` / `showQuarantine`

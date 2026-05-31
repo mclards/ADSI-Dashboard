@@ -1,0 +1,48 @@
+                <!-- Group: Plant & Data -->
+                <div class="settings-menu-group-label" aria-hidden="true">Plant &amp; Data</div>
+                <button class="settings-menu-btn active" type="button" data-settings-section="plantConfigSection" title="Site identity, operator naming, and core fleet sizing.">
+                  <span class="mdi mdi-factory settings-menu-ico" aria-hidden="true"></span>
+                  <span class="settings-menu-label">Plant</span>
+                </button>
+                <button class="settings-menu-btn" type="button" data-settings-section="opsCompactSection" title="Operational endpoints, export storage, and polling timing.">
+                  <span class="mdi mdi-tune-variant settings-menu-ico" aria-hidden="true"></span>
+                  <span class="settings-menu-label">Data &amp; Polling</span>
+                </button>
+                <!-- Group: Inverter Hardware -->
+                <div class="settings-menu-group-label" aria-hidden="true">Inverter Hardware</div>
+                <button class="settings-menu-btn" type="button" data-settings-section="inverterClockSection" title="Scheduled time sync, drift triggers, and per-unit counter health.">
+                  <span class="mdi mdi-clock-outline settings-menu-ico" aria-hidden="true"></span>
+                  <span class="settings-menu-label">Inverter Clocks</span>
+                </button>
+                <button class="settings-menu-btn" type="button" data-settings-section="stopReasonsSection" title="DebugDesc snapshots and lifetime motive counters via vendor SCOPE peek.">
+                  <span class="mdi mdi-stop-circle-outline settings-menu-ico" aria-hidden="true"></span>
+                  <span class="settings-menu-label">Stop Reasons</span>
+                </button>
+                <button class="settings-menu-btn" type="button" data-settings-section="serialNumberSection" title="Read, edit, and send the inverter serial via FC11 read + FC16 unlock+write+verify.">
+                  <span class="mdi mdi-barcode settings-menu-ico" aria-hidden="true"></span>
+                  <span class="settings-menu-label">Serial Number</span>
+                </button>
+                <!-- Group: Connectivity & Backup -->
+                <div class="settings-menu-group-label" aria-hidden="true">Connectivity &amp; Backup</div>
+                <button class="settings-menu-btn" type="button" data-settings-section="connectivitySection" title="Gateway mode, remote access, gateway link status, and diagnostics.">
+                  <span class="mdi mdi-transit-connection-variant settings-menu-ico" aria-hidden="true"></span>
+                  <span class="settings-menu-label">Connectivity &amp; Sync</span>
+                </button>
+                <button class="settings-menu-btn" type="button" data-settings-section="cloudBackupSection" title="Provider access, backup policy, restore actions, and history.">
+                  <span class="mdi mdi-cloud-upload-outline settings-menu-ico" aria-hidden="true"></span>
+                  <span class="settings-menu-label">Cloud Backup</span>
+                </button>
+                <button class="settings-menu-btn" type="button" data-settings-section="localBackupSection" title="Portable .adsibak export and restore for OS migration.">
+                  <span class="mdi mdi-folder-zip-outline settings-menu-ico" aria-hidden="true"></span>
+                  <span class="settings-menu-label">Local Backup</span>
+                </button>
+                <!-- Group: System -->
+                <div class="settings-menu-group-label" aria-hidden="true">System</div>
+                <button class="settings-menu-btn" type="button" data-settings-section="licenseSection" title="Entitlement status, remaining term, and license activity.">
+                  <span class="mdi mdi-certificate-outline settings-menu-ico" aria-hidden="true"></span>
+                  <span class="settings-menu-label">License</span>
+                </button>
+                <button class="settings-menu-btn" type="button" data-settings-section="appUpdateSection" title="Installed build status, release checks, and update actions.">
+                  <span class="mdi mdi-cloud-download-outline settings-menu-ico" aria-hidden="true"></span>
+                  <span class="settings-menu-label">App Updates</span>
+                </button>

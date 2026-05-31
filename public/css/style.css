@@ -25,6 +25,14 @@
   --text: #f4eaee;
   --text2: #d4b8c4;
   --text3: #9a7a88;
+  /* Level-1 aliases: a number of components (camera modals, cap-schedule,
+     DB export, alarm docs, serial notifications) reference --text1/--surface1
+     — the primary text / base surface — which were never defined, so those
+     rules silently fell back to inherited color or a transparent background.
+     Aliasing here (resolved per-theme at use time via var()) fixes them all
+     in every theme without touching each call site. */
+  --text1: var(--text);
+  --surface1: var(--surface);
   --accent: #e06f92;
   --accent2: #c4527a;
   --green: #12c07a;
@@ -1481,18 +1489,6 @@ body.sidebar-open .side-nav {
   border-radius: 12px 12px 0 0;
 }
 
-.side-about-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 9.5px;
-  font-weight: 800;
-  letter-spacing: 1px;
-  color: var(--accent);
-  text-transform: uppercase;
-  opacity: 0.9;
-}
-
 .side-about-info {
   margin-top: 12px;
   display: grid;
@@ -1551,16 +1547,6 @@ body.sidebar-open .side-nav {
   filter: brightness(0.94);
 }
 
-.nav-section-label {
-  font-size: 9px;
-  font-weight: 800;
-  letter-spacing: 1.1px;
-  text-transform: uppercase;
-  color: var(--text3);
-  padding: 4px 13px 6px;
-  opacity: 0.75;
-}
-
 .nav-btn {
   height: 40px;
   width: 100%;
@@ -1569,7 +1555,7 @@ body.sidebar-open .side-nav {
   justify-content: flex-start;
   gap: 10px;
   padding: 0 13px;
-  border: 1px solid rgba(125, 56, 74, 0.55);
+  border: 1px solid rgba(125, 56, 74, 0.3);
   border-radius: 14px;
   background: transparent;
   color: var(--text2);
@@ -1773,11 +1759,6 @@ body.sidebar-open .side-nav {
 /* Version badge: accent-tinted background works; bump opacity for legibility */
 :root[data-theme="light"] .side-about-ver {
   box-shadow: 0 1px 4px rgba(43, 103, 173, 0.18);
-}
-
-/* Separator: use border2 which is a warm brown in light — fine, just ensure visibility */
-:root[data-theme="light"] .side-about-sep {
-  opacity: 0.55;
 }
 
 /* Action buttons: warm lift shadow instead of dark-theme rgba */
@@ -3087,9 +3068,9 @@ label[data-required]::after {
     font-size: calc(8.5px * var(--inv-card-scale));
   }
   :is(.inv-grid.layout-6, .inv-grid.layout-7) .bulk-card-body {
-    gap: 0;
-    padding: calc(3px * var(--inv-card-scale)) calc(4px * var(--inv-card-scale));
-    justify-content: space-between;
+    gap: calc(6px * var(--inv-card-scale));
+    padding: calc(8px * var(--inv-card-scale)) calc(8px * var(--inv-card-scale));
+    justify-content: center;
   }
   :is(.inv-grid.layout-6, .inv-grid.layout-7) .bulk-range-label {
     font-size: calc(7px * var(--inv-card-scale));
@@ -3209,27 +3190,13 @@ label[data-required]::after {
   cursor: grabbing;
 }
 
-/* drag handle dots — appear on card hover */
-.inv-card[draggable="true"] .card-hdr::before {
-  content: "⠿";
-  position: absolute;
-  right: calc(6px * var(--inv-card-scale));
-  top: 50%;
-  transform: translateY(-50%);
-  font-size: calc(10px * var(--inv-card-scale));
-  color: var(--text3);
-  opacity: 0;
-  transition: opacity 0.2s;
-  pointer-events: none;
-  line-height: 1;
-  user-select: none;
-}
-.inv-card[draggable="true"]:hover .card-hdr::before {
-  opacity: 0.5;
-}
-.inv-card.dragging .card-hdr::before {
-  opacity: 0;
-}
+/* The drag-handle "⠿" glyph was removed: it was absolutely positioned in the
+   header's right-edge lane (right:6px, vertically centered) — the same lane as
+   the status badge and, in the cap-stopped state, the timestamp note — so on
+   hover it overlapped them. Draggability is already signalled by the grab
+   cursor above, the card lift while dragging, and the dashed placeholder
+   pulse, so no decorative handle is needed. Do not re-add a right-anchored
+   ::before handle here. */
 
 .inv-card.dragging,
 .camera-card.dragging {
@@ -4842,6 +4809,11 @@ select.cam-field-input { appearance: auto; }
 /* ── Bulk command card ─────────────────────────────────────────────── */
 .bulk-control-bar {
   --card-fixed-h: calc(186px * var(--inv-card-scale));
+  /* Per-density button sizing — overridden per layout below so 5/6/7 columns
+     each get their own tuned format. */
+  --bulk-quick-h: 28px;
+  --bulk-cmd-h: 34px;
+  --bulk-radius: 8px;
   min-width: 0;
   height: var(--card-fixed-h);
   min-height: var(--card-fixed-h);
@@ -4851,98 +4823,100 @@ select.cam-field-input { appearance: auto; }
   overflow: hidden;
   border-radius: calc(10px * var(--inv-card-scale));
   border: 1px solid var(--border);
-  background: linear-gradient(160deg, var(--surface2) 0%, var(--surface) 100%);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--accent) 7%, transparent) 0%, transparent 36%),
+    linear-gradient(160deg, var(--surface2) 0%, var(--surface) 100%);
   transition:
     border-color 0.2s,
     box-shadow 0.2s;
 }
 
 .bulk-control-bar:hover {
-  border-color: var(--border2);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border2));
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.25);
 }
 
 .bulk-card-hdr {
   display: flex;
   align-items: center;
-  gap: calc(6px * var(--inv-card-scale));
-  padding: calc(4px * var(--inv-card-scale)) calc(8px * var(--inv-card-scale));
-  border-bottom: 1px solid var(--border);
-  background: linear-gradient(
-    180deg,
-    rgba(255, 255, 255, 0.04) 0%,
-    transparent 100%
-  );
+  gap: calc(7px * var(--inv-card-scale));
+  padding: calc(7px * var(--inv-card-scale)) calc(11px * var(--inv-card-scale));
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
 }
 
 .bulk-card-icon {
-  font-size: calc(14px * var(--inv-card-scale));
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: calc(20px * var(--inv-card-scale));
+  height: calc(20px * var(--inv-card-scale));
+  border-radius: calc(6px * var(--inv-card-scale));
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+  font-size: calc(13px * var(--inv-card-scale));
   line-height: 1;
-  filter: grayscale(0.6) brightness(0.85);
 }
 
 .bulk-card-title {
-  font-size: calc(11px * var(--inv-card-scale));
-  font-weight: 700;
+  font-size: calc(12px * var(--inv-card-scale));
+  font-weight: 800;
   color: var(--text);
-  letter-spacing: 0.4px;
-  text-transform: uppercase;
+  letter-spacing: 0.2px;
 }
 
 .bulk-card-body {
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: calc(3px * var(--inv-card-scale));
-  padding: calc(5px * var(--inv-card-scale)) calc(8px * var(--inv-card-scale));
+  /* Center the content block so the card fills the (row-matched) height
+     cleanly instead of bunching the buttons against the bottom edge. */
+  justify-content: center;
+  gap: calc(8px * var(--inv-card-scale));
+  padding: calc(10px * var(--inv-card-scale)) calc(11px * var(--inv-card-scale));
   min-height: 0;
 }
 
 .bulk-range-label {
-  font-size: calc(9px * var(--inv-card-scale));
+  font-size: calc(9.5px * var(--inv-card-scale));
   font-weight: 700;
-  color: var(--text3);
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
+  color: var(--text2);
+  letter-spacing: 0.2px;
 }
 
 .bulk-field {
   display: flex;
   flex-direction: column;
-  gap: calc(4px * var(--inv-card-scale));
-}
-
-.bulk-helper {
-  font-size: calc(8px * var(--inv-card-scale));
-  color: var(--text3);
-  line-height: 1.3;
-}
-
-.bulk-input-row {
-  display: flex;
-  gap: 6px;
+  gap: calc(5px * var(--inv-card-scale));
 }
 
 .bulk-range-input {
   width: 100%;
   font-family: var(--font-mono);
-  font-size: calc(11px * var(--inv-card-scale));
-  padding: calc(5px * var(--inv-card-scale)) calc(7px * var(--inv-card-scale));
+  font-size: calc(12px * var(--inv-card-scale));
+  letter-spacing: 0.3px;
+  padding: calc(7px * var(--inv-card-scale)) calc(9px * var(--inv-card-scale));
 }
 
 .bulk-quick-row {
-  display: flex;
-  gap: 6px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: calc(8px * var(--inv-card-scale));
 }
 
 .bulk-quick-btn {
-  flex: 1;
-  height: calc(22px * var(--inv-card-scale));
+  width: 100%;
+  /* Height/radius driven by the per-density --bulk-* vars (set per layout).
+     !important beats .btn's 30px min-height floor + the legacy dense height
+     overrides, so the per-density sizing actually takes effect. */
+  height: calc(var(--bulk-quick-h) * var(--inv-card-scale)) !important;
+  min-height: calc(var(--bulk-quick-h) * var(--inv-card-scale)) !important;
   min-width: 0 !important;
   padding: 0 !important;
   justify-content: center;
-  border-radius: calc(14px * var(--inv-card-scale));
-  font-size: calc(9.5px * var(--inv-card-scale)) !important;
+  border-radius: calc(var(--bulk-radius) * var(--inv-card-scale)) !important;
+  font-size: calc(10px * var(--inv-card-scale)) !important;
   font-weight: 600 !important;
   letter-spacing: 0.3px;
   border-color: var(--btn-outline-border) !important;
@@ -4969,44 +4943,24 @@ select.cam-field-input { appearance: auto; }
   filter: brightness(0.92);
 }
 
-.bulk-sep {
-  height: 1px;
-  background: var(--border);
-  margin: calc(1px * var(--inv-card-scale)) 0;
-}
-
-.bulk-cmd-label {
-  font-size: calc(8.5px * var(--inv-card-scale));
-  color: var(--text3);
-  text-align: center;
-  letter-spacing: 0.3px;
-}
-
 .bulk-cmd-row {
-  display: flex;
-  gap: 6px;
-}
-
-.bulk-info {
-  font-size: calc(7px * var(--inv-card-scale));
-  color: var(--text3);
-  text-align: center;
-  letter-spacing: 0.2px;
-  line-height: 1.2;
-  margin-top: auto;
-  opacity: 0.7;
-  padding: 0 calc(2px * var(--inv-card-scale));
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: calc(8px * var(--inv-card-scale));
 }
 
 .bulk-cmd-btn {
-  flex: 1;
-  height: calc(22px * var(--inv-card-scale));
+  width: 100%;
+  /* Primary actions: taller than the quick row; height/radius from the
+     per-density --bulk-* vars. !important beats .btn's floor + dense overrides. */
+  height: calc(var(--bulk-cmd-h) * var(--inv-card-scale)) !important;
+  min-height: calc(var(--bulk-cmd-h) * var(--inv-card-scale)) !important;
   min-width: 0 !important;
   padding: 0 !important;
-  border-radius: calc(14px * var(--inv-card-scale));
-  font-size: calc(11px * var(--inv-card-scale)) !important;
-  font-weight: 700 !important;
-  letter-spacing: 0.6px;
+  border-radius: calc(var(--bulk-radius) * var(--inv-card-scale)) !important;
+  font-size: calc(12px * var(--inv-card-scale)) !important;
+  font-weight: 800 !important;
+  letter-spacing: 0.8px;
   justify-content: center;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2) !important;
   transition:
@@ -5041,6 +4995,13 @@ select.cam-field-input { appearance: auto; }
   transform: scale(0.96) !important;
   filter: brightness(0.92);
 }
+
+/* Per-density button sizing — each column count gets its own tuned format.
+   Wider cards (5-col) carry larger, more comfortable actions; narrower cards
+   (7-col) step down so the buttons stay proportional to the card width. */
+.inv-grid.layout-5 .bulk-control-bar { --bulk-quick-h: 32px; --bulk-cmd-h: 38px; }
+.inv-grid.layout-6 .bulk-control-bar { --bulk-quick-h: 29px; --bulk-cmd-h: 35px; }
+.inv-grid.layout-7 .bulk-control-bar { --bulk-quick-h: 26px; --bulk-cmd-h: 32px; --bulk-radius: 7px; }
 
 .plant-cap-panel {
   grid-column: 1 / -1;
@@ -6060,7 +6021,7 @@ select.cam-field-input { appearance: auto; }
   text-transform: uppercase;
   color: var(--text3);
 }
-/* v2.11.x — auth-note row replaces the old hardcoded sacupsMM input. The
+/* v2.11.x — auth-note row replaces the old hardcoded adsiMM input. The
  * field is rendered as plain text so operators see WHY there's no input
  * (modal pops up on action click) instead of staring at a missing field. */
 .apc-field-auth-note .apc-auth-note {
@@ -6380,7 +6341,6 @@ select.cam-field-input { appearance: auto; }
 .analytics-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   align-content: start;
-  padding-top: 4px;
   overflow: visible;
 }
 
@@ -6393,7 +6353,7 @@ select.cam-field-input { appearance: auto; }
   grid-column: 3 / span 1;
   min-height: 350px;
   max-height: 364px;
-  padding: 6px;
+  padding: 8px;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -8242,15 +8202,75 @@ select.cam-field-input { appearance: auto; }
 /* Old guide accordion/banner CSS removed — guide now uses iframe */
 
 /* About sidebar expanded styles */
-.side-about-appname {
+.side-about-head {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 8px;
-  flex-wrap: wrap;
-  font-size: 12.5px;
+}
+.side-about-appname {
+  font-size: 12px;
   font-weight: 800;
   color: var(--text);
-  line-height: 1.2;
+  line-height: 1.15;
+  letter-spacing: 0.1px;
+}
+.side-about-meta {
+  margin-top: 11px;
+  padding-top: 10px;
+  border-top: 1px solid color-mix(in srgb, var(--border2) 65%, transparent);
+  display: grid;
+  gap: 6px;
+}
+.side-about-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.side-about-row > span {
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--text3);
+  white-space: nowrap;
+}
+.side-about-row > b {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  color: var(--text);
+  text-align: right;
+}
+.side-about-row-path {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+.side-about-row-path code {
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  color: var(--cyan);
+  background: color-mix(in srgb, var(--cyan) 7%, transparent);
+  border: 1px solid color-mix(in srgb, var(--cyan) 14%, transparent);
+  border-radius: 5px;
+  padding: 4px 7px;
+  line-height: 1.35;
+  word-break: break-all;
+}
+.side-about-credit {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid color-mix(in srgb, var(--border2) 65%, transparent);
+  font-size: 9px;
+  color: var(--text3);
+  text-align: center;
+  line-height: 1.4;
+}
+.side-about-credit b {
+  color: var(--text2);
+  font-weight: 700;
 }
 .side-about-ver {
   display: inline-flex;
@@ -8266,11 +8286,6 @@ select.cam-field-input { appearance: auto; }
   line-height: 1.4;
   flex-shrink: 0;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
-}
-.side-about-desc {
-  font-size: 10px;
-  color: var(--text2);
-  line-height: 1.5;
 }
 .side-about-link {
   display: inline-flex;
@@ -8290,59 +8305,6 @@ select.cam-field-input { appearance: auto; }
   color: var(--accent);
   opacity: 1;
 }
-.side-about-sep {
-  height: 1px;
-  background: linear-gradient(90deg, var(--border2) 0%, transparent 100%);
-  margin: 8px 0 3px;
-  opacity: 0.7;
-}
-.side-about-author-block {
-  display: grid;
-  gap: 4px;
-  padding: 3px 0;
-}
-.side-about-author-label {
-  font-size: 9px;
-  color: var(--text3);
-  text-transform: uppercase;
-  letter-spacing: 0.8px;
-}
-.side-about-author-name {
-  font-size: 11.5px;
-  font-weight: 700;
-  color: var(--accent);
-  line-height: 1.3;
-}
-.side-about-author-alias {
-  font-size: 9.5px;
-  color: var(--cyan);
-  font-style: italic;
-}
-.side-about-copyright {
-  font-size: 9px;
-  color: var(--text3);
-  line-height: 1.5;
-  margin-top: 2px;
-}
-.side-about-hw {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 0 8px;
-  font-size: 9.5px;
-  color: var(--text2);
-  line-height: 1.45;
-  align-items: baseline;
-}
-.side-about-hw b {
-  color: var(--text3);
-  font-weight: 600;
-  font-size: 9px;
-  white-space: nowrap;
-}
-.side-about-hw span {
-  color: var(--text);
-  font-weight: 500;
-}
 .side-about-inline-status {
   font-family: var(--font-mono);
   font-size: 9.5px;
@@ -8357,30 +8319,6 @@ select.cam-field-input { appearance: auto; }
 }
 .side-about-inline-status.error {
   color: var(--red);
-}
-.side-about-db {
-  display: grid;
-  gap: 3px;
-  font-size: 9px;
-  color: var(--text3);
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-.side-about-db code {
-  font-family: var(--font-mono);
-  font-size: 8.5px;
-  color: var(--cyan);
-  overflow-wrap: anywhere;
-  word-break: break-all;
-  line-height: 1.4;
-  display: block;
-  background: color-mix(in srgb, var(--cyan) 7%, transparent);
-  border-radius: 4px;
-  padding: 3px 5px;
-  text-transform: none;
-  letter-spacing: 0;
-  font-weight: 400;
 }
 
 /* Update progress toast */
@@ -8661,12 +8599,16 @@ select.cam-field-input { appearance: auto; }
 
 #page-analytics .chart-grid {
   gap: 12px;
+  /* Align the card block with the page-toolbar edges (no extra L/R inset),
+     matching sibling pages; even 8px top / 12px bottom vertical rhythm. */
+  padding: 8px 0 12px;
 }
 
 #page-analytics .chart-card {
   border-radius: 12px;
   border-color: rgba(96, 46, 61, 0.86);
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.24);
+  /* No always-on shadow — inherit the subtler base resting shadow and let
+     :hover supply the lift, consistent with cards on every other page. */
 }
 
 #page-analytics .chart-title {
@@ -9006,12 +8948,12 @@ select.cam-field-input { appearance: auto; }
   gap: 8px;
   padding: 6px 12px 6px 10px;
   border-radius: 999px;
-  border: 1px solid var(--border2);
+  border: 1px solid var(--border);
   border-left: 3px solid var(--red);
-  background: rgba(12, 21, 38, 0.95);
-  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.55);
+  background: var(--surface);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.28);
   backdrop-filter: blur(10px);
-  color: var(--text1);
+  color: var(--text);
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.02em;
@@ -9100,7 +9042,7 @@ select.cam-field-input { appearance: auto; }
 .toast-sev-chip b {
   font-family: var(--font-mono);
   font-size: 10px;
-  color: var(--text1);
+  color: var(--text);
 }
 
 .toast-sev-chip[data-sev="critical"],
@@ -9131,8 +9073,8 @@ select.cam-field-input { appearance: auto; }
   margin-bottom: 2px;
   padding: 3px 10px;
   border-radius: 12px;
-  border: 1px solid var(--border2);
-  background: rgba(12, 21, 38, 0.85);
+  border: 1px solid var(--border);
+  background: var(--surface2);
   color: var(--text2);
   font-size: 9.5px;
   font-weight: 700;
@@ -9152,9 +9094,9 @@ select.cam-field-input { appearance: auto; }
 
 .toast-dismiss-all:hover,
 .toast-dismiss-all:focus-visible {
-  background: rgba(30, 50, 80, 0.95);
-  border-color: var(--border1);
-  color: var(--text1);
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface2));
+  border-color: var(--border2);
+  color: var(--text);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -9168,11 +9110,11 @@ select.cam-field-input { appearance: auto; }
 
 .toast-item {
   padding: 10px 14px;
-  border-radius: 8px;
-  border: 1px solid var(--border2);
+  border-radius: 10px;
+  border: 1px solid var(--border);
   border-left: 3px solid var(--red);
-  background: rgba(12, 21, 38, 0.95);
-  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.6);
+  background: var(--surface);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.3);
   animation: slide-in 0.2s ease;
   backdrop-filter: blur(10px);
   max-width: 100%;
@@ -9304,16 +9246,21 @@ select.cam-field-input { appearance: auto; }
   }
 }
 
+/* Transient app-feedback toasts live at the TOP-RIGHT of the content area —
+   above the inverter card grid (over the toolbar/legend strip), so a burst of
+   confirmations briefly covers controls rather than the cards themselves. The
+   persistent alarm hub + chat bubble keep the bottom-right corner. */
 .toast-container-modern {
   position: fixed;
-  bottom: 48px;
+  top: calc(var(--header-h) + var(--progress-h) + 10px);
   right: 16px;
+  bottom: auto;
   z-index: 13000;
   display: flex;
-  flex-direction: column-reverse;
-  gap: 6px;
+  flex-direction: column;
+  gap: 8px;
   pointer-events: none;
-  max-width: 320px;
+  max-width: 300px;
   width: 100%;
 }
 
@@ -9440,10 +9387,10 @@ select.cam-field-input { appearance: auto; }
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border-radius: 10px;
-  border: 1px solid var(--border2);
-  background: rgba(10, 18, 32, 0.97);
-  box-shadow: 0 8px 36px rgba(0, 0, 0, 0.7);
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.34);
   backdrop-filter: blur(12px);
 }
 
@@ -10218,14 +10165,15 @@ body.mode-transition-active {
 }
 
 .notif-hdr {
-  padding: 9px 14px;
+  padding: 10px 14px;
   border-bottom: 1px solid var(--border);
-  background: rgba(15, 28, 50, 0.8);
+  background: var(--surface2);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 700;
+  color: var(--text);
 }
 
 .notif-hdr button {
@@ -10278,31 +10226,39 @@ body.mode-transition-active {
 }
 
 .notif-item {
-  padding: 9px 14px;
+  padding: 10px 14px;
   border-bottom: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
+  transition: background 0.14s;
+}
+
+.notif-item:hover {
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
 }
 
 .notif-inv {
   font-size: 10px;
-  font-weight: 700;
+  font-weight: 800;
+  letter-spacing: 0.3px;
   color: var(--red);
 }
 
 .notif-code {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 11.5px;
+  color: var(--text);
 }
 
 .notif-desc {
-  font-size: 9px;
+  font-size: 10px;
   color: var(--text2);
+  line-height: 1.35;
 }
 
 .notif-ts {
-  font-size: 8.5px;
+  font-size: 9px;
   color: var(--text3);
   font-family: var(--font-mono);
 }
@@ -11768,11 +11724,6 @@ body.mode-transition-active {
 }
 
 /* Version badge: color-mix(var(--accent)) resolves to translucent blue — correct */
-/* Separator: var(--border2) = #243d66 on classic dark — visible */
-:root[data-theme="classic"] .side-about-sep {
-  opacity: 0.65;
-}
-
 /* Action button hover: dark-theme shadow already fits classic dark bg */
 :root[data-theme="classic"] .side-about-actions .btn:hover {
   box-shadow:
@@ -12806,10 +12757,6 @@ body.mode-transition-active {
   background: linear-gradient(90deg, rgba(0, 0, 0, 0) 0%, rgba(38, 201, 160, 0.06) 50%, rgba(0, 0, 0, 0) 100%);
 }
 
-:root[data-theme="midnight"] .side-about-sep {
-  border-color: rgba(30, 58, 52, 0.5);
-}
-
 /* ── Midnight: card inv icon glow, header strip ───────────────────────── */
 
 :root[data-theme="midnight"] .card-hdr {
@@ -13367,6 +13314,11 @@ body.mode-transition-active {
   border-color: rgba(80, 200, 120, 0.35);
 }
 
+.cb-health-row.cb-health-unknown {
+  /* UI-R9: raise contrast to meet WCAG AA (4.5:1). Use --text token instead of muted. */
+  color: var(--text);
+}
+
 .cb-health-icon {
   font-size: 18px;
   width: 22px;
@@ -13375,7 +13327,7 @@ body.mode-transition-active {
 
 .cb-health-row.cb-health-ok .cb-health-icon { color: rgb(80, 200, 120); }
 .cb-health-row.cb-health-alert .cb-health-icon { color: rgb(255, 100, 100); }
-.cb-health-row.cb-health-unknown .cb-health-icon { color: rgba(255, 255, 255, 0.45); }
+.cb-health-row.cb-health-unknown .cb-health-icon { color: var(--text); }
 
 .cb-health-body {
   display: flex;
@@ -13660,13 +13612,17 @@ body.mode-transition-active {
   order: 3;
 }
 
-#page-forecast #forecastSection .forecast-api-panel,
-#page-forecast #forecastSection .forecast-toolkit-panel {
+#page-forecast #forecastSection .forecast-tuning-panel {
   order: 4;
 }
 
-#page-forecast #forecastSection > .sgroup-actions {
+#page-forecast #forecastSection .forecast-api-panel,
+#page-forecast #forecastSection .forecast-toolkit-panel {
   order: 5;
+}
+
+#page-forecast #forecastSection > .sgroup-actions {
+  order: 6;
 }
 
 #page-forecast .forecast-page-sections > .sgroup.settings-card > .sgroup-title {
@@ -13793,18 +13749,10 @@ body.mode-transition-active {
 
 #page-settings .settings-sidebar-card {
   flex: 0 0 auto;
-  border: 1px solid var(--border2);
+  border: 1px solid var(--border);
   border-radius: 14px;
-  background:
-    linear-gradient(
-      180deg,
-      rgba(255, 255, 255, 0.035) 0%,
-      rgba(255, 255, 255, 0) 100%
-    ),
-    linear-gradient(165deg, var(--surface2) 0%, var(--surface) 100%);
-  box-shadow:
-    0 10px 24px rgba(0, 0, 0, 0.12),
-    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  background: var(--surface);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
   padding: 14px;
 }
 
@@ -13814,126 +13762,116 @@ body.mode-transition-active {
   overflow-y: auto;
 }
 
-#page-settings .settings-kicker,
-#page-settings .settings-main-eyebrow {
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.75px;
-  text-transform: uppercase;
-  color: var(--accent);
-  opacity: 0.85;
-}
-
-#page-settings .settings-current-title,
-#page-settings .settings-main-title {
-  margin-top: 2px;
-  font-size: 14px;
-  font-weight: 700;
-  line-height: 1.15;
+#page-settings .settings-sidebar-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 2px 12px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.3px;
   color: var(--text);
 }
 
-#page-settings .settings-current-copy,
-#page-settings .settings-main-copy {
-  margin-top: 2px;
-  font-size: 11px;
-  line-height: 1.4;
-  color: var(--text2);
-  opacity: 0.85;
-}
-
-#page-settings .settings-current-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 12px;
-  padding: 7px 11px;
-  border-radius: 999px;
-  border: 1px solid var(--accent);
-  background: linear-gradient(
-    180deg,
-    rgba(255, 255, 255, 0.06) 0%,
-    rgba(255, 255, 255, 0.015) 100%
-  );
+#page-settings .settings-sidebar-head .mdi {
+  font-size: 17px;
   color: var(--accent);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.2px;
 }
 
 #page-settings .settings-menu {
-  margin-top: 14px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 2px;
 }
 
 #page-settings .settings-menu-btn {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 4px;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
   width: 100%;
-  height: auto;
-  min-height: 58px;
-  padding: 11px 12px;
-  border-radius: 12px;
-  border: 1px solid var(--btn-outline-border);
-  background: linear-gradient(
-    180deg,
-    var(--btn-outline-1) 0%,
-    color-mix(in srgb, var(--btn-outline-2) 92%, transparent) 100%
-  );
-  color: var(--text);
+  height: 32px;
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text2);
   text-align: left;
   cursor: pointer;
-  box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.04);
   transition:
-    border-color 0.15s,
-    background 0.15s,
-    box-shadow 0.15s,
-    filter 0.15s;
+    color 0.14s,
+    background 0.14s,
+    border-color 0.14s;
 }
 
 #page-settings .settings-menu-btn:hover {
-  border-color: var(--btn-outline-border-hover);
-  filter: brightness(1.06);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  color: var(--text);
 }
 
 #page-settings .settings-menu-btn:focus-visible {
   outline: none;
   border-color: var(--btn-outline-border-hover);
-  box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.1),
-    0 0 0 2px var(--btn-focus-ring);
+  box-shadow: 0 0 0 2px var(--btn-focus-ring);
 }
 
 #page-settings .settings-menu-btn.active {
-  border-color: var(--btn-accent-border);
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--btn-accent-1) 20%, var(--btn-outline-1)) 0%,
-    color-mix(in srgb, var(--btn-accent-2) 14%, var(--btn-outline-2)) 100%
-  );
-  box-shadow: inset 3px 0 0 var(--btn-accent-1), 0 1px 2px rgba(0, 0, 0, 0.1);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
   color: var(--text);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+#page-settings .settings-menu-ico {
+  flex: 0 0 auto;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--text3);
+  transition: color 0.14s;
+}
+
+#page-settings .settings-menu-btn:hover .settings-menu-ico,
+#page-settings .settings-menu-btn.active .settings-menu-ico {
+  color: var(--accent);
 }
 
 #page-settings .settings-menu-label {
   font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#page-settings .settings-menu-btn.active .settings-menu-label {
   font-weight: 800;
-  letter-spacing: 0.25px;
 }
 
-#page-settings .settings-menu-copy {
-  font-size: 10.5px;
-  line-height: 1.35;
+/* Purpose-group overline for #settingsSectionMenu (added 2026-05-30).
+   Title Case only — never uppercase. Fully token-driven so it tracks the
+   dark / light / classic themes; a barely-there hairline fences each group
+   while whitespace does most of the separating. Decorative (aria-hidden +
+   pointer-events:none) — the nav JS never sees these nodes. */
+#page-settings .settings-menu-group-label {
+  margin: 6px 0 1px;
+  padding: 5px 12px 0;
+  border-top: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
   color: var(--text3);
+  user-select: none;
+  pointer-events: none;
 }
 
-#page-settings .settings-menu-btn.active .settings-menu-copy {
-  color: var(--text2);
+#page-settings .settings-menu-group-label:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
 }
 
 #page-settings .settings-utility-card {
@@ -14021,19 +13959,22 @@ body.mode-transition-active {
   position: sticky;
   top: 0;
   z-index: 3;
-  padding: 8px 14px;
-  border: 1px solid var(--border2);
+  display: flex;
+  align-items: center;
+  padding: 10px 16px;
+  border: 1px solid var(--border);
   border-radius: 12px;
-  background:
-    linear-gradient(
-      180deg,
-      rgba(255, 255, 255, 0.035) 0%,
-      rgba(255, 255, 255, 0) 100%
-    ),
-    linear-gradient(165deg, var(--surface2) 0%, var(--surface) 100%);
-  box-shadow:
-    0 10px 24px rgba(0, 0, 0, 0.12),
-    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  background: var(--surface);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+#page-settings .settings-main-header .settings-main-title {
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: 0.2px;
+  line-height: 1.15;
+  color: var(--text);
+  margin: 0;
 }
 
 #page-settings .settings-sections {
@@ -14051,23 +13992,22 @@ body.mode-transition-active {
 #page-settings .settings-sections > .sgroup.settings-card {
   display: none;
   margin: 0;
-  padding: 18px;
-  border-radius: 16px;
-  border: 1px solid var(--border2);
-  background:
-    linear-gradient(
-      180deg,
-      rgba(255, 255, 255, 0.035) 0%,
-      rgba(255, 255, 255, 0) 100%
-    ),
-    linear-gradient(165deg, var(--surface2) 0%, var(--surface) 100%);
-  box-shadow:
-    0 10px 24px rgba(0, 0, 0, 0.12),
-    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  padding: 18px 20px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
   overflow: visible;
   height: auto;
   min-height: 0;
   max-height: none;
+}
+
+/* Inline help prose is removed from the visible UI — guidance lives in the
+ * control's title= tooltip (operator preference). Kept in the DOM for
+ * aria-describedby / screen-reader context. */
+#page-settings .settings-sections .srow > small {
+  display: none;
 }
 
 #page-settings
@@ -14091,6 +14031,12 @@ body.mode-transition-active {
   color: var(--accent);
 }
 
+/* The sticky section header already names the active section — the per-card
+ * title just duplicates it. Hide it to keep the panel clean. */
+#page-settings .settings-sections > .sgroup.settings-card > .sgroup-title {
+  display: none;
+}
+
 #page-settings .settings-section-copy {
   grid-column: 1 / -1;
   margin: 2px 0 10px;
@@ -14103,29 +14049,30 @@ body.mode-transition-active {
 #page-settings .settings-card .settings-subsection,
 #page-settings .settings-card .cb-subsection {
   margin-top: 12px;
-  padding: 14px;
+  padding: 14px 16px;
   border: 1px solid var(--border);
   border-radius: 12px;
-  background: linear-gradient(
-    180deg,
-    rgba(255, 255, 255, 0.03) 0%,
-    rgba(255, 255, 255, 0.01) 100%
-  );
+  background: color-mix(in srgb, var(--surface2) 60%, transparent);
 }
 
 #page-settings .settings-card .settings-subsection:first-of-type,
 #page-settings .settings-card .cb-subsection:first-of-type {
-  margin-top: 8px;
+  margin-top: 4px;
 }
 
 #page-settings .settings-card .settings-subtitle,
 #page-settings .settings-card .cb-sub-title {
-  margin: 0 0 10px;
-  font-size: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
   font-weight: 800;
-  letter-spacing: 0.8px;
-  text-transform: uppercase;
-  color: var(--text3);
+  letter-spacing: 0.2px;
+  text-transform: none;
+  color: var(--text);
 }
 
 #page-settings .settings-sections > .sgroup.settings-card > .sinfo,
@@ -14243,11 +14190,12 @@ body.mode-transition-active {
   padding: 12px 14px;
   border: 1px solid var(--border);
   border-radius: 12px;
-  background: linear-gradient(
-    180deg,
-    rgba(255, 255, 255, 0.04) 0%,
-    rgba(255, 255, 255, 0.015) 100%
-  );
+  background: color-mix(in srgb, var(--surface2) 60%, transparent);
+  transition: border-color 0.14s;
+}
+
+#page-settings #plantConfigSection .srow:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
 }
 
 #page-settings #plantConfigSection .srow label,
@@ -14306,11 +14254,7 @@ body.mode-transition-active {
   padding: 14px;
   border-radius: 12px;
   border: 1px solid var(--border);
-  background: linear-gradient(
-    180deg,
-    rgba(255, 255, 255, 0.035) 0%,
-    rgba(255, 255, 255, 0.01) 100%
-  );
+  background: color-mix(in srgb, var(--surface2) 60%, transparent);
 }
 
 #page-settings #opsCompactSection .plant-cap-settings-lead {
@@ -14478,6 +14422,18 @@ body.mode-transition-active {
 :is(#page-settings, #page-forecast) #forecastSection .forecast-access-panel,
 :is(#page-settings, #page-forecast) #forecastSection .forecast-api-panel {
   grid-column: span 4;
+}
+
+:is(#page-settings, #page-forecast) #forecastSection .forecast-tuning-panel {
+  grid-column: span 4;
+}
+
+:is(#page-settings, #page-forecast)
+  #forecastSection
+  .forecast-tuning-panel
+  .srow
+  label {
+  grid-column: 1 / -1;
 }
 
 :is(#page-settings, #page-forecast) #forecastSection .forecast-toolkit-panel {
@@ -14930,6 +14886,7 @@ body.mode-transition-active {
 
   :is(#page-settings, #page-forecast) #forecastSection .forecast-provider-panel,
   :is(#page-settings, #page-forecast) #forecastSection .forecast-access-panel,
+  :is(#page-settings, #page-forecast) #forecastSection .forecast-tuning-panel,
   :is(#page-settings, #page-forecast) #forecastSection .forecast-api-panel {
     grid-column: span 6;
   }
@@ -15051,6 +15008,7 @@ body.mode-transition-active {
   #page-settings #cloudBackupSection .cb-subsection:nth-of-type(3),
   :is(#page-settings, #page-forecast) #forecastSection .forecast-provider-panel,
   :is(#page-settings, #page-forecast) #forecastSection .forecast-access-panel,
+  :is(#page-settings, #page-forecast) #forecastSection .forecast-tuning-panel,
   :is(#page-settings, #page-forecast) #forecastSection .forecast-api-panel,
   :is(#page-settings, #page-forecast) #forecastSection .forecast-toolkit-panel {
     grid-column: 1 / -1;
@@ -15804,6 +15762,12 @@ body.mode-transition-active {
   }
 
   .btn {
+    transition: none !important;
+  }
+
+  #page-settings .settings-menu-btn,
+  #page-settings .settings-menu-ico,
+  .notif-item {
     transition: none !important;
   }
 }

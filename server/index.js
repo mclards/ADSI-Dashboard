@@ -5682,7 +5682,7 @@ function resolveProxyTimeout(targetUrl) {
 }
 
 // Headers an operator-driven action carries from the remote viewer through to
-// the gateway: bulk auth (sacupsMM), session tokens, topology auth, and the
+// the gateway: bulk auth (adsiMM), session tokens, topology auth, and the
 // operator identity used by audit_log writers. Forwarded transparently so
 // the gateway re-validates exactly as if the request came in locally.
 const _OPERATOR_AUTH_FORWARD_HEADERS = [
@@ -5915,7 +5915,7 @@ function isAuthorizedPlantWideControl({ authKey, authToken } = {}, req) {
   // T2.3 fix (Phase 5): pass req so a bound session token is rejected when
   // replayed from a different IP/UA.  Callers that did not pass req
   // (legacy paths, tests) keep the old behaviour — only unbound sessions
-  // pass that route, and the rotating sacupsMM key is unaffected.
+  // pass that route, and the rotating adsiMM key is unaffected.
   const nowMs = Date.now();
   return (
     isValidPlantWideAuthSession(authToken, nowMs, req) || isValidPlantWideAuthKey(authKey, nowMs)
@@ -8365,6 +8365,8 @@ function ensurePersistedSettings() {
     plantLatitude: String(WEATHER_LAT),
     plantLongitude: String(WEATHER_LON),
     forecastExportLimitMw: "24",
+    forecastEstActualWeight: "",
+    forecastIntradayBlendMax: "",
     plantCapUpperMw: "",
     plantCapLowerMw: "",
     plantCapSequenceMode: "ascending",
@@ -8433,6 +8435,8 @@ function buildDefaultSettingsSnapshot() {
     plantLatitude: WEATHER_LAT,
     plantLongitude: WEATHER_LON,
     forecastExportLimitMw: 24,
+    forecastEstActualWeight: null,
+    forecastIntradayBlendMax: null,
     plantCapUpperMw: null,
     plantCapLowerMw: null,
     plantCapSequenceMode: "ascending",
@@ -8475,7 +8479,7 @@ function buildDefaultSettingsSnapshot() {
     //   2. 2-week single-inverter soak with operator sign-off
     //   3. Operator sets to "1" via Settings → Plant Controller (UI pending)
     // Read-back endpoints work regardless of this flag (visibility is safe);
-    // ALL writes are blocked unless this flag === "1" AND sacupsMM auth holds.
+    // ALL writes are blocked unless this flag === "1" AND adsiMM auth holds.
     gridControlEnabled: "0",
   };
 }
@@ -8553,6 +8557,20 @@ function buildSettingsSnapshot() {
       if (!raw) return defaults.forecastExportLimitMw;
       const n = Number(raw);
       return Number.isFinite(n) && n > 0 ? n : defaults.forecastExportLimitMw;
+    })(),
+    // Operator forecast tunables (round-trip to UI). Blank/unset -> null so the
+    // Python engine uses its own default; stored value passes through otherwise.
+    forecastEstActualWeight: (() => {
+      const raw = String(getSetting("forecastEstActualWeight", "") || "").trim();
+      if (!raw) return null;
+      const n = Number(raw);
+      return Number.isFinite(n) && n >= 0.5 && n <= 1.0 ? n : null;
+    })(),
+    forecastIntradayBlendMax: (() => {
+      const raw = String(getSetting("forecastIntradayBlendMax", "") || "").trim();
+      if (!raw) return null;
+      const n = Number(raw);
+      return Number.isFinite(n) && n >= 0.0 && n <= 1.0 ? n : null;
     })(),
     plantCapUpperMw: (() => {
       const raw = String(getSetting("plantCapUpperMw", "") || "").trim();
@@ -12829,8 +12847,16 @@ app.get("/api/health/db-integrity", (req, res) => {
   // powerMonitor) from unexpected crashes (BSOD / power loss / hard kill).
   const ls = snap.lastShutdown && typeof snap.lastShutdown === "object" ? snap.lastShutdown : null;
   const prior = ls?.priorReason && typeof ls.priorReason === "object" ? ls.priorReason : null;
+  // UI-R11 (audit 2026-05-28 §4): add explicit mode field for forward-compatibility.
+  // "skipped" = integrity gate was skipped (asar shim degradation); "ok" = passed;
+  // "restored" = auto-restored from backup; "failed" = unrescuable corruption.
+  let mode = "ok";
+  if (snap.mode) mode = String(snap.mode);
+  else if (snap.unrescuable) mode = "failed";
+  else if (snap.restored) mode = "restored";
   res.json({
     ok: true,
+    mode, // forward-compat: explicit mode field instead of inferring from other fields
     mainDb: snap.mainDb || "unknown",
     restored: !!snap.restored,
     restoredFromSlot: snap.restoredFromSlot,
@@ -13260,7 +13286,7 @@ app.get("/api/clock-sync-log", (req, res) => {
 
 /**
  * POST /api/sync-clock/:inverter/:unit   — operator-triggered single-unit sync.
- * Bulk-auth gated via the `sacupsMM` rotating key (header `x-bulk-auth`
+ * Bulk-auth gated via the `adsiMM` rotating key (header `x-bulk-auth`
  * or Authorization bearer). Proxies to Python FastAPI which executes the
  * vendor-FC frame. Logs to inverter_clock_sync_log + audit_log on return.
  */
@@ -13363,9 +13389,9 @@ async function _proxySyncClock(url, req, res, trigger, scope) {
   if (req.get("x-bulk-auth")) headers["x-bulk-auth"] = req.get("x-bulk-auth");
   // v2.9.1 — when no operator-supplied auth is present (per-inverter route
   // no longer prompts the operator per the 2-type sync model), inject the
-  // current-minute sacupsMM key so Python's _check_bulk_auth still passes.
+  // current-minute adsiMM key so Python's _check_bulk_auth still passes.
   if (!headers["authorization"] && !headers["x-bulk-auth"]) {
-    headers["x-bulk-auth"] = _currentSacupsKey();
+    headers["x-bulk-auth"] = _currentAdsiKey();
   }
 
   // Fire-and-forget for fleet-fanout scopes — see _runSyncClockUpstreamBg.
@@ -13421,7 +13447,7 @@ function _requireBulkAuth(req, res, next) {
 // v2.9.1 — per-inverter sync: NO auth gate per operator directive (the "2-type
 // model": per-inverter is the routine ops action; only fleet-wide broadcast
 // requires an auth prompt because it can interrupt the entire plant). The
-// proxy auto-injects sacupsMM upstream so Python's _check_bulk_auth still
+// proxy auto-injects adsiMM upstream so Python's _check_bulk_auth still
 // accepts the call.
 // IMPORTANT: this route MUST be registered before /api/sync-clock/:inverter/:unit
 // because Express matches the generic two-segment pattern first — "inverter" in
@@ -15160,7 +15186,7 @@ async function _disableReactiveForCompliance(ip, slave) {
 app.post("/api/compliance/run/start", express.json(), async (req, res) => {
   if (isRemoteMode()) return res.status(400).json({ ok: false, error: "Compliance runs must be started on the gateway." });
   const b = req.body || {};
-  // Bulk-control auth required (sacupsMM) — same gate as APC operations.
+  // Bulk-control auth required (adsiMM) — same gate as APC operations.
   if (!isAuthorizedPlantWideControl(b, req)) {
     return res.status(403).json({ ok: false, error: "Unauthorized." });
   }
@@ -15172,7 +15198,7 @@ app.post("/api/compliance/run/start", express.json(), async (req, res) => {
     // Slice θ.4 inherits Slice ζ's hard gate. Once `gridControlEnabled = "1"`
     // (after security review + 2-week soak + operator sign-off), T3 sweeps
     // are allowed — the runner reuses the same Python endpoints with the same
-    // sacupsMM auth + audit-log trail.
+    // adsiMM auth + audit-log trail.
     return res.status(503).json({
       ok: false,
       error: "Test T3 (Q-V Sweep) writes require gridControlEnabled = \"1\" (Slice ζ hardware soak gate). Read-back is always available via the Grid Code tab.",
@@ -15311,7 +15337,7 @@ app.get("/api/compliance/runs", (req, res) => {
 
 app.post("/api/compliance/run/:run_id/report", express.json(), async (req, res) => {
   if (isRemoteMode()) return res.status(400).json({ ok: false, error: "Gateway only." });
-  // Bulk-control auth required (sacupsMM) — same gate as POST /run/start.
+  // Bulk-control auth required (adsiMM) — same gate as POST /run/start.
   // PDF generation launches puppeteer which is heavy; without auth a LAN
   // attacker could DoS the gateway by hammering this endpoint.
   if (!isAuthorizedPlantWideControl(req.body || {}, req)) {
@@ -15431,7 +15457,7 @@ app.get("/api/compliance/run/:run_id/artifact", (req, res) => {
 // SAFETY GATING (in this order, all required for writes):
 //   1. Remote mode → proxy to gateway (Slice ζ writes touch hardware; no remote-mode write)
 //   2. `gridControlEnabled` setting === "1" (default "0", hard feature flag)
-//   3. sacupsMM bulk auth key (same as APC)
+//   3. adsiMM bulk auth key (same as APC)
 //   4. Validated request shape (ip, slave 1..4, raw value bounds)
 // Read-back endpoint (`/api/grid-control/state/:ip/:slave`) is gated only by
 // remote-mode proxy + bulk auth — visibility never causes harm.
@@ -15731,7 +15757,7 @@ app.get("/api/grid-control/feature-status", (req, res) => {
     ok: true,
     enabled: _gridControlEnabled(),
     note: _gridControlEnabled()
-      ? "Grid-control writes are enabled. Use sacupsMM key per request."
+      ? "Grid-control writes are enabled. Use adsiMM key per request."
       : "Grid-control writes are DISABLED by default. Enable `gridControlEnabled` after security review + 2-week single-inverter soak + operator sign-off.",
   });
 });
@@ -16201,7 +16227,7 @@ try {
     getSetting,
     resolveInverterIp: _resolveInverterIp,
     resolveSlave: _resolveSlaveForInverter,
-    currentBulkAuthKey: _currentSacupsKey,
+    currentBulkAuthKey: _currentAdsiKey,
     logControlAction,
     broadcastUpdate,
     isRemoteMode: () => isRemoteMode(),
@@ -16258,9 +16284,9 @@ app.get("/api/alarms/:alarm_id/stop-reason", (req, res) => {
 // v2.10.x — bulk-auth removed from the per-inverter Refresh path. The
 // vendor FC 0x71 SCOPE peek is read-only on the inverter side (it pulls a
 // firmware diagnostic snapshot, doesn't issue any control writes), so the
-// `sacupsMM` operator gate that the broadcast / write actions need is not
+// `adsiMM` operator gate that the broadcast / write actions need is not
 // required here. The Node→Python upstream still injects the gateway's
-// current sacups key at line ~13017 below, so the Python `_check_bulk_auth`
+// current adsi key at line ~13017 below, so the Python `_check_bulk_auth`
 // gate keeps passing without the operator having to type anything.
 app.post(
   "/api/stop-reasons/:inverter/refresh",
@@ -16289,7 +16315,7 @@ app.post(
     if (includeHistogram) url.searchParams.set("include_histogram", "1");
 
     const headers = { "content-type": "application/json" };
-    headers["x-bulk-auth"] = req.get("x-bulk-auth") || _currentSacupsKey();
+    headers["x-bulk-auth"] = req.get("x-bulk-auth") || _currentAdsiKey();
     if (req.get("authorization")) headers["authorization"] = req.get("authorization");
 
     let upstream = null;
@@ -16332,7 +16358,7 @@ app.post(
       try {
         const stdUrl = new URL(`${INVERTER_ENGINE_STOP_REASONS_STD_URL}/${inv}/${slave}`);
         const stdHeaders = { "content-type": "application/json" };
-        stdHeaders["x-bulk-auth"] = req.get("x-bulk-auth") || _currentSacupsKey();
+        stdHeaders["x-bulk-auth"] = req.get("x-bulk-auth") || _currentAdsiKey();
         const stdRes = await fetch(stdUrl.toString(), {
           method: "POST",
           headers: stdHeaders,
@@ -16530,7 +16556,7 @@ async function _proxySerialRead(inverter, slave, { fmt = "auto" } = {}) {
   url.searchParams.set("timeout_s", "5");
   const headers = {
     "content-type": "application/json",
-    "x-bulk-auth": _currentSacupsKey(),
+    "x-bulk-auth": _currentAdsiKey(),
   };
   let lastErr = null;
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -16593,7 +16619,7 @@ async function _proxySerialWrite(inverter, slave, newSerial, fmt) {
   const url = `${INVERTER_ENGINE_SERIAL_URL}/${inverter}/${slave}`;
   const headers = {
     "content-type": "application/json",
-    "x-bulk-auth": _currentSacupsKey(),
+    "x-bulk-auth": _currentAdsiKey(),
   };
   const _abort = new AbortController();
   const _to = setTimeout(() => { try { _abort.abort(); } catch (_) {} }, 45000);
@@ -17373,7 +17399,7 @@ app.post(
 
     // ── Override gate ──────────────────────────────────────────────
     // CONSISTENCY (2026-05-19, operator directive): the entire serial
-    // feature uses ONE credential — bulk control (sacupsMM), already
+    // feature uses ONE credential — bulk control (adsiMM), already
     // enforced by `_requireBulkAuth` on this route. The duplicate-serial
     // override no longer demands a second topology (adsiMM) key — that
     // was the lone inconsistency (Bulk Fix writes deliberate values with
@@ -17412,7 +17438,7 @@ app.post(
     const url = `${INVERTER_ENGINE_SERIAL_URL}/${inv}/${slave}`;
     const headers = {
       "content-type": "application/json",
-      "x-bulk-auth": _currentSacupsKey(),
+      "x-bulk-auth": _currentAdsiKey(),
     };
     let upstream = null;
     try {
@@ -17533,12 +17559,12 @@ app.post(
 /**
  * POST /api/sync-clock-internal
  * Internal, loopback-only endpoint. The Python engine calls this from the
- * drift/year-invalid triggers; Node mints a current-minute `sacupsMM` key
+ * drift/year-invalid triggers; Node mints a current-minute `adsiMM` key
  * and forwards to the bulk-auth-gated engine endpoint.
  */
-function _currentSacupsKey() {
+function _currentAdsiKey() {
   const mm = String(new Date().getMinutes()).padStart(2, "0");
-  return `sacups${mm}`;
+  return `adsi${mm}`;
 }
 
 app.post("/api/sync-clock-internal", express.json(), async (req, res) => {
@@ -17568,7 +17594,7 @@ app.post("/api/sync-clock-internal", express.json(), async (req, res) => {
     const url = `${INVERTER_ENGINE_SYNC_URL}/${inv}/${unit}`;
     const headers = {
       "content-type": "application/json",
-      "x-bulk-auth": _currentSacupsKey(),
+      "x-bulk-auth": _currentAdsiKey(),
     };
     // v2.10.4 — bound the loopback fetch to 30 s so a hung Python engine
     // can't pin this request handler indefinitely (the inverter Modbus
@@ -17674,7 +17700,7 @@ function _scheduleNextClockSync() {
         try {
           r = await fetch(url, {
             method: "POST",
-            headers: { "content-type": "application/json", "x-bulk-auth": _currentSacupsKey() },
+            headers: { "content-type": "application/json", "x-bulk-auth": _currentAdsiKey() },
             body: JSON.stringify({}),
             signal: _clockSyncAbort.signal,
           });
@@ -19049,7 +19075,7 @@ app.post("/api/plant-cap/setpoint/apply", express.json(), async (req, res) => {
   if (!["set", "stop", "start", "abort"].includes(opcode)) {
     return res.status(400).json({ ok: false, error: "opcode must be set|stop|start|abort" });
   }
-  // Plant-wide scope and any STOP require a fresh sacupsMM key (not a cached session token).
+  // Plant-wide scope and any STOP require a fresh adsiMM key (not a cached session token).
   const needsFreshKey = scope === "plant" || opcode === "stop";
   const authOk = needsFreshKey
     ? isValidPlantWideAuthKey(b.authKey, Date.now())
@@ -19318,13 +19344,13 @@ app.post("/api/plant-cap/setpoint/apply", express.json(), async (req, res) => {
 app.post("/api/plant-cap/setpoint/abort/:job_id", express.json(), async (req, res) => {
   if (isRemoteMode()) return proxyToRemote(req, res);
   // Abort halts an in-flight ramp mid-execution — it is a STOP-class action
-  // and must require a fresh sacupsMM key (NOT a cached session token), the
+  // and must require a fresh adsiMM key (NOT a cached session token), the
   // same gate the setpoint-apply path enforces for `opcode === "stop"` at
   // the call site above (~line 17073). A stale browser session must NOT be
   // able to halt an active power ramp.
   const b = req.body || {};
   if (!isValidPlantWideAuthKey(b.authKey, Date.now())) {
-    return res.status(403).json({ ok: false, error: "Fresh sacupsMM key required to abort an active ramp." });
+    return res.status(403).json({ ok: false, error: "Fresh adsiMM key required to abort an active ramp." });
   }
   const job_id = String(req.params.job_id || "").trim();
   const operator = String((req.body || {}).operator || "operator").slice(0, 64);
@@ -19845,6 +19871,8 @@ app.post("/api/settings", (req, res) => {
     plantLatitude,
     plantLongitude,
     forecastExportLimitMw,
+    forecastEstActualWeight,
+    forecastIntradayBlendMax,
     plantCapUpperMw,
     plantCapLowerMw,
     plantCapSequenceMode,
@@ -20048,6 +20076,36 @@ app.post("/api/settings", (req, res) => {
       });
     }
     updates.forecastExportLimitMw = String(limit);
+  }
+  if (forecastEstActualWeight !== undefined) {
+    const raw = String(forecastEstActualWeight ?? "").trim();
+    if (!raw) {
+      updates.forecastEstActualWeight = "";
+    } else {
+      const val = Number(raw);
+      if (!Number.isFinite(val) || val < 0.5 || val > 1.0) {
+        return res.status(400).json({
+          ok: false,
+          error: "forecastEstActualWeight must be between 0.50 and 1.00, or blank to use engine default",
+        });
+      }
+      updates.forecastEstActualWeight = String(val);
+    }
+  }
+  if (forecastIntradayBlendMax !== undefined) {
+    const raw = String(forecastIntradayBlendMax ?? "").trim();
+    if (!raw) {
+      updates.forecastIntradayBlendMax = "";
+    } else {
+      const val = Number(raw);
+      if (!Number.isFinite(val) || val < 0.0 || val > 1.0) {
+        return res.status(400).json({
+          ok: false,
+          error: "forecastIntradayBlendMax must be between 0.00 and 1.00, or blank to use engine default",
+        });
+      }
+      updates.forecastIntradayBlendMax = String(val);
+    }
   }
   if (plantCapUpperMw !== undefined) {
     const rawUpper = String(plantCapUpperMw ?? "").trim();
@@ -25178,7 +25236,7 @@ function buildInspectionGuide(inverter) {
 }
 
 // POST /api/critical-blocks/:inverter/confirm — operator clears the block.
-// Gate behind bulk-control auth (sacupsMM) because unblocking re-enables
+// Gate behind bulk-control auth (adsiMM) because unblocking re-enables
 // inverter control — the same authority level required to START/STOP.
 app.post("/api/critical-blocks/:inverter/confirm", express.json(), (req, res) => {
   if (isRemoteMode()) return proxyToRemote(req, res);

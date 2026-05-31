@@ -62,6 +62,25 @@ Solcast is a **high-authority input**. It must not be skipped or treated as opti
 - Raw Solcast arrives in `MW` — always normalize to `kWh per 5-minute slot` before scoring, blending, or comparison.
 - `build_solcast_reliability_artifact()` compares Solcast against `load_actual_loss_adjusted()` — never against raw inverter totals.
 
+## Provider Fallback: Mean-Blend 100%
+
+When Open-Meteo weather data is stale or unavailable (fallback weather cannot be loaded), the Node orchestrator sets `override_to_mean_blend_100 = true` in the runtime state passed to `run_dayahead()`. This signal forces the forecast to use Solcast as the sole authority source, bypassing the ML residual correction path.
+
+**Behavior:**
+- `mean_blend = 1.0` forces the final forecast to equal Solcast (hybrid baseline) only
+- ML residual predictions are computed but not applied (suppressed)
+- Confidence bands still use ML error profiles (residual variance estimates), but no ML adjustment to the point estimate
+- Logged at forecast generation time as `override_to_mean_blend_100=true` in audit metadata
+
+**When triggered:**
+- Node's `runDayAheadGenerationPlan()` detects missing/stale Open-Meteo data and cannot obtain cached forecast weather
+- Alternative weather sources (archive, snapshot) unavailable
+- Solcast is available and used as baseline
+
+**Intent:**
+- Ensures the forecast is defensible (single source of truth) rather than a blend that might combine stale physics with stale ML learning
+- Transparent degradation: audit row documents the limitation
+
 ## Key Functions
 
 | Function | Purpose |
@@ -182,7 +201,15 @@ The Forecast Performance Monitor panel defaults to collapsed on first dashboard 
 | `solcast_spread_pct` | `100 × (hi - lo) / forecast` | Uncertainty as percentage of point estimate (0–200%) |
 | `solcast_spread_ratio` | `(hi - lo) / (hi + lo)` | Symmetric spread metric, scale-robust (-1 to 1) |
 
-**FEATURE_COLS expansion:** 62 → 70 columns. Updated feature count must match active ML bundles; legacy 62-feature models auto-align via `_align_bundle_features()` padding new columns with zeros.
+**FEATURE_COLS expansion:** 62 → 70 → 72 columns (v2.5.0 tri-band + v2.8 locked-snapshot pair).
+
+Tri-band features (v2.5.0+): `solcast_lo_kwh`, `solcast_hi_kwh`, `solcast_lo_vs_physics`, `solcast_hi_vs_physics`, `solcast_spread_pct`, `solcast_spread_ratio` (6 cols) — code reference: `services/forecast_engine.py:7891-7898`.
+
+Locked-snapshot pair (v2.8+): `spread_pct_cap_locked`, `hours_since_lock` (2 cols) — captures the day-ahead lock state for intraday regeneration decisions.
+
+Plant integration (v2.8+): `expected_nodes`, `cap_kw` (2 cols).
+
+Updated feature count must match active ML bundles; legacy 62-feature models auto-align via `_align_bundle_features()` padding new columns with zeros.
 
 **Data availability:**
 - P10/P90 available only from Solcast Toolkit API for **future-dated requests** (forecast generation, not historical backfill)
@@ -190,7 +217,7 @@ The Forecast Performance Monitor panel defaults to collapsed on first dashboard 
 - No DB migration required — `solcast_snapshots` already stores `forecast_lo_kwh`, `forecast_hi_kwh` from Solcast API
 
 **Backward compatibility:**
-- Old 62-feature trained models load safely when loaded by new 70-feature code
+- Old 62-feature trained models load safely when loaded by new 72-feature code
 - Auto-alignment pads missing tri-band features with zeros (valid for zero-spread data)
 - Training with zero-spread data (before tri-band availability) produces redundant tri-band features; model ignores or learns zero importance
 
@@ -207,3 +234,69 @@ The Forecast Performance Monitor panel defaults to collapsed on first dashboard 
 - `solcast_spread_ratio` often higher importance than percentage variant (more stable numerically)
 - `solcast_lo_vs_physics` and `solcast_hi_vs_physics` capture quantile-specific physics alignment
 - Under-cloud conditions: spread features aid model detection of high-variance regimes
+
+
+---
+
+## Forecast Tunables (operator settings, v2.11.x — option A, 2026-05-30)
+
+Read FRESH from the `settings` table each forecast cycle via `_setting_float_or_none()`
+(NOT the process-cached `_read_setting_value`), so an operator change takes effect on
+the next cycle without restarting the forecast service. Each key returns the engine
+default when unset / blank / invalid, so behavior is identical until the operator opts in.
+
+| Setting key | Range (clamped) | Default when unset | Effect |
+|---|---|---|---|
+| `forecastEstActualWeight` | 0.50 – 1.00 | dynamic (MAPE-based 0.95 / 0.93 / 0.85; floor `EST_ACTUAL_WEIGHT_FACTOR=0.93`) | Manual override of the est_actual reconstruction training weight in `build_training_state()`. When set, takes precedence over `compute_solcast_accuracy_vs_metered()`. Higher = trust satellite-derived est_actual more. |
+| `forecastIntradayBlendMax` | 0.00 – 1.00 | `INTRADAY_BLEND_MAX=0.72` | Caps how strongly intraday observed-vs-day-ahead corrections are blended in `build_intraday_adjusted_forecast()`. Higher = more aggressive intraday re-anchoring to observed generation. |
+
+Set via the normal settings mechanism (e.g. `POST /api/settings` `{ "key": "...", "value": "0.95" }`)
+or directly in the `settings` table. Invalid/out-of-range values are ignored (logged) and the
+engine default is used. **Validate any change with a `--train` + 30-day backtest before relying on it.**
+
+Transmission loss is already operator-configurable per-inverter in `ipconfig.json` under
+`losses: { "1": 2.5, ... }` (default 2.5%) — calibrate there for the measured 2.5–3.6% range;
+no separate setting key is needed.
+
+
+---
+
+## Solcast-Outage Resilience — Physics Fallback (2026-05-30)
+
+`run_dayahead()` previously **hard-failed** (returned no forecast) whenever a usable
+Solcast snapshot was missing for the target date. The PHASE-4 redesign had made the
+Solcast snapshot the forecast *baseline itself*, so "no snapshot" meant "no forecast" —
+a single point of failure on one external provider.
+
+Now it degrades gracefully:
+
+| Condition | Path | Baseline | Variant |
+|---|---|---|---|
+| Usable Solcast snapshot present | Solcast-primary (PHASE 4, unchanged) | Solcast mid | `ml_solcast_hybrid_fresh` / `_stale` |
+| No usable snapshot, fallback ON (default) | **Physics fallback** | `physics_baseline()` (Open-Meteo) + ML residual + error memory | `ml_without_solcast` |
+| No usable snapshot, fallback OFF | Hard fail (legacy behavior) | - | - |
+
+- **Self-sufficient:** the physics path uses the existing clear-sky + cloud-transmittance
+  model driven by **Open-Meteo** (a separate provider), the trained ML residual, and error
+  memory - no Solcast dependency.
+- **Reuses the existing physics-only branch:** downstream code already special-cases
+  `used_solcast == False` (full-strength error memory, no Solcast floor); the fallback just
+  routes through it. `blend_physics_with_solcast(physics, None)` returns physics passthrough
+  with `used_solcast=False`.
+- **Tiered validity check:** snapshot present -> has `forecast_kwh` -> prior builds -> prior is
+  288 slots; any failure routes to fallback via `log.warning`, never a crash.
+- **Transparent:** logged as `Day-ahead PHYSICS FALLBACK` and audited as
+  `forecast_variant='ml_without_solcast'`.
+- **Cached snapshots still cover short API outages** (freshness tiers `fresh`/`stale_usable`);
+  this fallback covers the harder case where *no* usable snapshot exists for the target date.
+
+**Setting:** `forecastAllowPhysicsFallback` (default **on**), read fresh each cycle via
+`_setting_bool_or_default()`. Set to `0`/`false` to restore the legacy hard-fail. Because the
+default is on, **no operator action is needed** for resilience - the engine self-heals.
+
+**Validation note:** the physics-only path is real generation logic that had been effectively
+unreachable in production (the hard gate prevented it). Confirm its WAPE/MAPE on the gateway
+with a `--train` + 30-day backtest (optionally a deliberate no-snapshot dry run) before
+relying on the degraded output.
+
+Tests: `services/tests/test_forecast_engine_audit_fixes.py::TestPhysicsFallback` (9 cases).

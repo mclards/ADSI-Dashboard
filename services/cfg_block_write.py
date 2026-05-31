@@ -46,6 +46,14 @@ NON_WRITABLE_FIELDS = frozenset({
     "ValidCfgCode",
     "FechaConfiguracion",
     "NumGrabaciones",
+    # NumeroNodoModbus changes the inverter's Modbus slave address. Writing
+    # it mid-session moves the unit to a NEW address, so the post-write
+    # verify re-read (still issued on the OLD slave) fails/times out and the
+    # tool's own transport can no longer reach the inverter — a self-brick
+    # that also misreports the (actually-applied) write as "verify_failed".
+    # Slave-address changes must be done on-site via ISM, where connectivity
+    # can be re-established immediately. (audit CRITICAL-001, 2026-05-31)
+    "NumeroNodoModbus",
 })
 
 
@@ -57,7 +65,13 @@ def is_writable_field(field_meta: Dict[str, Any]) -> bool:
         return False
     if str(field_meta.get("field") or "") in NON_WRITABLE_FIELDS:
         return False
-    return str(field_meta.get("kind") or "") not in UNSUPPORTED_KINDS
+    kind = str(field_meta.get("kind") or "").strip()
+    if not kind:
+        # A field with no kind has no encoder — refuse it, matching
+        # encode_value() which raises CfgEncodeError on a missing kind.
+        # (audit CFG-001, 2026-05-31)
+        return False
+    return kind not in UNSUPPORTED_KINDS
 
 
 def encode_value(field_meta: Dict[str, Any], value: Any) -> int:

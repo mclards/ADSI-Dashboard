@@ -7,7 +7,7 @@
  *
  * The original calibrationRoutes.js shipped with two enforced gates
  *   (1) critical-block lock, (2) ValidCfgCode sentinel preserved
- *   (3) range-guard ±50 %, (4) sacupsMM auth, (5) session-id match)
+ *   (3) range-guard ±50 %, (4) adsiMM auth, (5) session-id match)
  * but three gates from the original spec were never wired:
  *
  *   • Inverter must be in RUN state (not error / not stop / not blocked)

@@ -14,26 +14,37 @@ function run() {
 
   __resetForTests();
   {
+    // 2026-05-31 — the plant-wide bulk-control key was unified with the
+    // topology key: the prefix is now `adsi` (the old `sacups` is retired) and
+    // BOTH padded (`adsi05`) and unpadded (`adsi5`) minute forms validate, for
+    // parity with requireTopologyAuth. At minute 5 the valid set is
+    // {adsi5, adsi05, adsi4, adsi04}.
     const keys = [...getPlantWideAuthKeys(base)];
-    assert.deepEqual(keys.sort(), ["sacups04", "sacups05"]);
-    assert.equal(isValidPlantWideAuthKey("sacups05", base), true);
-    assert.equal(isValidPlantWideAuthKey("sacups04", base), true);
-    assert.equal(isValidPlantWideAuthKey("sacups03", base), false);
+    assert.deepEqual(keys.sort(), ["adsi04", "adsi05", "adsi4", "adsi5"]);
+    assert.equal(isValidPlantWideAuthKey("adsi05", base), true);
+    assert.equal(isValidPlantWideAuthKey("adsi5", base), true);
+    assert.equal(isValidPlantWideAuthKey("adsi04", base), true);
+    assert.equal(isValidPlantWideAuthKey("adsi4", base), true);
+    assert.equal(isValidPlantWideAuthKey("adsi03", base), false);
+    assert.equal(isValidPlantWideAuthKey("adsi3", base), false);
+    // Regression guard: the retired `sacups` prefix must NEVER validate again.
+    assert.equal(isValidPlantWideAuthKey("sacups05", base), false);
+    assert.equal(isValidPlantWideAuthKey("sacups5", base), false);
   }
 
   __resetForTests();
   {
     // v2.11.x — operator preference: rolling lease is now 60 min so the
-    // dashboard prompts for sacupsMM at most once per hour. The lease still
+    // dashboard prompts for adsiMM at most once per hour. The lease still
     // expires at TTL, just on a longer horizon. Numbers below check the new
     // boundary: still valid at 30 min, expired by 65 min.
-    assert.equal(isValidPlantWideAuthKey("sacups05", base), true);
+    assert.equal(isValidPlantWideAuthKey("adsi05", base), true);
     assert.equal(
-      isValidPlantWideAuthKey("sacups05", base + 30 * 60 * 1000),
+      isValidPlantWideAuthKey("adsi05", base + 30 * 60 * 1000),
       true,
     );
     assert.equal(
-      isValidPlantWideAuthKey("sacups05", base + 65 * 60 * 1000),
+      isValidPlantWideAuthKey("adsi05", base + 65 * 60 * 1000),
       false,
     );
   }

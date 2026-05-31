@@ -531,7 +531,14 @@ function _sqliteFileLooksValidSync(targetPath) {
 function _probeDbIntegritySync(targetPath) {
   let probe = null;
   try {
-    probe = new Database(targetPath, { readonly: true, fileMustExist: true });
+    // BR-Mi2 (audit 2026-05-28 §3) — better-sqlite3 is synchronous, so a
+    // Promise timeout cannot bound `quick_check` (it runs on this thread). The
+    // realistic startup hazard is the file being lock-contended, not the check
+    // hanging: `quick_check(1)` only scans page structure and is bounded by
+    // file size (ms on a healthy DB). We pass a short busy timeout + open the
+    // probe read-only so a lock held by another opener fails fast with a clear
+    // SQLITE_BUSY rather than blocking startup on the default ~5 s busy wait.
+    probe = new Database(targetPath, { readonly: true, fileMustExist: true, timeout: 2000 });
     const qc = String(probe.prepare("PRAGMA quick_check(1)").pluck().get() || "").trim().toLowerCase();
     return { ok: qc === "ok", quickCheck: qc };
   } catch (err) {

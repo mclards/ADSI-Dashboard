@@ -152,8 +152,8 @@
         display: flex;
         flex-direction: column;
         align-items: center;
-        gap: 8px;
-        margin-bottom: 2px;
+        gap: 10px;
+        margin-bottom: 22px;
       }
 
       .brand-logo {
@@ -186,44 +186,17 @@
       }
 
       .brand-text h1 {
-        font-size: 14px;
+        font-size: 15px;
         font-weight: 800;
         letter-spacing: 1.2px;
         color: var(--text);
         text-transform: uppercase;
       }
 
-      .brand-text p {
-        margin-top: 3px;
-        font-size: 10.5px;
-        font-weight: 500;
-        color: var(--accent);
-        letter-spacing: 1.5px;
-        text-transform: uppercase;
-      }
-
-      /* ── Divider ─────────────────────────────────────────────────────────── */
-      .login-divider {
-        width: 48px;
-        height: 1px;
-        margin: 14px auto;
-        background: linear-gradient(90deg, transparent, var(--border2), transparent);
-      }
-
-      /* ── Section title ───────────────────────────────────────────────────── */
-      .section-title {
-        margin: 0 0 14px;
-        font-size: 18px;
-        font-weight: 700;
-        letter-spacing: 0.2px;
-        color: var(--text);
-        text-align: center;
-      }
-
       /* ── Inputs ──────────────────────────────────────────────────────────── */
       .field {
         position: relative;
-        margin-top: 12px;
+        margin-top: 11px;
       }
 
       .field:first-of-type {
@@ -242,7 +215,7 @@
 
       .inp {
         width: 100%;
-        height: 42px;
+        height: 44px;
         border: 1px solid var(--border);
         border-radius: 10px;
         background: color-mix(in srgb, var(--bg) 80%, var(--surface));
@@ -254,6 +227,62 @@
         text-align: center;
         outline: none;
         transition: border-color 0.18s, box-shadow 0.18s, background 0.18s;
+      }
+
+      /* Login form inputs carry a leading icon (and a trailing toggle on the
+         password), so they're left-aligned with room for the adornments. */
+      .field--icon .inp {
+        text-align: left;
+        padding-left: 42px;
+      }
+
+      .field--pw .inp {
+        padding-right: 42px;
+      }
+
+      .field-icon {
+        position: absolute;
+        left: 14px;
+        top: 50%;
+        transform: translateY(-50%);
+        width: 17px;
+        height: 17px;
+        color: var(--text3);
+        pointer-events: none;
+        transition: color 0.18s;
+      }
+
+      .field--icon:focus-within .field-icon {
+        color: var(--accent);
+      }
+
+      .pw-toggle {
+        position: absolute;
+        right: 6px;
+        top: 50%;
+        transform: translateY(-50%);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 32px;
+        height: 32px;
+        padding: 0;
+        border: none;
+        border-radius: 8px;
+        background: transparent;
+        color: var(--text3);
+        cursor: pointer;
+        transition: color 0.14s, background 0.14s;
+      }
+
+      .pw-toggle:hover {
+        color: var(--text);
+        background: color-mix(in srgb, var(--accent) 12%, transparent);
+      }
+
+      .pw-toggle svg {
+        width: 17px;
+        height: 17px;
       }
 
       .inp::placeholder {
@@ -292,10 +321,10 @@
       .remember {
         display: flex;
         align-items: center;
-        justify-content: center;
+        justify-content: flex-start;
         gap: 8px;
-        margin-top: 10px;
-        font-size: 11.5px;
+        margin-top: 14px;
+        font-size: 12px;
         font-weight: 500;
         color: var(--text2);
         user-select: none;
@@ -334,7 +363,7 @@
       }
 
       #loginBtn {
-        margin-top: 12px;
+        margin-top: 18px;
       }
 
       .btn-primary:hover {
@@ -344,7 +373,7 @@
 
       /* ── Links ───────────────────────────────────────────────────────────── */
       .links {
-        margin-top: 14px;
+        margin-top: 16px;
         text-align: center;
         font-size: 11.5px;
         line-height: 1.8;
@@ -379,17 +408,6 @@
 
       :root[data-theme="light"] .links a:hover {
         color: #2b67ad;
-      }
-
-      /* ── Footer ──────────────────────────────────────────────────────────── */
-      .footer {
-        margin-top: 14px;
-        text-align: center;
-        font-size: 10px;
-        font-weight: 500;
-        color: var(--text3);
-        letter-spacing: 0.3px;
-        opacity: 0.7;
       }
 
       /* ── Modal overlay ───────────────────────────────────────────────────── */
@@ -503,6 +521,29 @@
         transform: scale(0.988);
         transition: filter 0.18s ease, transform 0.18s ease;
       }
+
+      /* ── Entrance + dismiss (shared motion language with loading.html) ────── */
+      .login-shell {
+        animation: cardIn 0.42s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+      }
+
+      @keyframes cardIn {
+        from {
+          opacity: 0;
+          transform: translateY(10px) scale(0.985);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0) scale(1);
+        }
+      }
+
+      body.login-exit .login-shell {
+        animation: none;
+        opacity: 0;
+        transform: scale(0.97) translateY(-6px);
+        transition: opacity 0.22s ease, transform 0.22s ease;
+      }
     </style>
   </head>
   <body>
@@ -513,31 +554,37 @@
         </div>
         <div class="brand-text">
           <h1>ADSI Inverter Dashboard</h1>
-          <p>Authorized Access</p>
         </div>
       </div>
 
-      <div class="login-divider"></div>
-
-      <div class="section-title">Sign In</div>
-      <div class="field">
-        <label class="field-label" for="username">Username</label>
-        <input id="username" class="inp" type="text" placeholder="Username" autocomplete="username" autofocus />
+      <div class="field field--icon">
+        <svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+          <circle cx="12" cy="7" r="4" />
+        </svg>
+        <input id="username" class="inp" type="text" placeholder="Username" aria-label="Username" autocomplete="username" autofocus />
       </div>
-      <div class="field">
-        <label class="field-label" for="password">Password</label>
-        <input id="password" class="inp" type="password" placeholder="Password" autocomplete="current-password" />
+      <div class="field field--icon field--pw">
+        <svg class="field-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="4" y="11" width="16" height="10" rx="2" />
+          <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+        </svg>
+        <input id="password" class="inp" type="password" placeholder="Password" aria-label="Password" autocomplete="current-password" />
+        <button type="button" id="pwToggle" class="pw-toggle" aria-label="Show password" title="Show password">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
+            <circle cx="12" cy="12" r="3" />
+          </svg>
+        </button>
       </div>
-      <label class="remember"><input type="checkbox" id="rememberMe" /> Remember credentials on this workstation</label>
+      <label class="remember"><input type="checkbox" id="rememberMe" /> Remember me</label>
       <button id="loginBtn" class="btn btn-primary">Sign In</button>
 
       <div class="links">
-        <a id="changeUserPass">Update Username and Password</a>
+        <a id="changeUserPass">Change credentials</a>
         <span class="sep"></span>
-        <a id="resetPass">Recover with Authorization Key</a>
+        <a id="resetPass">Recover access</a>
       </div>
-
-      <div class="footer">ADSI Inverter Dashboard &middot; Authorized Workstation Access</div>
     </main>
 
     <div id="modal-bg">
@@ -639,7 +686,10 @@
           } else {
             await api.clearRemembered();
           }
-          api.loginSuccess();
+          // Fade the card out before handing off to the loading window so the
+          // login → loading transition reads as one continuous motion.
+          document.body.classList.add("login-exit");
+          setTimeout(() => api.loginSuccess(), 200);
         }
 
         async function handleSaveChange() {
@@ -675,6 +725,18 @@
         }
 
         document.getElementById("loginBtn").addEventListener("click", doLogin);
+
+        const pwToggle = document.getElementById("pwToggle");
+        const EYE = '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>';
+        const EYE_OFF = '<path d="M9.9 4.24A9.1 9.1 0 0 1 12 4c6.5 0 10 7 10 7a13.2 13.2 0 0 1-2.16 2.92"/><path d="M6.6 6.6A13.2 13.2 0 0 0 2 11s3.5 7 10 7a9.1 9.1 0 0 0 3.06-.53"/><path d="M9.5 9.5a3 3 0 0 0 4.24 4.24"/><line x1="2" y1="2" x2="22" y2="22"/>';
+        pwToggle.addEventListener("click", () => {
+          const show = passwordInput.type === "password";
+          passwordInput.type = show ? "text" : "password";
+          pwToggle.querySelector("svg").innerHTML = show ? EYE_OFF : EYE;
+          pwToggle.setAttribute("aria-label", show ? "Hide password" : "Show password");
+          pwToggle.setAttribute("title", show ? "Hide password" : "Show password");
+          passwordInput.focus();
+        });
 
         document.getElementById("changeUserPass").addEventListener("click", () => {
           openLayer(modalBg);

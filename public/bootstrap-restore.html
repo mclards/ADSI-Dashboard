@@ -413,12 +413,12 @@
   </main>
 
   <footer>
-    <div class="stepper" id="stepper">
-      <span class="dot active"></span>
-      <span class="dot"></span>
-      <span class="dot"></span>
-      <span class="dot"></span>
-      <span class="dot"></span>
+    <div class="stepper" id="stepper" role="progressbar" aria-valuemin="1" aria-valuemax="5" aria-valuenow="1">
+      <span class="dot active" aria-label="Step 1: Select backup file"></span>
+      <span class="dot" aria-label="Step 2: Verify backup"></span>
+      <span class="dot" aria-label="Step 3: Choose what to restore"></span>
+      <span class="dot" aria-label="Step 4: Restoring"></span>
+      <span class="dot" aria-label="Step 5: Restore complete"></span>
     </div>
     <div>
       <button id="btnCancel" class="danger">Cancel</button>

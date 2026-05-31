@@ -297,7 +297,16 @@ MODULES_PER_INVERTER = 4
 NODE_KW_NOMINAL    = 226.73                                  # per-stage Pnom (kW) — Ingeteam template
 NODE_KW_MAX        = 249.41                                  # per-stage Pmax (kW) — Ingeteam template
 NODE_KW_DEPENDABLE = 226.73                                  # per-stage dependable = Pnom (kW)
-REGIME_MODEL_MIN_DAYS = 6
+REGIME_MODEL_MIN_DAYS = 6  # Minimum training days to build a regime-specific model
+"""Strict minimum for regime model formation. Raised to REGIME_MODEL_MIN_DAYS_TRANSITION
+during detected weather transitions (clear → overcast, dry → monsoon, etc.) to allow
+sparse regimes to be learned with reduced confidence."""
+
+REGIME_MODEL_MIN_DAYS_TRANSITION = 3  # Relaxed minimum during regime transitions
+"""Transition mode: allows regime models with fewer samples when forming regimes
+during weather pattern shifts. Used when the target regime is rare but emerging.
+Lower threshold prevents training gaps during seasonal transitions."""
+
 REGIME_MODEL_MIN_SAMPLES = 320
 REGIME_BLEND_BASE = 0.52
 REGIME_BLEND_MAX = 0.82
@@ -587,6 +596,11 @@ def _reset_train_rejection_streak(bundle: dict | None = None) -> None:
         state["last_training_date"] = bundle.get("training_date")
         state["data_warnings"] = _collect_data_quality_warnings(bundle.get("model_bundle", {}))
         state["outage_summary"] = bundle.get("model_bundle", {}).get("outage_summary", {})
+
+        # ML-FA3 fix: move backend status to status_flags (not data_warnings)
+        state["status_flags"] = {}
+        if FORECAST_USE_LIGHTGBM and not _LIGHTGBM_AVAILABLE:
+            state["status_flags"]["backend_fallback"] = True
 
     _save_json(ML_TRAIN_STATE_FILE, state)
 
@@ -2881,11 +2895,25 @@ FEATURE_COLS = [
 # CURTAILMENT DETECTION
 # ============================================================================
 
-def curtailed_mask(actual: np.ndarray, baseline: np.ndarray, tol: float = 0.97) -> np.ndarray:
+CAP_DISPATCH_TOLERANCE = 0.97  # Detect cap-dispatch where actual >= tol * cap_slot
+"""Threshold for export-cap detection. A slot is considered capped when actual
+power >= this fraction of the export limit AND physics baseline > cap limit.
+Typical 97% catches soft-clamping behavior while avoiding false positives on
+high-efficiency slots near 100% of rated capacity."""
+
+def curtailed_mask(actual: np.ndarray, baseline: np.ndarray, tol: float = CAP_DISPATCH_TOLERANCE) -> np.ndarray:
     """
     Boolean mask: True where generation was export-capped.
     These slots must be excluded from ML training or the model
     learns a falsely-depressed response at high irradiance.
+
+    Args:
+        actual: actual power (kWh per slot)
+        baseline: physics baseline power (kWh per slot)
+        tol: cap-dispatch tolerance threshold (default CAP_DISPATCH_TOLERANCE=0.97)
+
+    Returns:
+        Boolean mask where (actual >= tol * cap_slot) AND (baseline > 1.05 * cap_slot)
     """
     cap_slot = load_forecast_export_limit_mw() * 1000.0 * SLOT_MIN / 60.0
     return (actual >= tol * cap_slot) & (baseline > cap_slot * 1.05)
@@ -5800,10 +5828,17 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
     Compute weighted historical bias from saved comparison rows.
 
     Preferred source:
-      - forecast_error_compare_daily (eligible rows only)
+      - forecast_error_compare_daily (eligible rows only; `include_in_error_memory=1`)
       - forecast_error_compare_slot (usable_for_error_memory=1)
     Fallback source:
       - legacy slot-only table reading.
+
+    Error memory is regime-aware: lookback window is selected per target_regime
+    from ERR_MEMORY_DAYS_BY_REGIME. Regime-mismatched historical days receive
+    a penalty multiplier from ERR_MEMORY_REGIME_PENALTY_MATRIX.
+
+    Per-slot bias is clipped to ±100 kWh as a guard against correlated-bias
+    weeks that would otherwise dominate the forecast.
 
     Metadata is written to module-level _LAST_ERROR_MEMORY_META for caller inspection.
 
@@ -5813,7 +5848,7 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
         target_regime: Target day's weather regime; historical days with mismatched regime are penalized
 
     Returns:
-        Weighted error memory array (SLOTS_DAY,)
+        Weighted error memory array (SLOTS_DAY,). Magnitude bounded to ±100 kWh per slot.
     """
     global _LAST_ERROR_MEMORY_META
 
@@ -7206,6 +7241,17 @@ def apply_block_staging(forecast: np.ndarray, w5: pd.DataFrame) -> tuple[np.ndar
 # MODEL TRAINING
 # ============================================================================
 
+# Per-day training-sample quality weighting (ML-N1: named constants for the
+# actual-vs-baseline correlation quality signal). quality_weight scales each
+# day's training samples by how well actual generation tracked the hybrid
+# baseline that day — high correlation -> full weight, low/negative -> floored.
+# Values are behavior-identical to the prior inline literals (0.70/0.30/0.55/1.0).
+TRAIN_QUALITY_WEIGHT_BASE = 0.70        # weight when correlation is zero/negative
+TRAIN_QUALITY_WEIGHT_CORR_SCALE = 0.30  # additional weight scaled by max(corr, 0)
+TRAIN_QUALITY_WEIGHT_FLOOR = 0.55       # lower clip — never fully discard a usable day
+TRAIN_QUALITY_WEIGHT_CEIL = 1.00        # upper clip — never exceed full weight
+
+
 def collect_training_data_hardened(
     today: date,
     history_days: list[dict] | None = None,
@@ -7330,7 +7376,11 @@ def collect_training_data_hardened(
 
         recency_weight = _sample_weight_for_days_ago(int(sample.get("days_ago", N_TRAIN_DAYS)))
         corr = float(stats.get("rad_gen_corr", 0.0))
-        quality_weight = float(np.clip(0.70 + 0.30 * max(corr, 0.0), 0.55, 1.0))
+        quality_weight = float(np.clip(
+            TRAIN_QUALITY_WEIGHT_BASE + TRAIN_QUALITY_WEIGHT_CORR_SCALE * max(corr, 0.0),
+            TRAIN_QUALITY_WEIGHT_FLOOR,
+            TRAIN_QUALITY_WEIGHT_CEIL,
+        ))
         # Discount weight for days with est_actual reconstruction
         # Metered substation data gets full weight (1.0) — no discount
         est_recon_count = int(sample.get("est_actual_reconstructed_count", 0))
@@ -7447,9 +7497,11 @@ def _collect_data_quality_warnings(bundle: dict) -> list:
 
     Returns:
         list: May include 'insufficient_training_days', 'high_rejection_streak',
-              'no_regime_data', 'lgbm_unavailable_fallback',
-              'outage_days_detected', 'error_memory_sparse_regime',
-              'error_memory_stale'. May be empty (healthy).
+              'no_regime_data', 'outage_days_detected', 'error_memory_sparse_regime',
+              'error_memory_stale', 'est_actual_reconstruction_active'. May be empty (healthy).
+
+    Note: Backend status (e.g., sklearn fallback) is NOT included here; it's
+    expected behavior reported in status_flags, not a data quality warning.
     """
     warnings = []
 
@@ -7503,9 +7555,7 @@ def _collect_data_quality_warnings(bundle: dict) -> list:
     if not regimes:
         warnings.append("no_regime_data")
 
-    # Check for LightGBM fallback
-    if FORECAST_USE_LIGHTGBM and not _LIGHTGBM_AVAILABLE:
-        warnings.append("lgbm_unavailable_fallback")
+    # (Removed LightGBM fallback check — moved to status_flags in _persist_train_state)
 
     # Check for outage-affected days in training window
     outage_summary = bundle.get("outage_summary", {})
@@ -7541,6 +7591,15 @@ def _collect_data_quality_warnings(bundle: dict) -> list:
 def _make_residual_regressor(n_estimators: int | None = None):
     if FORECAST_USE_LIGHTGBM and _LIGHTGBM_AVAILABLE:
         return _make_residual_regressor_lgbm()
+    # Sklearn GradientBoostingRegressor fallback (audit 2026-05-28 ML-M1 doc-fix).
+    # Hyperparameters diverge from LightGBM intentionally: sklearn GBR has no
+    # built-in early_stopping_rounds equivalent at the cost-function level, so
+    # n_estimators is held to 500 (vs LightGBM's 650 with early stop) and
+    # max_depth=4 (vs 8) compensates by reducing per-tree overfit risk. Huber
+    # loss at alpha=0.85 mirrors LightGBM's "regression" objective robustness
+    # against forecast-residual outliers. Backend selection + reason is
+    # surfaced via /api/forecast/engine-health (`ml_backend_type`,
+    # `ml_backend_detail`) — operators can verify which backend is active.
     return GradientBoostingRegressor(
         n_estimators=int(n_estimators or 500),
         learning_rate=0.025,
@@ -7870,11 +7929,53 @@ def build_weather_error_profiles(history_days: list[dict]) -> dict:
     }
 
 
+def _detect_regime_transition(history_days: list[dict], target_regime: str, lookback_days: int = 14) -> bool:
+    """
+    Detect if a weather regime transition is occurring (e.g., dry→monsoon, clear→overcast).
+
+    A transition is detected when the target regime is present but sparse in recent
+    history (below standard min_days) AND emerging (more recent than older), suggesting
+    a regime change in progress rather than an established or absent pattern.
+
+    Args:
+        history_days: List of historical sample dicts with 'day_regime' field
+        target_regime: The regime we're trying to train
+        lookback_days: Days of history to examine for recent activity
+
+    Returns:
+        True if regime transition is likely (sparse + emerging target in recent history)
+    """
+    if not target_regime or not history_days:
+        return False
+
+    # Count recent occurrences (most recent N days)
+    recent_samples = history_days[-lookback_days:] if len(history_days) > lookback_days else history_days
+    older_samples = history_days[:-lookback_days] if len(history_days) > lookback_days else []
+
+    recent_target_count = sum(1 for s in recent_samples if s and str(s.get("day_regime") or "") == str(target_regime))
+    older_target_count = sum(1 for s in older_samples if s and str(s.get("day_regime") or "") == str(target_regime))
+
+    # Transition is detected if:
+    # 1. Target regime is sparse in recent history (below standard minimum)
+    # 2. AND regime is emerging (more prevalent recently than historically)
+    is_sparse = recent_target_count < REGIME_MODEL_MIN_DAYS
+    is_emerging = recent_target_count > 0 and recent_target_count > older_target_count
+
+    return is_sparse and is_emerging
+
+
 def build_training_state(today: date) -> dict | None:
     """Build the in-memory model/artifact state for a given training cut-off date."""
     global EST_ACTUAL_WEIGHT_EFFECTIVE
     # P4: Compute dynamic EST_ACTUAL_WEIGHT based on Solcast accuracy vs metered
-    EST_ACTUAL_WEIGHT_EFFECTIVE = compute_solcast_accuracy_vs_metered(lookback_days=30)
+    # Operator override (option A): `forecastEstActualWeight`, when set, takes
+    # manual precedence over the dynamic estimate; unset = unchanged dynamic path.
+    _est_override = _setting_float_or_none("forecastEstActualWeight", 0.50, 1.00)
+    if _est_override is not None:
+        EST_ACTUAL_WEIGHT_EFFECTIVE = _est_override
+        log.info("EST_ACTUAL_WEIGHT override active: %.3f (forecastEstActualWeight)", _est_override)
+    else:
+        EST_ACTUAL_WEIGHT_EFFECTIVE = compute_solcast_accuracy_vs_metered(lookback_days=30)
 
     solcast_reliability = build_solcast_reliability_artifact(today)
     history_days = collect_history_days(
@@ -7965,8 +8066,20 @@ def build_training_state(today: date) -> dict | None:
 
     for regime in sorted({str(sample.get("day_regime") or "") for sample in history_days if sample.get("day_regime")}):
         regime_days = sum(1 for sample in history_days if str(sample.get("day_regime") or "") == regime)
-        if regime_days < REGIME_MODEL_MIN_DAYS:
+        # ML-Me3 fix: detect regime transitions and allow relaxed threshold
+        is_transition = _detect_regime_transition(history_days, regime, lookback_days=14)
+        min_threshold = REGIME_MODEL_MIN_DAYS_TRANSITION if is_transition else REGIME_MODEL_MIN_DAYS
+        if regime_days < min_threshold:
+            log.debug(
+                "Insufficient samples for regime=%s (%d/%d days) — rejecting regime model (transition=%s)",
+                regime, regime_days, min_threshold, is_transition
+            )
             continue
+        if is_transition:
+            log.info(
+                "Regime transition detected for %s — using relaxed threshold (%d days instead of %d)",
+                regime, REGIME_MODEL_MIN_DAYS_TRANSITION, REGIME_MODEL_MIN_DAYS
+            )
         X_reg, y_reg, w_reg, reg_class_scale, reg_day_keys = collect_training_data_hardened(
             today,
             history_days,
@@ -8146,22 +8259,38 @@ def _align_bundle_features(
             # quality is measurably worse than a freshly-trained model.  The
             # fallback stays functional so the upgrade path is not broken,
             # but the WARN surfaces the "retrain needed" signal clearly.
-            global _legacy_model_truncate_notified  # guard init'd at module scope
-            if not _legacy_model_truncate_notified:
-                log.warning(
-                    "Legacy model detected: truncating features %d -> %d (dropping newest columns, "
-                    "including tri-band Solcast signals if v2.5.0+).  Forecast quality is degraded "
-                    "until the model is retrained on the current feature set.  "
-                    "Run a full training cycle to regenerate.",
-                    int(X_pred.shape[1]), expected_count,
+            #
+            # ML-Mi5 fix: wrap truncation in try/except so mid-operation failure
+            # leaves prior state intact (atomic operation).
+            try:
+                # Build truncated state in temp variable first
+                X_truncated = X_pred.iloc[:, :expected_count]
+
+                # Emit appropriate log message (guarded to prevent spam)
+                global _legacy_model_truncate_notified  # guard init'd at module scope
+                if not _legacy_model_truncate_notified:
+                    log.warning(
+                        "Legacy model detected: truncating features %d -> %d (dropping newest columns, "
+                        "including tri-band Solcast signals if v2.5.0+).  Forecast quality is degraded "
+                        "until the model is retrained on the current feature set.  "
+                        "Run a full training cycle to regenerate.",
+                        int(X_pred.shape[1]), expected_count,
+                    )
+                    _legacy_model_truncate_notified = True
+                else:
+                    log.info(
+                        "Legacy model alignment: truncating %d -> %d features (dropping newest columns)",
+                        int(X_pred.shape[1]), expected_count,
+                    )
+
+                # Commit the truncated state
+                return X_truncated
+            except Exception as e:
+                log.error(
+                    "Legacy model truncation failed: %s. Returning original feature set as fallback.",
+                    e,
                 )
-                _legacy_model_truncate_notified = True
-            else:
-                log.info(
-                    "Legacy model alignment: truncating %d -> %d features (dropping newest columns)",
-                    int(X_pred.shape[1]), expected_count,
-                )
-            return X_pred.iloc[:, :expected_count]
+                return X_pred
         else:
             raise ValueError(
                 f"Feature count mismatch for model bundle (expected {expected_count}, "
@@ -10194,7 +10323,7 @@ def _write_forecast_run_audit_from_python(
                         prev_id, notes,
                         float(solcast_lo_total_kwh) if solcast_lo_total_kwh is not None else None,
                         float(solcast_hi_total_kwh) if solcast_hi_total_kwh is not None else None,
-                        1,  # baseline_is_solcast_mid: always true in new architecture
+                        1 if bool(solcast_meta.get("used_solcast")) else 0,  # baseline_is_solcast_mid: 0 on physics fallback
                     ),
                 )
                 new_id = cur.lastrowid
@@ -10328,7 +10457,11 @@ def build_intraday_adjusted_forecast(day: date) -> tuple[list[dict] | None, dict
     dayahead_recent_total = float(np.asarray(dayahead, dtype=float)[recent_mask].sum())
     actual_recent_total = float(np.asarray(actual, dtype=float)[recent_mask].sum())
     recent_ratio = float(np.clip(actual_recent_total / max(dayahead_recent_total, 1.0), INTRADAY_RECENT_RATIO_CLIP[0], INTRADAY_RECENT_RATIO_CLIP[1]))
-    strength = float(min(INTRADAY_BLEND_MAX, 0.24 + 0.02 * len(observed_slots)))
+    # Operator override (option A): `forecastIntradayBlendMax` caps how strongly
+    # intraday observed-vs-dayahead corrections are blended in; unset = engine default.
+    _blend_max_ovr = _setting_float_or_none("forecastIntradayBlendMax", 0.0, 1.0)
+    _blend_max = INTRADAY_BLEND_MAX if _blend_max_ovr is None else _blend_max_ovr
+    strength = float(min(_blend_max, 0.24 + 0.02 * len(observed_slots)))
 
     cap_slot = slot_cap_kwh(False)
     for step, slot in enumerate(range(last_observed_slot + 1, SOLAR_END_SLOT)):
@@ -10522,55 +10655,69 @@ def run_dayahead(
         float(bias_meta.get("morning_shift_slots", 0.0)),
     )
 
-    # 2. PHASE 4: Use Solcast mid as baseline (not physics)
-    # Load Solcast snapshot and prior first
+    # 2. Provider baseline selection.
+    #   Primary (PHASE 4): the Solcast snapshot IS the baseline.
+    #   Fallback (2026-05-30): when no usable Solcast snapshot exists, degrade
+    #   gracefully to the self-sufficient physics baseline + ML residual + error
+    #   memory rather than producing no forecast at all — removing the single
+    #   point of failure on Solcast. Audited as forecast_variant='ml_without_solcast'
+    #   (downstream physics-only branch at used_solcast==False already handles this).
+    #   Controlled by `forecastAllowPhysicsFallback` (default on).
     solcast_snapshot = load_solcast_snapshot(target_s)
-    if solcast_snapshot is None:
-        log.error("Day-ahead requires Solcast snapshot - none available for %s", target_s)
-        return False if persist else None
-    forecast_kwh = solcast_snapshot.get("forecast_kwh")
-    if forecast_kwh is None or (isinstance(forecast_kwh, (list, np.ndarray)) and len(forecast_kwh) == 0):
-        log.error("Day-ahead requires Solcast forecast data - none available for %s", target_s)
-        return False if persist else None
+    solcast_prior = None
+    if solcast_snapshot is not None:
+        _sc_fc = solcast_snapshot.get("forecast_kwh")
+        if _sc_fc is None or (isinstance(_sc_fc, (list, np.ndarray)) and len(_sc_fc) == 0):
+            log.warning("Solcast snapshot for %s has no forecast data - treating as missing", target_s)
+            solcast_snapshot = None
 
-    if runtime_state is not None and "solcast_reliability" in runtime_state:
-        solcast_reliability = runtime_state.get("solcast_reliability")
+    if solcast_snapshot is not None:
+        if runtime_state is not None and "solcast_reliability" in runtime_state:
+            solcast_reliability = runtime_state.get("solcast_reliability")
+        else:
+            solcast_reliability = load_solcast_reliability_artifact(today, allow_build=True)
+        solcast_prior = solcast_prior_from_snapshot(target_s, w5, solcast_snapshot, solcast_reliability)
+        if solcast_prior is not None:
+            _pk = np.asarray(solcast_prior.get("prior_kwh", []), dtype=float)
+            if _pk.size != SLOTS_DAY:
+                log.warning("Solcast prior invalid for %s (size %d != %d) - treating as missing",
+                            target_s, _pk.size, SLOTS_DAY)
+                solcast_prior = None
     else:
-        solcast_reliability = load_solcast_reliability_artifact(today, allow_build=True)
+        solcast_reliability = None
 
-    solcast_prior = solcast_prior_from_snapshot(target_s, w5, solcast_snapshot, solcast_reliability)
-    if solcast_prior is None:
-        log.error("Solcast prior failed to load for %s", target_s)
-        return False if persist else None
-    prior_kwh = solcast_prior.get("prior_kwh")
-    if prior_kwh is None:
-        log.error("Solcast prior missing 'prior_kwh' for %s", target_s)
-        return False if persist else None
-
-    # PHASE 4: Extract Solcast mid as primary baseline
-    solcast_mid_kwh = np.asarray(solcast_prior.get("prior_kwh", []), dtype=float)
-    if solcast_mid_kwh.size != SLOTS_DAY:
-        log.error("Solcast snapshot has invalid size: got %d, expected %d", solcast_mid_kwh.size, SLOTS_DAY)
-        return False if persist else None
-
-    # Use Solcast mid as the baseline (not physics)
-    baseline = solcast_mid_kwh.copy()
-    hybrid_baseline = baseline.copy()
-
-    # Build solcast_meta. Physics baseline is still required by
-    # blend_physics_with_solcast to compute raw_prior_ratio / applied_prior_ratio
-    # (logged below) and to produce the normalized hybrid_baseline that gets
-    # persisted to forecast_error_compare_slot for audit/QA. The Phase 4
-    # "Solcast as 100% baseline" decision is enforced by overriding
-    # solcast_meta.mean_blend below — the physics call itself is not dead.
+    # Physics baseline is always computed: it anchors the fallback path and, on the
+    # primary path, normalizes Solcast's daily total inside blend_physics_with_solcast.
     physics_baseline_arr = physics_baseline(target_s, w5)
-    hybrid_baseline, solcast_meta = blend_physics_with_solcast(physics_baseline_arr, solcast_prior)
-    # Override to indicate Solcast is 100% of baseline now
-    solcast_meta = {
-        **solcast_meta,
-        "used_solcast": True,
-        "mean_blend": 1.0,  # Solcast is 100% of baseline
-    }
+
+    if solcast_prior is not None:
+        # ---- Solcast-primary path (PHASE 4): Solcast mid IS the baseline ----
+        solcast_mid_kwh = np.asarray(solcast_prior.get("prior_kwh"), dtype=float)
+        baseline = solcast_mid_kwh.copy()
+        hybrid_baseline, solcast_meta = blend_physics_with_solcast(physics_baseline_arr, solcast_prior)
+        solcast_meta = {
+            **solcast_meta,
+            "used_solcast": True,
+            "mean_blend": 1.0,   # Solcast is 100% of baseline
+            "primary_mode": True,
+        }
+    else:
+        # ---- Physics fallback path: graceful degradation when Solcast absent ----
+        if not _setting_bool_or_default("forecastAllowPhysicsFallback", True):
+            log.error(
+                "Day-ahead requires Solcast snapshot - none usable for %s and physics "
+                "fallback is disabled (forecastAllowPhysicsFallback=0).", target_s,
+            )
+            return False if persist else None
+        log.warning(
+            "Day-ahead PHYSICS FALLBACK for %s - no usable Solcast snapshot; generating "
+            "from physics baseline + ML residual + error memory (variant=ml_without_solcast).",
+            target_s,
+        )
+        solcast_mid_kwh = physics_baseline_arr.copy()
+        baseline = physics_baseline_arr.copy()
+        # blend_physics_with_solcast(physics, None) -> physics passthrough, used_solcast=False.
+        hybrid_baseline, solcast_meta = blend_physics_with_solcast(physics_baseline_arr, None)
     if runtime_state is not None and "forecast_artifacts" in runtime_state:
         artifacts = runtime_state.get("forecast_artifacts")
     else:
@@ -11105,9 +11252,12 @@ def run_dayahead(
             "activity_meta": activity_meta,
             "staging_meta": staging_meta,
             "baseline_total_kwh": float(baseline.sum()),  # PHASE 4: Now Solcast mid total
-            "solcast_lo_total_kwh": float(np.asarray(solcast_snapshot.get("forecast_lo_kwh", []), dtype=float).sum()),  # PHASE 4: NEW
-            "solcast_hi_total_kwh": float(np.asarray(solcast_snapshot.get("forecast_hi_kwh", []), dtype=float).sum()),  # PHASE 4: NEW
-            "baseline_is_solcast_mid": True,  # PHASE 4: NEW - flag new architecture
+            # NB: solcast_snapshot is None on the physics-fallback path — guard each
+            # access (mirrors the persist-path audit writer at ~11387). Provenance flag
+            # reflects the actual baseline used, not a hardcoded assumption.
+            "solcast_lo_total_kwh": float(np.asarray(solcast_snapshot.get("forecast_lo_kwh", []), dtype=float).sum()) if solcast_snapshot else None,  # PHASE 4: NEW
+            "solcast_hi_total_kwh": float(np.asarray(solcast_snapshot.get("forecast_hi_kwh", []), dtype=float).sum()) if solcast_snapshot else None,  # PHASE 4: NEW
+            "baseline_is_solcast_mid": bool(solcast_meta.get("used_solcast")),  # PHASE 4: NEW - flag new architecture
             "forecast_total_kwh": float(forecast.sum()),
             "ml_residual_total_kwh": float(ml_residual.sum()),
             "ml_total_kwh": float(ml_residual.sum()),
@@ -11651,6 +11801,60 @@ def _read_setting_value(key: str) -> str | None:
         return None
     value = str(row[0]).strip()
     return value or None
+
+
+# Operator-tunable forecast knobs (option A, 2026-05-30). Read FRESH from the
+# settings table (NOT via the process-cached _read_setting_value) so a change
+# takes effect on the next forecast cycle without restarting the service. Each
+# returns None when unset/blank/invalid — callers then keep the engine default,
+# guaranteeing identical behavior until the operator opts in.
+def _setting_float_or_none(key: str, lo: float, hi: float) -> float | None:
+    try:
+        if not APP_DB_FILE.exists():
+            return None
+        with _open_sqlite(APP_DB_FILE, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
+            row = conn.execute(
+                "SELECT value FROM settings WHERE key = ? LIMIT 1", (str(key),)
+            ).fetchone()
+    except Exception:
+        return None
+    if not row or row[0] is None:
+        return None
+    raw = str(row[0]).strip()
+    if not raw:
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        log.warning("Invalid forecast tunable %s=%r - ignoring (using engine default)", key, raw)
+        return None
+    if not np.isfinite(val):
+        return None
+    return float(np.clip(val, lo, hi))
+
+
+def _setting_bool_or_default(key: str, default: bool) -> bool:
+    """Read a boolean forecast tunable fresh from the settings table.
+
+    Returns ``default`` when unset/blank/unreadable. Truthy: 1/true/yes/on;
+    falsy: 0/false/no/off (case-insensitive); anything else -> ``default``."""
+    try:
+        if not APP_DB_FILE.exists():
+            return default
+        with _open_sqlite(APP_DB_FILE, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
+            row = conn.execute(
+                "SELECT value FROM settings WHERE key = ? LIMIT 1", (str(key),)
+            ).fetchone()
+    except Exception:
+        return default
+    if not row or row[0] is None:
+        return default
+    raw = str(row[0]).strip().lower()
+    if raw in ('1', 'true', 'yes', 'on'):
+        return True
+    if raw in ('0', 'false', 'no', 'off'):
+        return False
+    return default
 
 
 @lru_cache(maxsize=1)

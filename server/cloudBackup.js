@@ -33,10 +33,30 @@ const APP_VERSION = require("../package.json").version;
 const { resolvedBackupDir, resolvedBackupHistoryFile, resolvedLicenseDir, getNewRoot } = require("./storagePaths");
 const DB_SCHEMA_VERSION = "2";
 
+// BR-Mi3 (audit 2026-05-28 §3) — package layout version, independent of the
+// DB schema version and the app version. Bumped only when the on-disk backup
+// package structure changes in a way an older app cannot read. A backup whose
+// format is newer than this app understands is refused on restore.
+const BACKUP_FORMAT_VERSION = 1;
+
 // Limit how many local backup packages to keep.
 const MAX_LOCAL_PACKAGES = 20;
 const S3_DEDUPE_LAYOUT = "chunked-v1";
 const S3_DEDUPE_CHUNK_BYTES = 8 * 1024 * 1024;
+
+// BR-M1 (audit 2026-05-28 §3) — inline retry-with-backoff for transient cloud
+// upload failures (429 / 5xx / connection resets / DNS / timeouts). This is a
+// fast same-cycle retry; the slower 5-minute deferred queue (_scheduleRetry)
+// remains as the outer fallback once these attempts are exhausted.
+const UPLOAD_RETRY_MAX = 3;
+const UPLOAD_RETRY_BASE_MS = 1000;
+const UPLOAD_RETRY_CAP_MS = 30000;
+
+// BR-M2 (audit 2026-05-28 §3) — observability watchdog ceiling for a single
+// mutex-held op. With every cloud request now timeout-bounded (BR-M3) an op
+// can no longer hang the queue forever, so this is a loud warning, not a
+// forced abort (force-aborting mid-flight would break the serial guarantee).
+const BACKUP_OP_WATCHDOG_MS = 10 * 60 * 1000;
 
 function sha256File(filePath) {
   // v2.8.14 hotfix: original implementation used fs.readFileSync, which
@@ -211,14 +231,35 @@ class CloudBackupService {
    * re-enter this helper — they would deadlock.
    */
   async _withBackupMutex(label, fn) {
+    // The mutex is a promise-chain: each caller awaits the previous (success OR
+    // failure — note the `() => next, () => next` two-arm `.then`) before
+    // running, then resolves `next` in its own `finally` so the next caller
+    // proceeds. This guarantees strict serialisation with NO starvation —
+    // every queued op eventually runs. It is NOT a deadlock setup (BR-D2).
     const prev = this._backupOpChain;
     let release;
     const next = new Promise((resolve) => { release = resolve; });
     this._backupOpChain = prev.then(() => next, () => next);
+    let watchdog = null;
+    const startedAt = Date.now();
     try {
       await prev.catch(() => {});
+      // BR-M2 watchdog — see BACKUP_OP_WATCHDOG_MS note. Warn (don't abort) so
+      // a genuinely stuck op is visible rather than silent. unref() so it
+      // never holds the process open.
+      watchdog = setTimeout(() => {
+        const secs = Math.round((Date.now() - startedAt) / 1000);
+        const msg = `[CloudBackup] mutex op "${label}" still running after ${secs}s ` +
+          `(watchdog ${Math.round(BACKUP_OP_WATCHDOG_MS / 1000)}s) — possible stuck upload/restore`;
+        console.warn(msg);
+        // Diagnostic only — do NOT record a health-registry failure here; the
+        // op may still complete successfully. Surfaced via getProgress().
+        this._lastSlowOp = { label, runningSecs: secs, at: Date.now() };
+      }, BACKUP_OP_WATCHDOG_MS);
+      if (watchdog.unref) watchdog.unref();
       return await fn();
     } finally {
+      if (watchdog) clearTimeout(watchdog);
       release();
     }
   }
@@ -755,6 +796,17 @@ class CloudBackupService {
     if (scope.includes("database")) {
       const dbDest = path.join(dir, "adsi.db");
       this._setProgress({ pct: 15, message: "Backing up database…" });
+      // BR-Mi1 (audit 2026-05-28 §3) — `db.backup()` is SQLite's online-backup
+      // API: it produces a transactionally-consistent snapshot that already
+      // includes WAL-resident pages, so the package needs no separate
+      // -wal/-shm files. We still fold the WAL back into the main file first
+      // (best-effort PASSIVE checkpoint — non-blocking, never waits on readers)
+      // so the snapshot is as compact and current as possible.
+      try {
+        this.db.pragma("wal_checkpoint(PASSIVE)");
+      } catch (err) {
+        console.warn("[CloudBackup] pre-backup WAL checkpoint skipped:", err.message);
+      }
       await this.db.backup(dbDest);
       checksums["adsi.db"] = sha256File(dbDest);
       files.push({ name: "adsi.db", size: fs.statSync(dbDest).size });
@@ -887,6 +939,7 @@ class CloudBackupService {
       id,
       appVersion: APP_VERSION,
       schemaVersion: DB_SCHEMA_VERSION,
+      backupFormatVersion: BACKUP_FORMAT_VERSION, // BR-Mi3 — package-layout version
       createdAt: new Date().toISOString(),
       scope,
       tag: opts.tag || "manual",
@@ -984,6 +1037,7 @@ class CloudBackupService {
 
     const errors = [];
     let uploadedCount = 0;
+    let retryTotal = 0;
 
     for (const provider of providers) {
       const adapter = this._getProviderAdapter(provider);
@@ -998,33 +1052,42 @@ class CloudBackupService {
         provider,
       });
       try {
-        const cloudFiles = {};
-        if (provider === "s3") {
-          Object.assign(
-            cloudFiles,
-            await this._uploadS3DeduplicatedBackup(dir, backupId, manifest, adapter),
-          );
-        } else {
-          const allFiles = listFilesRecursive(dir);
-          if (!allFiles.length) {
-            throw new Error("No files found in backup package");
-          }
-
-          for (let i = 0; i < allFiles.length; i++) {
-            const fname = allFiles[i];
-            const localPath = path.join(dir, ...fname.split("/"));
-            const remoteName = `${backupId}/${fname}`;
-            const result = await adapter.uploadFile(
-              localPath,
-              remoteName,
-              (pct) => {
-                const overall = 75 + Math.round(((i + pct / 100) / allFiles.length) * 20);
-                this._setProgress({ pct: Math.min(overall, 95) });
-              },
+        // BR-M1 — wrap the whole provider upload in retry-with-backoff so a
+        // single transient failure (429 / 5xx / reset / DNS / timeout) does not
+        // burn the entire backup cycle. Re-running re-uploads all files; every
+        // provider uses replace/overwrite semantics so this is idempotent.
+        const cloudFiles = await this._retryWithBackoff(`upload→${provider}`, async () => {
+          const out = {};
+          if (provider === "s3") {
+            Object.assign(
+              out,
+              await this._uploadS3DeduplicatedBackup(dir, backupId, manifest, adapter),
             );
-            cloudFiles[fname] = result;
+          } else {
+            const allFiles = listFilesRecursive(dir);
+            if (!allFiles.length) {
+              throw new Error("No files found in backup package");
+            }
+            for (let i = 0; i < allFiles.length; i++) {
+              const fname = allFiles[i];
+              const localPath = path.join(dir, ...fname.split("/"));
+              const remoteName = `${backupId}/${fname}`;
+              const result = await adapter.uploadFile(
+                localPath,
+                remoteName,
+                (pct) => {
+                  const overall = 75 + Math.round(((i + pct / 100) / allFiles.length) * 20);
+                  this._setProgress({ pct: Math.min(overall, 95) });
+                },
+              );
+              out[fname] = result;
+            }
           }
+          return out;
+        });
+        retryTotal += this._lastRetryCount || 0;
 
+        if (provider !== "s3") {
           // Update manifest cloud metadata in the local package.
           manifest.cloud[provider] = {
             uploadedAt: new Date().toISOString(),
@@ -1055,7 +1118,60 @@ class CloudBackupService {
     if (uploadedCount === 0 && errors.length > 0) {
       throw new Error(`All uploads failed: ${errors.join("; ")}`);
     }
-    return { uploaded: uploadedCount, errors };
+    return { uploaded: uploadedCount, errors, retries: retryTotal };
+  }
+
+  /**
+   * BR-M1 — classify whether an upload error is worth a fast retry. Transient
+   * = rate-limit, server-side 5xx, or a recoverable network condition. A 4xx
+   * auth/permission error (other than 429) is NOT retried — it would just fail
+   * again identically.
+   */
+  _isTransientUploadError(err) {
+    if (!err) return false;
+    const code = String(err.code || err.errno || "").toUpperCase();
+    if (["ECONNRESET", "ETIMEDOUT", "ECONNREFUSED", "EAI_AGAIN", "EPIPE", "ENOTFOUND", "ENETUNREACH", "ABORT_ERR"].includes(code)) {
+      return true;
+    }
+    if (err.name === "AbortError" || err.type === "request-timeout") return true;
+    // HTTP status surfaced either as err.status / err.statusCode or in the message.
+    const status = Number(err.status || err.statusCode || 0);
+    if (status === 429 || (status >= 500 && status <= 599)) return true;
+    const msg = String(err.message || "");
+    if (/\b(429|500|502|503|504)\b/.test(msg)) return true;
+    if (/timeout|timed out|socket hang up|network|temporarily unavailable|throttl/i.test(msg)) return true;
+    return false;
+  }
+
+  /**
+   * BR-M1 — run `fn` with exponential-backoff retry on transient failure.
+   * Records the number of retries it took on `this._lastRetryCount` so the
+   * caller can fold it into a single health-registry record (avoids
+   * double-counting attempts). Non-transient errors throw immediately.
+   */
+  async _retryWithBackoff(label, fn) {
+    this._lastRetryCount = 0;
+    let attempt = 0;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      try {
+        return await fn();
+      } catch (err) {
+        attempt++;
+        if (attempt > UPLOAD_RETRY_MAX || !this._isTransientUploadError(err)) {
+          throw err;
+        }
+        this._lastRetryCount = attempt;
+        // Exponential backoff with full jitter, capped.
+        const base = Math.min(UPLOAD_RETRY_CAP_MS, UPLOAD_RETRY_BASE_MS * 2 ** (attempt - 1));
+        const delay = Math.round(Math.random() * base);
+        console.warn(
+          `[CloudBackup] ${label} transient failure (attempt ${attempt}/${UPLOAD_RETRY_MAX}): ` +
+            `${err.message}; retrying in ${delay}ms`,
+        );
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
   }
 
   // ─── Full Backup Workflow ──────────────────────────────────────────────────
@@ -1110,6 +1226,7 @@ class CloudBackupService {
           destination: uploadProviders.join(","),
           sizeBytes: manifest?.totalSize || null,
           durationMs: Date.now() - startedAt,
+          retries: result.retries || 0, // BR-M1 — transient-retry count this cycle
         });
         return { id, manifest, uploaded: result.uploaded, errors: result.errors };
       } else {
@@ -1800,6 +1917,15 @@ class CloudBackupService {
   }
 
   _checkCompatibility(manifest) {
+    // BR-Mi3 — package-layout gate. Older backups predate the field (treated as
+    // format 1). A newer-format package cannot be safely read by this build.
+    const fmt = Number(manifest.backupFormatVersion || 1);
+    if (Number.isFinite(fmt) && fmt > BACKUP_FORMAT_VERSION) {
+      throw new Error(
+        `Backup package format (v${fmt}) is newer than this app supports ` +
+          `(v${BACKUP_FORMAT_VERSION}). Update the app before restoring.`,
+      );
+    }
     const schema = String(manifest.schemaVersion || "1");
     const currentSchema = DB_SCHEMA_VERSION;
     if (Number(schema) > Number(currentSchema)) {

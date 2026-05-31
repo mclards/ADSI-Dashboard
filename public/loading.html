@@ -1,23 +1,57 @@
 <!doctype html>
-<html>
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ADSI Inverter Dashboard</title>
     <link rel="icon" type="image/png" href="../assets/icon-256.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <script>
+      // Mirror login.html: honor the saved theme so the login → loading hand-off
+      // stays seamless instead of snapping from light back to dark.
+      (function () {
+        try {
+          const theme = localStorage.getItem("adsi_theme") === "light" ? "light" : "dark";
+          document.documentElement.setAttribute("data-theme", theme);
+        } catch (_) {
+          document.documentElement.setAttribute("data-theme", "dark");
+        }
+      })();
+    </script>
     <style>
+      /* Palette mirrors login.html so the login → loading hand-off is seamless. */
       :root {
-        --bg-top: #07111e;
-        --bg-bottom: #040814;
-        --panel: rgba(7, 17, 32, 0.86);
-        --panel-border: rgba(120, 164, 255, 0.16);
-        --text: #ebf3ff;
-        --muted: #8ea6ca;
-        --accent: #4da3ff;
-        --accent-2: #ffd34d;
-        --ok: #31cb88;
-        --error-bg: rgba(156, 32, 55, 0.18);
-        --error-border: rgba(255, 102, 132, 0.35);
+        --bg: #050c17;
+        --bg2: #080f1c;
+        --surface: #0c1526;
+        --border: #182a48;
+        --border2: #243d66;
+        --text: #dce8fa;
+        --text2: #8aa3cc;
+        --text3: #526a92;
+        --accent: #2d7ef7;
+        --accent2: #1a60d0;
+        --green: #10b370;
+        --red: #e03560;
+      }
+
+      :root[data-theme="light"] {
+        --bg: #e8dfcf;
+        --bg2: #ded4c2;
+        --surface: #f1e8d8;
+        --border: #b9ab96;
+        --border2: #a8967f;
+        --text: #2f271a;
+        --text2: #524533;
+        --text3: #7b6a54;
+        --accent: #2b67ad;
+        --accent2: #1f4f89;
+        --green: #0f8f5b;
+        --red: #ba3555;
       }
 
       * {
@@ -28,153 +62,140 @@
 
       html,
       body {
-        min-height: 100%;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
       }
 
       body {
-        overflow: hidden;
-        font-family: "Segoe UI", "Segoe UI Variable", sans-serif;
+        font-family: "Sora", "Segoe UI", sans-serif;
         color: var(--text);
-        background:
-          radial-gradient(circle at top, rgba(77, 163, 255, 0.18), transparent 34%),
-          radial-gradient(circle at 18% 82%, rgba(255, 211, 77, 0.12), transparent 28%),
-          linear-gradient(180deg, var(--bg-top), var(--bg-bottom));
-      }
-
-      .shell {
-        position: relative;
-        display: grid;
-        place-items: center;
-        min-height: 100vh;
+        background: var(--bg);
+        display: flex;
+        align-items: center;
+        justify-content: center;
         padding: 24px;
       }
 
-      .shell::before,
-      .shell::after {
+      /* Faint grid + corner glows — identical treatment to login.html. */
+      body::before {
         content: "";
-        position: absolute;
-        border-radius: 999px;
+        position: fixed;
+        inset: 0;
         pointer-events: none;
-        filter: blur(10px);
+        background-image:
+          linear-gradient(rgba(45, 126, 247, 0.03) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(45, 126, 247, 0.03) 1px, transparent 1px);
+        background-size: 32px 32px;
       }
 
-      .shell::before {
-        width: 210px;
-        height: 210px;
-        top: 34px;
-        right: -42px;
-        background: rgba(77, 163, 255, 0.12);
+      body::after {
+        content: "";
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        background:
+          radial-gradient(ellipse 60% 40% at 15% -10%, rgba(45, 126, 247, 0.1) 0%, transparent 60%),
+          radial-gradient(ellipse 50% 35% at 90% -5%, rgba(16, 179, 112, 0.06) 0%, transparent 55%);
       }
 
-      .shell::after {
-        width: 180px;
-        height: 180px;
-        left: -36px;
-        bottom: 18px;
-        background: rgba(255, 211, 77, 0.08);
+      :root[data-theme="light"] body::before {
+        background-image:
+          linear-gradient(rgba(126, 106, 78, 0.14) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(126, 106, 78, 0.14) 1px, transparent 1px);
       }
 
+      :root[data-theme="light"] body::after {
+        background:
+          radial-gradient(ellipse 60% 40% at 15% -10%, rgba(178, 144, 86, 0.18) 0%, transparent 60%),
+          radial-gradient(ellipse 50% 35% at 90% -5%, rgba(138, 118, 87, 0.11) 0%, transparent 55%);
+      }
+
+      /* ── Card ──────────────────────────────────────────────────────────── */
       .card {
         position: relative;
-        width: min(100%, 560px);
-        padding: 28px 30px 24px;
-        border: 1px solid var(--panel-border);
-        border-radius: 22px;
+        z-index: 1;
+        width: min(100%, 480px);
+        padding: 30px 34px 26px;
+        border: 1px solid var(--border);
+        border-radius: 20px;
         background:
-          linear-gradient(180deg, rgba(10, 22, 42, 0.96), rgba(6, 12, 24, 0.96));
+          linear-gradient(180deg, color-mix(in srgb, var(--accent) 5%, transparent) 0%, transparent 40%),
+          linear-gradient(160deg, var(--surface) 0%, var(--bg2) 100%);
         box-shadow:
-          0 26px 70px rgba(0, 0, 0, 0.45),
-          inset 0 1px 0 rgba(255, 255, 255, 0.05);
+          0 20px 48px rgba(0, 0, 0, 0.44),
+          0 2px 8px rgba(0, 0, 0, 0.2),
+          inset 0 1px 0 rgba(148, 179, 230, 0.1);
         overflow: hidden;
+        animation: cardIn 0.42s cubic-bezier(0.22, 0.61, 0.36, 1) both;
       }
 
       .card::before {
         content: "";
         position: absolute;
-        inset: 0;
-        background:
-          linear-gradient(135deg, rgba(77, 163, 255, 0.06), transparent 34%),
-          linear-gradient(315deg, rgba(255, 211, 77, 0.06), transparent 26%);
+        inset: 0 0 auto 0;
+        height: 2px;
+        background: linear-gradient(90deg, transparent 5%, var(--accent) 50%, transparent 95%);
+        opacity: 0.5;
         pointer-events: none;
       }
 
+      @keyframes cardIn {
+        from {
+          opacity: 0;
+          transform: translateY(10px) scale(0.985);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0) scale(1);
+        }
+      }
+
+      /* ── Brand ─────────────────────────────────────────────────────────── */
       .brand {
-        position: relative;
         display: flex;
         flex-direction: column;
         align-items: center;
         text-align: center;
-        z-index: 1;
+        margin-bottom: 22px;
       }
 
       .icon-ring {
         position: relative;
-        width: 90px;
-        height: 90px;
         display: grid;
         place-items: center;
-        margin-bottom: 14px;
+        width: 78px;
+        height: 78px;
+        margin-bottom: 12px;
       }
 
       .icon-ring::before {
         content: "";
         position: absolute;
-        inset: 4px;
+        width: 78px;
+        height: 78px;
         border-radius: 50%;
-        background:
-          radial-gradient(circle at center, rgba(77, 163, 255, 0.24), transparent 62%);
-        filter: blur(3px);
-      }
-
-      .icon-ring::after {
-        content: "";
-        position: absolute;
-        inset: 0;
-        border-radius: 50%;
-        border: 1px solid rgba(77, 163, 255, 0.18);
-        box-shadow:
-          0 0 22px rgba(77, 163, 255, 0.12),
-          inset 0 0 18px rgba(255, 211, 77, 0.08);
+        background: radial-gradient(circle, color-mix(in srgb, var(--accent) 20%, transparent) 0%, transparent 70%);
+        pointer-events: none;
       }
 
       .app-icon {
         position: relative;
-        width: 62px;
-        height: 62px;
+        width: 56px;
+        height: 56px;
         object-fit: contain;
-        filter: drop-shadow(0 10px 16px rgba(0, 0, 0, 0.35));
-      }
-
-      .eyebrow {
-        font-size: 11px;
-        font-weight: 700;
-        letter-spacing: 0.18em;
-        text-transform: uppercase;
-        color: var(--accent-2);
+        filter: drop-shadow(0 2px 8px rgba(45, 126, 247, 0.22));
       }
 
       .title {
-        margin-top: 8px;
-        font-size: 31px;
+        font-size: 17px;
         font-weight: 800;
-        line-height: 1.08;
-        letter-spacing: 0.01em;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--text);
       }
 
-      .sub {
-        max-width: 390px;
-        margin-top: 10px;
-        font-size: 13px;
-        line-height: 1.5;
-        color: var(--muted);
-      }
-
-      .status-row {
-        position: relative;
-        z-index: 1;
-        margin-top: 24px;
-      }
-
+      /* ── Status line ───────────────────────────────────────────────────── */
       .status-head {
         display: flex;
         justify-content: space-between;
@@ -183,35 +204,64 @@
         margin-bottom: 10px;
       }
 
-      .status-label {
-        font-size: 12px;
-        font-weight: 700;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        color: #c9dcff;
+      .status-current {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        min-width: 0;
       }
 
       .status-text {
         font-size: 13px;
-        color: #dfe9ff;
+        font-weight: 500;
+        color: var(--text);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .status-pct {
+        flex: 0 0 auto;
+        font-size: 12px;
+        font-weight: 700;
+        color: var(--accent);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .spinner {
+        flex: 0 0 auto;
+        display: inline-flex;
+      }
+
+      .spinner-dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: var(--accent);
+        box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 60%, transparent);
+        animation: pulse 1.2s ease-in-out infinite;
+      }
+
+      @keyframes pulse {
+        0%, 100% { transform: scale(0.72); opacity: 0.6; }
+        50% { transform: scale(1.1); opacity: 1; }
       }
 
       .progress {
         position: relative;
-        height: 12px;
+        height: 10px;
         border-radius: 999px;
         overflow: hidden;
-        background: rgba(133, 156, 198, 0.14);
-        box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.3);
+        background: color-mix(in srgb, var(--bg) 60%, var(--surface));
+        box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.35);
       }
 
       .progress-fill {
         width: 0%;
         height: 100%;
         border-radius: inherit;
-        background:
-          linear-gradient(90deg, var(--accent), #79c4ff 55%, var(--accent-2));
-        box-shadow: 0 0 18px rgba(77, 163, 255, 0.22);
+        background: linear-gradient(90deg, var(--accent2), var(--accent) 70%, var(--green));
+        box-shadow: 0 0 16px color-mix(in srgb, var(--accent) 30%, transparent);
         transition: width 0.35s ease;
       }
 
@@ -219,71 +269,36 @@
         content: "";
         position: absolute;
         inset: 0;
-        background:
-          linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
+        background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.28), transparent);
         animation: sheen 1.8s linear infinite;
       }
 
       @keyframes sheen {
-        from {
-          transform: translateX(-100%);
-        }
-        to {
-          transform: translateX(100%);
-        }
+        from { transform: translateX(-100%); }
+        to { transform: translateX(100%); }
       }
 
-      .spinner {
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
-        margin-top: 14px;
-        color: #b9cff2;
-        font-size: 12px;
-      }
-
-      .spinner-dot {
-        width: 10px;
-        height: 10px;
-        border-radius: 50%;
-        background: var(--accent-2);
-        box-shadow: 0 0 14px rgba(255, 211, 77, 0.42);
-        animation: pulse 1.2s ease-in-out infinite;
-      }
-
-      @keyframes pulse {
-        0%,
-        100% {
-          transform: scale(0.82);
-          opacity: 0.72;
-        }
-        50% {
-          transform: scale(1.18);
-          opacity: 1;
-        }
-      }
-
+      /* ── Steps ─────────────────────────────────────────────────────────── */
       .steps {
-        position: relative;
-        z-index: 1;
-        margin-top: 20px;
-        padding: 14px;
-        border-radius: 16px;
-        background: rgba(255, 255, 255, 0.03);
-        border: 1px solid rgba(134, 156, 198, 0.12);
+        margin-top: 18px;
+        padding: 6px 14px;
+        border-radius: 14px;
+        background: color-mix(in srgb, var(--bg) 55%, transparent);
+        border: 1px solid var(--border);
       }
 
       .step {
         display: flex;
         align-items: center;
-        gap: 12px;
+        gap: 11px;
         padding: 9px 2px;
-        color: var(--muted);
+        color: var(--text3);
         font-size: 12px;
+        transition: color 0.2s ease;
       }
 
       .step + .step {
-        border-top: 1px solid rgba(134, 156, 198, 0.09);
+        border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
       }
 
       .step-bullet {
@@ -293,10 +308,10 @@
         border-radius: 50%;
         display: grid;
         place-items: center;
-        font-size: 11px;
+        font-size: 10.5px;
         font-weight: 700;
-        color: #0a1221;
-        background: rgba(142, 166, 202, 0.32);
+        color: var(--bg);
+        background: var(--text3);
         transition: all 0.2s ease;
       }
 
@@ -305,95 +320,35 @@
       }
 
       .step.active .step-bullet {
-        background: var(--accent-2);
-        box-shadow: 0 0 14px rgba(255, 211, 77, 0.26);
+        background: var(--accent);
+        box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 45%, transparent);
       }
 
       .step.done {
-        color: #cfe9dc;
+        color: var(--text2);
       }
 
       .step.done .step-bullet {
-        color: #08151f;
-        background: var(--ok);
-        box-shadow: 0 0 14px rgba(49, 203, 136, 0.24);
+        background: var(--green);
+        box-shadow: 0 0 12px color-mix(in srgb, var(--green) 40%, transparent);
+        color: transparent;
+        font-size: 0;
       }
 
       .step.done .step-bullet::before {
         content: "✓";
-      }
-
-      .error-panel {
-        display: none;
-        position: relative;
-        z-index: 1;
-        margin-top: 18px;
-        padding: 15px 16px 14px;
-        border-radius: 16px;
-        background: var(--error-bg);
-        border: 1px solid var(--error-border);
-      }
-
-      .error-title {
-        font-size: 13px;
+        color: var(--bg);
+        font-size: 11px;
         font-weight: 800;
-        color: #ffafbf;
       }
 
-      .error-text {
-        margin-top: 8px;
-        color: #ffd8df;
-        font-size: 12px;
-        line-height: 1.5;
-        white-space: pre-wrap;
-      }
-
-      .error-actions {
-        margin-top: 12px;
-        display: flex;
-        justify-content: flex-start;
-      }
-
-      .retry-btn {
-        border: 0;
-        border-radius: 999px;
-        padding: 9px 14px;
-        font-size: 12px;
-        font-weight: 700;
-        color: #08111f;
-        background: linear-gradient(180deg, #ffd874, #ffbf3d);
-        cursor: pointer;
-        box-shadow: 0 8px 22px rgba(255, 191, 61, 0.22);
-      }
-
-      .retry-btn:hover {
-        filter: brightness(1.03);
-      }
-
-      .retry-btn:active {
-        transform: translateY(1px);
-      }
-
-      /* Error-state progress bar */
-      .progress-fill.error {
-        background:
-          linear-gradient(90deg, #ff9f43, #ff6b6b 60%, #ee5a24);
-        box-shadow: 0 0 18px rgba(255, 107, 107, 0.28);
-      }
-
-      .progress-fill.error::after {
-        animation: none;
-        background: none;
-      }
-
-      /* Failed step bullet */
       .step.failed {
-        color: #ffafbf;
+        color: var(--red);
       }
 
       .step.failed .step-bullet {
-        background: #e74c3c;
-        box-shadow: 0 0 14px rgba(231, 76, 60, 0.32);
+        background: var(--red);
+        box-shadow: 0 0 12px color-mix(in srgb, var(--red) 40%, transparent);
         color: transparent;
         font-size: 0;
       }
@@ -401,31 +356,81 @@
       .step.failed .step-bullet::before {
         content: "!";
         color: #fff;
-        font-size: 12px;
+        font-size: 11px;
         font-weight: 800;
       }
 
-      /* Fade-slide-in for error panel */
-      @keyframes fadeSlideIn {
-        from {
-          opacity: 0;
-          transform: translateY(8px);
-        }
-        to {
-          opacity: 1;
-          transform: translateY(0);
-        }
+      /* ── Error + mode panels ───────────────────────────────────────────── */
+      .panel {
+        display: none;
+        margin-top: 16px;
+        padding: 15px 16px 14px;
+        border-radius: 14px;
+        background: color-mix(in srgb, var(--red) 14%, transparent);
+        border: 1px solid color-mix(in srgb, var(--red) 38%, transparent);
       }
 
-      .error-panel.visible {
+      .panel.visible {
         display: block;
-        animation: fadeSlideIn 0.32s ease-out;
+        animation: fadeSlideIn 0.3s ease-out;
       }
 
-      /* Mode picker panel */
+      @keyframes fadeSlideIn {
+        from { opacity: 0; transform: translateY(8px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+
+      .panel-title {
+        font-size: 13px;
+        font-weight: 800;
+        color: var(--red);
+      }
+
+      .panel-text {
+        margin-top: 8px;
+        color: var(--text);
+        font-size: 12px;
+        line-height: 1.5;
+        white-space: pre-wrap;
+      }
+
+      .panel-actions {
+        margin-top: 12px;
+      }
+
+      .btn {
+        border: 1px solid transparent;
+        border-radius: 10px;
+        padding: 9px 16px;
+        font-family: "Sora", "Segoe UI", sans-serif;
+        font-size: 12.5px;
+        font-weight: 700;
+        cursor: pointer;
+        transition: filter 0.14s, transform 0.1s, box-shadow 0.18s, border-color 0.18s;
+      }
+
+      .btn:active {
+        transform: translateY(1px);
+      }
+
+      .btn-primary {
+        color: #fff;
+        background: linear-gradient(135deg, var(--accent2), var(--accent));
+        box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 30%, transparent);
+      }
+
+      .btn-primary:hover {
+        filter: brightness(1.08);
+      }
+
+      /* Mode picker */
       #modePickerPanel {
-        background: rgba(25, 50, 90, 0.22);
-        border-color: rgba(77, 163, 255, 0.28);
+        background: color-mix(in srgb, var(--accent) 10%, transparent);
+        border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+      }
+
+      #modePickerPanel .panel-title {
+        color: var(--accent);
       }
 
       .mode-picker-options {
@@ -439,23 +444,25 @@
         display: flex;
         flex-direction: column;
         align-items: center;
-        gap: 4px;
+        gap: 5px;
         padding: 14px 10px 12px;
-        border: 1px solid rgba(134, 156, 198, 0.18);
-        border-radius: 14px;
-        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid var(--border2);
+        border-radius: 12px;
+        background: color-mix(in srgb, var(--bg) 40%, transparent);
         color: var(--text);
         cursor: pointer;
-        transition: border-color 0.18s, background 0.18s, box-shadow 0.18s;
+        transition: border-color 0.18s, background 0.18s, box-shadow 0.18s, transform 0.1s;
       }
 
       .mode-btn:hover {
-        background: rgba(77, 163, 255, 0.10);
+        background: color-mix(in srgb, var(--accent) 12%, transparent);
         border-color: var(--accent);
-        box-shadow: 0 0 18px rgba(77, 163, 255, 0.12);
+        box-shadow: 0 0 18px color-mix(in srgb, var(--accent) 14%, transparent);
       }
 
-      .mode-btn:active { transform: translateY(1px); }
+      .mode-btn:active {
+        transform: translateY(1px);
+      }
 
       .mode-btn-icon {
         font-size: 22px;
@@ -470,99 +477,87 @@
       .mode-btn-desc {
         font-size: 11px;
         line-height: 1.4;
-        color: var(--muted);
+        color: var(--text2);
         text-align: center;
       }
 
-      .mode-btn-gateway { border-color: rgba(49, 203, 136, 0.22); }
+      .mode-btn-gateway {
+        border-color: color-mix(in srgb, var(--green) 35%, transparent);
+      }
+
       .mode-btn-gateway:hover {
-        background: rgba(49, 203, 136, 0.10);
-        border-color: var(--ok);
-        box-shadow: 0 0 18px rgba(49, 203, 136, 0.14);
+        background: color-mix(in srgb, var(--green) 12%, transparent);
+        border-color: var(--green);
+        box-shadow: 0 0 18px color-mix(in srgb, var(--green) 16%, transparent);
       }
     </style>
   </head>
   <body>
-    <div class="shell">
-      <div class="card">
-        <div class="brand">
-          <div class="icon-ring">
-            <img
-              id="brandIcon"
-              class="app-icon"
-              src="../assets/icon-256.png"
-              alt="ADSI Inverter Dashboard"
-            />
-          </div>
-          <div class="eyebrow">Authorized Workstation</div>
-          <div class="title">ADSI Inverter Dashboard</div>
-          <div class="sub">
-            Preparing monitoring, control, and data services. This usually completes
-            within a few moments.
-          </div>
+    <div class="card">
+      <div class="brand">
+        <div class="icon-ring">
+          <img id="brandIcon" class="app-icon" src="../assets/icon-256.png" alt="ADSI Inverter Dashboard" />
         </div>
+        <div class="title">ADSI Inverter Dashboard</div>
+      </div>
 
-        <div class="status-row">
-          <div class="status-head">
-            <div class="status-label">Startup Status</div>
-            <div class="status-text" id="statusText">Initializing application services...</div>
-          </div>
-          <div class="progress" aria-hidden="true">
-            <div class="progress-fill" id="progressFill"></div>
-          </div>
-          <div class="spinner" id="spinner">
-            <div class="spinner-dot"></div>
-            <span>Connecting to the local dashboard service...</span>
-          </div>
+      <div class="status-head">
+        <div class="status-current">
+          <span class="spinner" id="spinner"><span class="spinner-dot"></span></span>
+          <span class="status-text" id="statusText">Initializing application services…</span>
         </div>
+        <div class="status-pct" id="statusPct">0%</div>
+      </div>
+      <div class="progress" aria-hidden="true">
+        <div class="progress-fill" id="progressFill"></div>
+      </div>
 
-        <div class="steps" id="stepsPanel">
-          <div class="step active" id="step1">
-            <div class="step-bullet">1</div>
-            <div>Initializing application shell</div>
-          </div>
-          <div class="step" id="step2">
-            <div class="step-bullet">2</div>
-            <div>Validating license and workstation state</div>
-          </div>
-          <div class="step" id="step3">
-            <div class="step-bullet">3</div>
-            <div>Loading plant configuration and runtime settings</div>
-          </div>
-          <div class="step" id="step4">
-            <div class="step-bullet">4</div>
-            <div>Bringing dashboard services online</div>
-          </div>
+      <div class="steps" id="stepsPanel">
+        <div class="step active" id="step1">
+          <div class="step-bullet">1</div>
+          <div>Initializing application shell</div>
         </div>
-
-        <div class="error-panel" id="errorPanel">
-          <div class="error-title" id="errorTitle">Startup Check Required</div>
-          <div class="error-text" id="errorMsg">
-            The application did not finish starting. Verify the local services and try again.
-          </div>
-          <div class="error-actions" id="errorActions">
-            <button class="retry-btn" type="button" onclick="location.reload()">Retry Startup</button>
-          </div>
+        <div class="step" id="step2">
+          <div class="step-bullet">2</div>
+          <div>Validating license</div>
         </div>
+        <div class="step" id="step3">
+          <div class="step-bullet">3</div>
+          <div>Loading configuration</div>
+        </div>
+        <div class="step" id="step4">
+          <div class="step-bullet">4</div>
+          <div>Starting dashboard services</div>
+        </div>
+      </div>
 
-        <!-- Mode-selection panel: shown when Remote mode fails due to unreachable gateway -->
-        <div class="error-panel" id="modePickerPanel">
-          <div class="error-title" style="color: var(--accent-2);">Connection Mode</div>
-          <div class="error-text" id="modePickerMsg">
-            The remote gateway did not respond. Choose how to proceed:
-          </div>
-          <div class="mode-picker-options">
-            <button class="mode-btn mode-btn-gateway" type="button" id="btnPickGateway">
-              <span class="mode-btn-icon">&#9878;</span>
-              <span class="mode-btn-label">Gateway Mode</span>
-              <span class="mode-btn-desc">Run as a local gateway — poll inverters directly via Modbus.</span>
-            </button>
-            <button class="mode-btn mode-btn-remote" type="button" id="btnPickRemote">
-              <span class="mode-btn-icon">&#8644;</span>
-              <span class="mode-btn-label">Remote Mode</span>
-              <span class="mode-btn-desc">Retry connecting to the remote gateway server.</span>
-            </button>
-          </div>
+      <div class="panel" id="errorPanel">
+        <div class="panel-title" id="errorTitle">Startup Check Required</div>
+        <div class="panel-text" id="errorMsg">
+          The application did not finish starting. Verify the local services and try again.
+        </div>
+        <div class="panel-actions" id="errorActions">
+          <button class="btn btn-primary" type="button" onclick="location.reload()">Retry Startup</button>
+        </div>
+      </div>
+
+      <!-- Mode-selection panel: shown when Remote mode fails due to unreachable gateway -->
+      <div class="panel" id="modePickerPanel">
+        <div class="panel-title">Connection Mode</div>
+        <div class="panel-text" id="modePickerMsg">
+          The remote gateway did not respond. Choose how to proceed:
+        </div>
+        <div class="mode-picker-options">
+          <button class="mode-btn mode-btn-gateway" type="button" id="btnPickGateway">
+            <span class="mode-btn-icon">&#9878;</span>
+            <span class="mode-btn-label">Gateway Mode</span>
+            <span class="mode-btn-desc">Run as a local gateway — poll inverters directly via Modbus.</span>
+          </button>
+          <button class="mode-btn mode-btn-remote" type="button" id="btnPickRemote">
+            <span class="mode-btn-icon">&#8644;</span>
+            <span class="mode-btn-label">Remote Mode</span>
+            <span class="mode-btn-desc">Retry connecting to the remote gateway server.</span>
+          </button>
         </div>
       </div>
     </div>
@@ -573,6 +568,7 @@
 
       const progressFill = document.getElementById("progressFill");
       const statusText = document.getElementById("statusText");
+      const statusPct = document.getElementById("statusPct");
       const spinner = document.getElementById("spinner");
       const errorPanel = document.getElementById("errorPanel");
       const errorMsg = document.getElementById("errorMsg");
@@ -585,9 +581,9 @@
       }
 
       function setProgress(percent) {
-        if (!progressFill) return;
         const safe = Math.max(0, Math.min(100, Number(percent) || 0));
-        progressFill.style.width = `${safe}%`;
+        if (progressFill) progressFill.style.width = `${safe}%`;
+        if (statusPct) statusPct.textContent = `${Math.round(safe)}%`;
       }
 
       function markStep(stepNum, state) {
@@ -597,15 +593,18 @@
         if (state) el.classList.add(state);
       }
 
-      function showStartupError(message) {
+      function setErrorVisuals() {
         if (spinner) spinner.style.display = "none";
-        if (statusText) statusText.textContent = "Startup requires attention";
-        if (progressFill) progressFill.classList.add("error");
         for (let i = 1; i <= STEP_COUNT; i += 1) {
           if (i < currentStep) markStep(i, "done");
           else if (i === currentStep) markStep(i, "failed");
           else markStep(i, "");
         }
+      }
+
+      function showStartupError(message) {
+        setErrorVisuals();
+        if (statusText) statusText.textContent = "Startup requires attention";
         if (errorMsg) errorMsg.textContent = String(message || "The dashboard could not finish starting.");
         if (errorPanel) errorPanel.classList.add("visible");
       }
@@ -613,19 +612,12 @@
       window.showStartupError = showStartupError;
 
       function showModePicker(message) {
-        if (spinner) spinner.style.display = "none";
+        setErrorVisuals();
         if (statusText) statusText.textContent = "Connection mode selection";
-        if (progressFill) progressFill.classList.add("error");
-        for (let i = 1; i <= STEP_COUNT; i += 1) {
-          if (i < currentStep) markStep(i, "done");
-          else if (i === currentStep) markStep(i, "failed");
-          else markStep(i, "");
-        }
         const modePanel = document.getElementById("modePickerPanel");
         const modeMsg = document.getElementById("modePickerMsg");
         if (modeMsg && message) modeMsg.textContent = String(message);
         if (modePanel) modePanel.classList.add("visible");
-        // Hide the generic error panel if showing
         if (errorPanel) errorPanel.classList.remove("visible");
       }
 
@@ -636,9 +628,7 @@
         const modePanel = document.getElementById("modePickerPanel");
         if (modePanel) modePanel.classList.remove("visible");
         if (spinner) spinner.style.display = "inline-flex";
-        if (progressFill) progressFill.classList.remove("error");
-        if (statusText) statusText.textContent = "Switching to Gateway mode\u2026";
-        // Tell main process to switch mode and retry
+        if (statusText) statusText.textContent = "Switching to Gateway mode…";
         try { window.electronAPI?.switchOperationMode?.("gateway"); } catch (_) {}
       });
 
@@ -646,9 +636,7 @@
         const modePanel = document.getElementById("modePickerPanel");
         if (modePanel) modePanel.classList.remove("visible");
         if (spinner) spinner.style.display = "inline-flex";
-        if (progressFill) progressFill.classList.remove("error");
-        if (statusText) statusText.textContent = "Retrying Remote connection\u2026";
-        // Retry by reloading — same as existing Retry Startup
+        if (statusText) statusText.textContent = "Retrying Remote connection…";
         location.reload();
       });
 
@@ -656,7 +644,6 @@
         if (errorPanel) errorPanel.classList.remove("visible");
         const modePanel = document.getElementById("modePickerPanel");
         if (modePanel) modePanel.classList.remove("visible");
-        if (progressFill) progressFill.classList.remove("error");
         if (spinner) spinner.style.display = "inline-flex";
 
         const nextStep = Math.max(1, Math.min(STEP_COUNT, Math.trunc(Number(state.step) || currentStep)));
@@ -667,7 +654,7 @@
           currentStep = nextStep;
         }
 
-        if (String(state.text || "").trim()) {
+        if (statusText && String(state.text || "").trim()) {
           statusText.textContent = String(state.text).trim();
         }
         if (Number.isFinite(Number(state.progress))) {
@@ -679,7 +666,7 @@
       updateStartupState({
         step: 1,
         progress: 14,
-        text: "Initializing application services...",
+        text: "Initializing application services…",
       });
     </script>
   </body>

@@ -253,6 +253,28 @@ static_units    = {}   # ip -> [unit list] or None
 auto_reset_state = {}  # (ip, unit) -> {"state": str, "since": float, "busy": bool}
 _last_unit_fail  = {}  # ip -> timestamp of last failed unit-detect
 
+# ── Per-unit dead-node backoff (2026-05-29) ──────────────────────────────────
+# All units behind one inverter IP share ONE TCP socket and ONE per-IP lock.
+# A single slave that stops answering (absent/faulted node, pulled fibre, RS485
+# branch fault) otherwise forces a full shared-socket reconnect + double
+# read-timeout (~2.5 s) on EVERY poll cycle inside read_fast_async()/safe_read().
+# Because poll_inverter reads units sequentially on the shared socket, that
+# penalty drags the inverter's HEALTHY sibling nodes down with it — their
+# dashboard refresh collapses from sub-second to multi-second and the shared
+# connection is torn down/rebuilt every cycle. To isolate a dead node: once a
+# unit misses UNIT_DEAD_FAIL_THRESHOLD consecutive reads it is "throttled" and
+# re-probed only every UNIT_DEAD_REPROBE_S instead of every cycle, so the
+# siblings keep their fast cadence. Recovery is detected on the next re-probe
+# (well within the dashboard's 20 s offline threshold). Fail-open: set
+# DISABLE_UNIT_DEAD_BACKOFF=1 to restore the legacy every-cycle probe.
+UNIT_DEAD_FAIL_THRESHOLD = 3       # consecutive misses before a unit is throttled
+UNIT_DEAD_REPROBE_S      = 15.0    # throttled units are re-probed at most this often
+DISABLE_UNIT_DEAD_BACKOFF = os.environ.get(
+    "DISABLE_UNIT_DEAD_BACKOFF", ""
+).strip() in ("1", "true", "yes")
+# (ip, unit) -> {"fail": int, "throttled": bool, "next_probe": float monotonic}
+_unit_health = {}
+
 # Phase 8 code-review fix (2026-04-15): module-scope initializers for the
 # one-time-log guards used by T3.17 (PAC clamp) so a race between concurrent
 # first-time writers cannot lose an entry.  Previously the guards used
@@ -1736,8 +1758,16 @@ async def poll_inverter(ip):
                 # change is honored immediately even after a probe miss.
                 override = static_units.get(ip)
                 if override and list(override) != units:
-                    print(f"[POLL] {ip}  units changed {units} -> {list(override)}")
-                    units = list(override)
+                    new_units = list(override)
+                    print(f"[POLL] {ip}  units changed {units} -> {new_units}")
+                    # Reclaim dead-node backoff state for units that are no
+                    # longer polled, so a unit-count reduction can't leave
+                    # orphaned _unit_health entries (bounded, but keep it tight).
+                    if not DISABLE_UNIT_DEAD_BACKOFF:
+                        for _gone in units:
+                            if _gone not in new_units:
+                                _unit_health.pop((ip, _gone), None)
+                    units = new_units
                 interval = max(MIN_POLL_INTERVAL, intervals.get(ip, DEFAULT_INTERVAL))
 
                 client = clients.get(ip)
@@ -1762,9 +1792,51 @@ async def poll_inverter(ip):
                     if is_write_pending(ip):
                         await asyncio.sleep(min(interval, 0.05))
                         break
+
+                    # ── Per-unit dead-node backoff ──
+                    # Skip a unit that is in the throttled state until its
+                    # re-probe window elapses, so one dead/absent node on this
+                    # inverter can't inject a shared-socket reconnect + double
+                    # read-timeout into every cycle and starve its healthy
+                    # sibling nodes (which share the same TCP socket).
+                    hk = (ip, u)
+                    if not DISABLE_UNIT_DEAD_BACKOFF:
+                        h = _unit_health.get(hk)
+                        if h and h.get("throttled") and time.monotonic() < h.get("next_probe", 0.0):
+                            continue
+
                     data = await read_fast_async(client, u, ip)
                     if not data:
+                        # Track consecutive misses; throttle once a unit looks
+                        # dead so the costly reconnect path is paid every
+                        # UNIT_DEAD_REPROBE_S instead of every cycle.
+                        #
+                        # Exclude write-induced misses: read_fast_async returns
+                        # None whenever a control write is pending on this IP, so
+                        # counting those would let an operator write-burst
+                        # false-throttle a perfectly reachable node. Only true
+                        # no-answer reads advance the dead-node counter.
+                        if not DISABLE_UNIT_DEAD_BACKOFF and not is_write_pending(ip):
+                            h = _unit_health.get(hk) or {"fail": 0, "throttled": False, "next_probe": 0.0}
+                            h["fail"] = int(h.get("fail", 0)) + 1
+                            if h["fail"] >= UNIT_DEAD_FAIL_THRESHOLD:
+                                if not h.get("throttled"):
+                                    print(
+                                        f"[POLL] {ip} unit {u} unresponsive x{h['fail']} — "
+                                        f"throttling its probe to every {UNIT_DEAD_REPROBE_S:.1f}s so "
+                                        f"the inverter's other nodes keep polling fast"
+                                    )
+                                h["throttled"] = True
+                                h["next_probe"] = time.monotonic() + UNIT_DEAD_REPROBE_S
+                            _unit_health[hk] = h
                         continue
+
+                    # Healthy read — clear any throttle so the unit returns to
+                    # the fast every-cycle cadence immediately on recovery.
+                    if not DISABLE_UNIT_DEAD_BACKOFF and hk in _unit_health:
+                        if _unit_health[hk].get("throttled"):
+                            print(f"[POLL] {ip} unit {u} responsive again — resuming fast polling")
+                        _unit_health.pop(hk, None)
 
                     data["source_ip"] = ip
                     data["inverter"] = inv_num if inv_num is not None else -1
@@ -1925,6 +1997,49 @@ async def rebuild_global_maps(cfg=None):
                 evt.clear()
             intervals.pop(ip, None)
             shared.pop(ip, None)   # remove stale live-data so dropped inverters don't linger in /data
+            for _u in (1, 2, 3, 4):
+                _unit_health.pop((ip, _u), None)  # drop dead-node backoff state for removed IP
+
+    # ── Reclaim metrics_state for nodes no longer in the config ──
+    # PY-POLL-002 fix (2026-05-29): rebuild teardown above prunes clients /
+    # shared / locks for a removed IP, but the five metrics_state dicts
+    # (pacEnergy, pdcData, uiAlarm, lastUpdate, pacEnergyHistory) are keyed by
+    # `{inverter}_{module}` and were never reclaimed — so a node removed from
+    # ipconfig leaked memory (pacEnergyHistory grows one float per day) AND
+    # lingered in /metrics output until its 31.5 s offline cutoff every poll.
+    #
+    # Build the live node-key set "{inverter}_{unit}" from the NEW config,
+    # probing slots 1..27 of ip_map (immune to malformed/extra keys — no int()
+    # on arbitrary dict keys). Identity is the inverter NUMBER, not the IP — so
+    # a re-cabled inverter (same number, new IP) keeps its accumulators; only
+    # genuinely removed numbers AND units dropped from an inverter's unit list
+    # are reclaimed. An inverter with no explicit unit override (auto-detect)
+    # keeps all four slots since its real unit set isn't known here. Node owns
+    # the authoritative PAC integration regardless, so this can never lose
+    # energy even if a node key is mis-derived.
+    configured_nodes = set()
+    for i in range(1, 28):
+        ip_i = str(ip_map.get(str(i), "")).strip()
+        if not ip_i:
+            continue
+        u_list = static_units.get(ip_i)
+        units_for_i = []
+        for u in (u_list if u_list else (1, 2, 3, 4)):
+            try:
+                units_for_i.append(int(u))
+            except Exception:
+                continue
+        if not units_for_i:
+            units_for_i = [1, 2, 3, 4]
+        for u in units_for_i:
+            configured_nodes.add(f"{i}_{u}")
+    for _sub in ("pacEnergy", "pdcData", "uiAlarm", "lastUpdate", "pacEnergyHistory"):
+        _d = metrics_state.get(_sub)
+        if not isinstance(_d, dict):
+            continue
+        for _nk in list(_d.keys()):
+            if str(_nk) not in configured_nodes:
+                _d.pop(_nk, None)
 
     print(f"[IPCONFIG] Maps rebuilt — {len(inverters)} inverter(s) active")
 
@@ -2542,9 +2657,9 @@ async def sync_clock_inverter(ip: str, units, target_dt=None,
         return {**base, "error": f"executor_error: {exc}"}
 
 
-# ── Bulk-auth helper (mirrors server/bulkControlAuth.js sacupsMM pattern) ──
+# ── Bulk-auth helper (mirrors server/bulkControlAuth.js adsiMM pattern) ──
 def _check_bulk_auth(header_value: str) -> bool:
-    """Accept `sacupsMM` or `sacupsMM` of current or prior minute. Case-insensitive."""
+    """Accept `adsiMM` (current or prior minute, padded or unpadded). Case-insensitive."""
     if not header_value:
         return False
     raw = str(header_value).strip()
@@ -2557,8 +2672,8 @@ def _check_bulk_auth(header_value: str) -> bool:
     candidates = set()
     for offset in (0, -1):
         m = (now + timedelta(minutes=offset)).minute
-        candidates.add(f"sacups{m}")
-        candidates.add(f"sacups{m:02d}")
+        candidates.add(f"adsi{m}")
+        candidates.add(f"adsi{m:02d}")
     return raw in candidates
 
 
@@ -2706,10 +2821,13 @@ def _update_metrics_from_frame(frame: dict):
     # floor instead of strict ==0, and evaluate each leg INDEPENDENTLY
     # rather than relying on the multiplied Vdc*Idc product.
     #
-    # Register units (raw, before scaling):
+    # Register units (raw, before scaling) — verified 1 A/LSB for this PowerMax
+    # hardware (audits/2026-05-11/register-decode-traceback.md Finding 3; the
+    # safePdc 265 kW clamp only reconciles with vdc·idc at 1 A/LSB). Earlier
+    # "0.1 A/LSB" comments here were stale and contradicted the live thresholds.
     #   vdc  — 1 V/LSB
-    #   idc  — 0.1 A/LSB
-    #   iac* — 0.1 A/LSB
+    #   idc  — 1 A/LSB
+    #   iac* — 1 A/LSB
     #
     # Force pac_raw to 0 if ANY leg is at/below its noise floor:
     #   • Vdc at noise floor       → no real DC bus voltage
@@ -2724,8 +2842,8 @@ def _update_metrics_from_frame(frame: dict):
     # while pac_reg still reports a small residual — that totalWh becomes
     # kwh_today, which Node prefers over its own trapezoid integrator.
     NOISE_VDC = 1.0   # ≤1 V on the DC bus is noise floor
-    NOISE_IDC = 1.0   # ≤0.1 A DC is noise floor
-    NOISE_IAC = 1.0   # ≤0.1 A on a phase is noise floor
+    NOISE_IDC = 1.0   # ≤1 A DC is noise floor (idc is 1 A/LSB on this hardware)
+    NOISE_IAC = 1.0   # ≤1 A on a phase is noise floor (iac is 1 A/LSB)
     iac1_raw = float(frame.get("iac1") or 0)
     iac2_raw = float(frame.get("iac2") or 0)
     iac3_raw = float(frame.get("iac3") or 0)
@@ -3559,7 +3677,7 @@ ramp_lock = threading.Lock()
 # Reference card: docs/Inverter-Modbus-Reference.md §6.
 #
 # Risk gating: ALL writes here REQUIRE
-#   1. operator-typed sacupsMM bulk auth key (server-side gate)
+#   1. operator-typed adsiMM bulk auth key (server-side gate)
 #   2. featureFlag `gridControlEnabled` = "1" in settings (default "0")
 #   3. security-reviewer agent pass on the diff
 #   4. 2-week single-inverter soak before fleet-wide enable
@@ -3977,7 +4095,7 @@ async def curtail_job_view(job_id: str):
 
 # ── Slice ζ — Grid-control endpoints (reactive + PF + read-back) ─────────
 # All write paths are auth-gated by Node-side `gridControlEnabled` flag +
-# sacupsMM key. Python service trusts upstream auth (loopback-only call site)
+# adsiMM key. Python service trusts upstream auth (loopback-only call site)
 # but enforces argument validation. Read-back (`/grid-control/state`) is safe
 # and unconditional.
 
@@ -4117,7 +4235,7 @@ async def api_calibration_write(req: Request):
         max_delta_pct:  50.0,           # optional, null disables guard
       }
 
-    No auth here — Node enforces sacupsMM + topology + session-id before
+    No auth here — Node enforces adsiMM + topology + session-id before
     proxying.  Returns the full write-result dict for audit logging.
     """
     try:

@@ -979,6 +979,155 @@ class ForecastEngineErrorClassifierTests(unittest.TestCase):
             logging.shutdown()
             shutil.rmtree(tmp_root, ignore_errors=True)
 
+    def test_run_dayahead_physics_fallback_when_no_solcast(self):
+        """Solcast-outage resilience: with NO Solcast snapshot, run_dayahead(persist=False)
+        must NOT crash and must return a physics-fallback payload (baseline_is_solcast_mid
+        False, used_solcast False, variant ml_without_solcast). This is the exact path that
+        previously AttributeError'd on solcast_snapshot.get() in the non-persist return dict."""
+        tmp_root = WORK_TMP / "run-dayahead-physics-fallback"
+        shutil.rmtree(tmp_root, ignore_errors=True)
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        try:
+            mod = load_module(tmp_root, "run-dayahead-physics-fallback")
+            day = date(2026, 3, 21)
+            day_s = day.isoformat()
+            hourly = pd.DataFrame(
+                {
+                    "time": pd.date_range(f"{day_s} 00:00:00", periods=24, freq="1h"),
+                    "rad": [0.0] * 6 + [100.0, 220.0, 420.0, 600.0, 760.0, 820.0, 780.0, 640.0, 500.0, 320.0, 180.0, 90.0] + [0.0] * 6,
+                    "rad_direct": [0.0] * 24,
+                    "rad_diffuse": [0.0] * 24,
+                    "cloud": [18.0] * 24,
+                    "cloud_low": [10.0] * 24,
+                    "cloud_mid": [8.0] * 24,
+                    "cloud_high": [6.0] * 24,
+                    "temp": [28.0] * 24,
+                    "rh": [60.0] * 24,
+                    "wind": [3.0] * 24,
+                    "precip": [0.0] * 24,
+                    "cape": [50.0] * 24,
+                }
+            )
+            solar_forecast = np.zeros(mod.SLOTS_DAY, dtype=float)
+            solar_forecast[mod.SOLAR_START_SLOT:mod.SOLAR_END_SLOT] = 20.0
+
+            orig = {
+                "fetch_weather": mod.fetch_weather,
+                "load_weather_bias_artifact": mod.load_weather_bias_artifact,
+                "apply_weather_bias_adjustment": mod.apply_weather_bias_adjustment,
+                "validate_weather_5min": mod.validate_weather_5min,
+                "analyse_weather_day": mod.analyse_weather_day,
+                "classify_day_regime": mod.classify_day_regime,
+                "physics_baseline": mod.physics_baseline,
+                "load_solcast_snapshot": mod.load_solcast_snapshot,
+                "load_solcast_reliability_artifact": mod.load_solcast_reliability_artifact,
+                "load_forecast_artifacts": mod.load_forecast_artifacts,
+                "load_model_bundle": mod.load_model_bundle,
+                "compute_error_memory": mod.compute_error_memory,
+                "apply_activity_hysteresis": mod.apply_activity_hysteresis,
+                "apply_block_staging": mod.apply_block_staging,
+                "apply_ramp_limit": mod.apply_ramp_limit,
+                "_setting_bool_or_default": mod._setting_bool_or_default,
+            }
+            try:
+                mod.fetch_weather = lambda day, source="auto": hourly.copy()
+                mod.load_weather_bias_artifact = lambda today, allow_build=True: {}
+                mod.apply_weather_bias_adjustment = lambda raw_hourly, day, weather_bias: (raw_hourly, {"regime_confidence": 0.9, "matches": 5, "day_regime": "clear", "mean_rad_factor": 1.0, "morning_shift_slots": 0.0})
+                mod.validate_weather_5min = lambda day, w5: (True, "")
+                mod.analyse_weather_day = lambda day, w5, actual=None: {
+                    "sky_class": "clear", "cloud_mean": 15.0, "rad_peak": 820.0,
+                    "rh_mean": 60.0, "convective": False, "rainy": False, "vol_index": 0.05,
+                }
+                mod.classify_day_regime = lambda stats: "clear"
+                mod.physics_baseline = lambda day, w5: solar_forecast.copy()
+                # THE KEY: no Solcast snapshot at all → fallback path.
+                mod.load_solcast_snapshot = lambda day: None
+                mod.load_solcast_reliability_artifact = lambda today, allow_build=True: None
+                mod.load_forecast_artifacts = lambda today, allow_build=True: {}
+                mod.load_model_bundle = lambda: None  # no model → pure physics + error memory
+                mod.compute_error_memory = lambda today, w5, **kw: np.zeros(mod.SLOTS_DAY, dtype=float)
+                mod.apply_activity_hysteresis = lambda forecast, target_s, w5, artifacts, bias_meta=None: (
+                    forecast.copy(),
+                    {"first_slot": mod.SOLAR_START_SLOT, "last_slot": mod.SOLAR_END_SLOT - 1, "history_matches": 0, "bias_shift_slots": 0},
+                )
+                mod.apply_block_staging = lambda forecast, w5: (forecast.copy(), {"staged_slots": 0, "node_step_kwh": 0.0})
+                mod.apply_ramp_limit = lambda arr, max_step=320.0: arr.copy()
+                # fallback enabled (default) — be explicit so the test is independent of any DB
+                mod._setting_bool_or_default = lambda key, default: True if key == "forecastAllowPhysicsFallback" else default
+
+                # Must NOT raise (previously AttributeError on solcast_snapshot.get()).
+                result = mod.run_dayahead(day, day, persist=False)
+
+                self.assertIsInstance(result, dict)
+                # Provenance must reflect the physics fallback, not Solcast.
+                self.assertFalse(bool(result["solcast_meta"].get("used_solcast")))
+                self.assertFalse(bool(result["baseline_is_solcast_mid"]))
+                self.assertIsNone(result["solcast_lo_total_kwh"])
+                self.assertIsNone(result["solcast_hi_total_kwh"])
+                self.assertEqual(
+                    mod._classify_variant_from_solcast_meta(result["solcast_meta"]),
+                    "ml_without_solcast",
+                )
+                # A real forecast was produced from physics.
+                self.assertGreater(float(result["forecast_total_kwh"]), 0.0)
+            finally:
+                for name, fn in orig.items():
+                    setattr(mod, name, fn)
+        finally:
+            logging.shutdown()
+            shutil.rmtree(tmp_root, ignore_errors=True)
+
+    def test_run_dayahead_hard_fail_when_fallback_disabled(self):
+        """When forecastAllowPhysicsFallback is OFF and no Solcast snapshot exists,
+        run_dayahead(persist=False) returns None (legacy hard-fail), not a crash."""
+        tmp_root = WORK_TMP / "run-dayahead-fallback-off"
+        shutil.rmtree(tmp_root, ignore_errors=True)
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        try:
+            mod = load_module(tmp_root, "run-dayahead-fallback-off")
+            day = date(2026, 3, 21)
+            day_s = day.isoformat()
+            hourly = pd.DataFrame(
+                {
+                    "time": pd.date_range(f"{day_s} 00:00:00", periods=24, freq="1h"),
+                    "rad": [0.0] * 6 + [100.0, 220.0, 420.0, 600.0, 760.0, 820.0, 780.0, 640.0, 500.0, 320.0, 180.0, 90.0] + [0.0] * 6,
+                    "rad_direct": [0.0] * 24, "rad_diffuse": [0.0] * 24,
+                    "cloud": [18.0] * 24, "cloud_low": [10.0] * 24, "cloud_mid": [8.0] * 24, "cloud_high": [6.0] * 24,
+                    "temp": [28.0] * 24, "rh": [60.0] * 24, "wind": [3.0] * 24, "precip": [0.0] * 24, "cape": [50.0] * 24,
+                }
+            )
+            orig = {
+                "fetch_weather": mod.fetch_weather,
+                "load_weather_bias_artifact": mod.load_weather_bias_artifact,
+                "apply_weather_bias_adjustment": mod.apply_weather_bias_adjustment,
+                "validate_weather_5min": mod.validate_weather_5min,
+                "analyse_weather_day": mod.analyse_weather_day,
+                "classify_day_regime": mod.classify_day_regime,
+                "load_solcast_snapshot": mod.load_solcast_snapshot,
+                "_setting_bool_or_default": mod._setting_bool_or_default,
+            }
+            try:
+                mod.fetch_weather = lambda day, source="auto": hourly.copy()
+                mod.load_weather_bias_artifact = lambda today, allow_build=True: {}
+                mod.apply_weather_bias_adjustment = lambda raw_hourly, day, weather_bias: (raw_hourly, {"regime_confidence": 0.9, "matches": 5, "day_regime": "clear", "mean_rad_factor": 1.0, "morning_shift_slots": 0.0})
+                mod.validate_weather_5min = lambda day, w5: (True, "")
+                mod.analyse_weather_day = lambda day, w5, actual=None: {
+                    "sky_class": "clear", "cloud_mean": 15.0, "rad_peak": 820.0,
+                    "rh_mean": 60.0, "convective": False, "rainy": False, "vol_index": 0.05,
+                }
+                mod.classify_day_regime = lambda stats: "clear"
+                mod.load_solcast_snapshot = lambda day: None
+                mod._setting_bool_or_default = lambda key, default: False if key == "forecastAllowPhysicsFallback" else default
+
+                result = mod.run_dayahead(day, day, persist=False)
+                self.assertIsNone(result)  # hard-fail returns None on non-persist path
+            finally:
+                for name, fn in orig.items():
+                    setattr(mod, name, fn)
+        finally:
+            logging.shutdown()
+            shutil.rmtree(tmp_root, ignore_errors=True)
+
     def test_forecast_qa_logs_bucket_and_classifier_summaries(self):
         tmp_root = WORK_TMP / "qa-weather-summary"
         shutil.rmtree(tmp_root, ignore_errors=True)

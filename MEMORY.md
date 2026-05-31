@@ -250,7 +250,7 @@ Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
 - **Login default password:** `1234`
 - **Login admin auth key:** `ADSI-2026`
 - **Login reset behavior:** `ADSI-2026` resets sign-in back to `admin` / `1234`
-- **Bulk selected inverter control auth key:** `sacupsMM`
+- **Bulk selected inverter control auth key:** `adsiMM` (unified with the topology key 2026-05-31; the old `sacupsMM` prefix is retired)
   - `MM` is the current minute
   - previous minute is also accepted as tolerance
   - applies only to `START SELECTED` / `STOP SELECTED`

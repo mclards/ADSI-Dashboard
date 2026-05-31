@@ -761,6 +761,15 @@ The `Forecast` page provides a dedicated workspace for forecast configuration an
 | `Toolkit Email` | Toolkit account user name |
 | `Toolkit Password` | Toolkit account password |
 
+### Forecast Tuning
+
+Manual overrides for ML engine training parameters. Leave blank to use the engine's own defaults.
+
+| Field | Purpose | Range | Default |
+| --- | --- | --- | --- |
+| `Est-actual Weight` | Override the satellite est-actual training weight (how much weight the engine gives to Solcast estimated-actual values when training the model). Validate new values with a backtest before relying. | 0.50–1.00 | Auto (engine-tuned) |
+| `Intraday Blend Max` | Cap how strongly intraday observed vs. day-ahead corrections are blended (0 = no intraday blending, 1 = maximum). Validate with a backtest. | 0.00–1.00 | 0.72 |
+
 ### Toolkit Preview
 
 When toolkit preview is enabled, the forecast workspace provides:
@@ -1547,9 +1556,9 @@ Operational rules:
 - **One credential, end to end.** The entire Serial Number feature —
   single Read / Send, Read-all, Plant Serial Map scan, Bulk Fix
   plan/apply, and the duplicate override — is gated by **one** key:
-  bulk inverter control (`sacupsMM`). It no longer asks for the topology
-  key (`adsiMM`) anywhere. Pure read surfaces (audit log, migration
-  history, cached map, target map) need no key at all.
+  the authorization key (`adsiMM`) — the same rolling key used for every
+  privileged action across the dashboard. Pure read surfaces (audit log,
+  migration history, cached map, target map) need no key at all.
 
 #### Plant Serial Map
 
@@ -1926,8 +1935,8 @@ After starting a session, the per-node readout table gains a `New Value`
 column with editable inputs and a `Write` button per row. To write:
 
 1. Enter the new value (an integer; signed for offsets 92, 94)
-2. Enter your `sacupsMM` key in the bulk-auth field (`sacups` + current
-   minute, e.g. `sacups37`)
+2. Enter your `adsiMM` key in the bulk-auth field (`adsi` + current
+   minute, e.g. `adsi37`)
 3. Click `Write`
 4. Confirm the modal showing old → new
 
@@ -1977,7 +1986,7 @@ sibling.
 Both source and destination must have `ValidCfgCode = 0x1F1F`. Only
 fields where source ≠ destination are written — no-op fields are
 skipped. Every write goes into the audit log with
-`auth_method = sacupsMM+session+copy` and a `notes` column citing the
+`auth_method = adsiMM+session+copy` and a `notes` column citing the
 source.
 
 ### Feature flag

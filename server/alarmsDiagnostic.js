@@ -40,7 +40,7 @@ function _hex(v) {
  *   @param {function} ctx.getSetting          — (key, default) → string
  *   @param {function} ctx.resolveInverterIp   — (inverter:int) → string|null
  *   @param {function} ctx.resolveSlave        — (inverter:int) → int (defaults to 1)
- *   @param {function} ctx.currentBulkAuthKey  — () → string (sacupsMM)
+ *   @param {function} ctx.currentBulkAuthKey  — () → string (adsiMM)
  *   @param {function} [ctx.logControlAction]  — audit_log writer
  *   @param {function} [ctx.broadcastUpdate]   — WS broadcaster (optional)
  *   @param {function} [ctx.isRemoteMode]      — () → bool

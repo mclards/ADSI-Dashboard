@@ -583,7 +583,8 @@ function integratePacToday(parsed) {
  *
  * Per Ingeteam INGECON SUN Modbus RTU spec
  * (docs/IngeconSunPMax-Entire-Modbus-RTU-Registers.pdf §2 pg 4-5):
- *   - Reg 30010 (addr 9) `Idc`  — signed, 0.1 A/LSB
+ *   - Reg 30010 (addr 9) `Idc`  — signed, 1 A/LSB (verified for this PowerMax HW;
+ *       see audits/2026-05-11/register-decode-traceback.md Finding 3)
  *   - Reg 30019 (addr 18) `PAC` — signed, tens of W
  *
  * Related plan: plans/2026-05-10-modbus-registers-official-revamp.md §4 Slice α
@@ -1277,6 +1278,45 @@ function enqueueBounded(map, key, row, maxRows, dropCounterField, label) {
         `[poller] ${label} backlog cap reached; dropped ${dropped} oldest queued row(s).`,
       );
     }
+    // durability-002: the drop itself is recorded in pollStats here; the
+    // persistent audit_log row is emitted later by _maybeAuditPersistDrops()
+    // from flushPersistBacklog's SUCCESS path (DB known-healthy). We must NOT
+    // write to the DB synchronously in this hot enqueue path — better-sqlite3's
+    // busy_timeout (db.js: 1500 ms) would block the poll loop and compound the
+    // very stall that caused the overflow.
+  }
+}
+
+// durability-002: surface rows shed by the bounded persist queues to the
+// persistent audit_log so a sustained DB stall silently dropping telemetry/
+// energy becomes visible in the normal UI (console warnings scroll away;
+// pollStats need a manual API call). Called ONLY right after a successful
+// flush — i.e. when the DB is known-healthy — so it never blocks the hot path.
+// One summary row per recovery covers all rows dropped since the last audit.
+let _lastAuditedDrops = { energy: 0, reading: 0 };
+function _maybeAuditPersistDrops() {
+  const energy = Number(pollStats.dbPersistDroppedEnergyCount || 0);
+  const reading = Number(pollStats.dbPersistDroppedReadingCount || 0);
+  const dE = energy - _lastAuditedDrops.energy;
+  const dR = reading - _lastAuditedDrops.reading;
+  if (dE <= 0 && dR <= 0) return;
+  try {
+    insertAuditLogRow({
+      ts: Date.now(),
+      operator: "SYSTEM",
+      action: "persist_backlog_overflow",
+      scope: "plant",
+      result: "warn",
+      reason:
+        `persist queue overflow shed ${dE} energy_5min + ${dR} reading row(s) ` +
+        `during a sustained DB stall (cumulative: ${energy} energy, ${reading} readings). ` +
+        `Telemetry/energy loss — check disk space and database health.`,
+    });
+    // Advance the watermark only after a successful write, so a transient
+    // failure here is re-attempted on the next successful flush.
+    _lastAuditedDrops = { energy, reading };
+  } catch (_) {
+    /* re-attempted on the next successful flush */
   }
 }
 
@@ -1328,6 +1368,9 @@ function flushPersistBacklog(reason = "tick") {
     pollStats.lastDbPersistOkTs = Date.now();
     _flushRetryCount = 0;
     syncPendingQueueStats();
+    // DB just accepted a write → safe to emit any pending backlog-overflow
+    // audit summary without risking a busy_timeout block in the hot path.
+    _maybeAuditPersistDrops();
     return true;
   } catch (err) {
     pollStats.dbInsertErrorCount += 1;

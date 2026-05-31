@@ -80,6 +80,10 @@ function setStep(n) {
     if (idx + 1 < n) dot.classList.add("done");
     else if (idx + 1 === n) dot.classList.add("active");
   });
+  // UI-R8: update aria-valuenow for screen readers
+  if (els.stepper) {
+    els.stepper.setAttribute("aria-valuenow", String(n));
+  }
   updateFooterButtons();
 }
 

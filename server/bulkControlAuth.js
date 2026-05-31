@@ -2,9 +2,18 @@
 
 const crypto = require("crypto");
 
-const PLANT_WIDE_AUTH_PREFIX = "sacups";
+// v2.11.x — operator decision (2026-05-31): the plant-wide bulk-control key is
+// unified with the topology key. There is now ONE typed rolling credential,
+// `adsiMM`, for every privileged action (bulk control, calibration writes,
+// serial, clock-sync, critical-block unblock) AND for topology/IP-config. The
+// old `sacups` prefix is retired. The two subsystems still keep SEPARATE lease
+// stores and the bulk subsystem keeps its session-token + fresh-key-for-STOP
+// gates; only the typed prefix changed. NOTE: the wire header names
+// (x-bulk-auth, x-bulkauth-session, x-plantwide-session) are transport, not the
+// credential — do NOT rename them; only the key VALUE prefix moved sacups→adsi.
+const PLANT_WIDE_AUTH_PREFIX = "adsi";
 // v2.11.x — operator preference: extend the rolling auth-key lease to 60 min
-// so the dashboard prompts for `sacupsMM` at most once per hour. Each
+// so the dashboard prompts for `adsiMM` at most once per hour. Each
 // validated request still re-stamps the lease (rolling window), so the
 // effective TTL is up to 60 min after the *last* successful action. The
 // per-action confirm modal in the renderer remains the safety net against
@@ -38,9 +47,17 @@ function getPlantWideAuthKeys(nowMs = Date.now()) {
   const baseMs = Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now();
   const now = new Date(baseMs);
   const prev = new Date(baseMs - 60000);
+  const m = now.getMinutes();
+  const pm = prev.getMinutes();
+  // Accept BOTH zero-padded (`adsi05`) and unpadded (`adsi5`) minute forms so the
+  // single typed key behaves identically to the topology gate (requireTopologyAuth),
+  // which also accepts both. Same ±1-minute window either way — no extra minutes
+  // are admitted, so this is strictly a usability change, not a security one.
   return new Set([
-    `${PLANT_WIDE_AUTH_PREFIX}${String(now.getMinutes()).padStart(2, "0")}`,
-    `${PLANT_WIDE_AUTH_PREFIX}${String(prev.getMinutes()).padStart(2, "0")}`,
+    `${PLANT_WIDE_AUTH_PREFIX}${m}`,
+    `${PLANT_WIDE_AUTH_PREFIX}${String(m).padStart(2, "0")}`,
+    `${PLANT_WIDE_AUTH_PREFIX}${pm}`,
+    `${PLANT_WIDE_AUTH_PREFIX}${String(pm).padStart(2, "0")}`,
   ]);
 }
 

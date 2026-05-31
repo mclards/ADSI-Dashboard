@@ -2256,7 +2256,7 @@ function showLoadingWindow() {
     // No alwaysOnTop: loading should be visible during startup but must not trap
     // clicks on other OS windows (e.g. the user's taskbar or other apps).
     center: true,
-    backgroundColor: "#07111e",
+    backgroundColor: "#050c17",
     webPreferences: { nodeIntegration: false, contextIsolation: true, webSecurity: true },
   });
   loadingWin.loadFile(path.join(PUBLIC_DIR, "loading.html"));

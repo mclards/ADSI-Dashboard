@@ -265,8 +265,56 @@ function startCalibratorServer({
     });
   }
 
-  // loadIpConfigFromDb: return minimal config with active inverter
+  // Best-effort read of the dashboard's mirrored ipconfig.json — the same
+  // file /api/ip-config serves. Returns {inverters, units} or null. The
+  // Utility Tool runs ON the gateway, so this file is normally present.
+  function _readIpConfigJsonBestEffort() {
+    const fs = require("fs");
+    const pd =
+      process.env.PROGRAMDATA ||
+      process.env.ALLUSERSPROFILE ||
+      "C:\\ProgramData";
+    const candidates = [
+      path.join(pd, "InverterDashboard", "ipconfig.json"),
+      path.join(pd, "InverterDashboard", "config", "ipconfig.json"),
+    ];
+    for (const p of candidates) {
+      try {
+        if (!fs.existsSync(p)) continue;
+        const cfg = JSON.parse(fs.readFileSync(p, "utf8"));
+        if (cfg && typeof cfg === "object" && cfg.inverters) {
+          return { inverters: cfg.inverters, units: cfg.units || {} };
+        }
+      } catch (_) {
+        // try next candidate / fall through to placeholder
+      }
+    }
+    return null;
+  }
+
+  // loadIpConfigFromDb: resolve inverter→IP for the shared calibrationRoutes
+  // helpers (resolveIp / validateInvSlave). The standalone calibrator binds
+  // ONE transport by IP via /transport/select, and callPython collapses the
+  // path {ip} segment out before it ever reaches Python — so the inverter
+  // NUMBER is only a label and resolveIp MUST succeed for any inverter the
+  // operator can pick. Previously this returned only {activeInverter||1: …},
+  // so every Read / full-config / config-write 404'd ("no IP for inverter N")
+  // for any picked inverter other than 1 — the frontend never calls
+  // /api/set-active-inverter, so _activeInverter stays null. Source the real
+  // fleet map from the mirrored ipconfig.json (same data the picker is built
+  // from) when present, and keep the active/placeholder entry as a fallback
+  // so the tool still works with no ipconfig at all.
   function loadIpConfigFromDb() {
+    const real = _readIpConfigJsonBestEffort();
+    if (real && real.inverters && Object.keys(real.inverters).length) {
+      const inverters = { ...real.inverters };
+      const units = { ...(real.units || {}) };
+      if (_activeInverter && !inverters[_activeInverter]) {
+        inverters[_activeInverter] = _activeInverterIp || "127.0.0.1";
+        units[_activeInverter] = units[_activeInverter] || [1, 2, 3, 4];
+      }
+      return { inverters, units };
+    }
     return {
       inverters: {
         [_activeInverter || 1]: _activeInverterIp || "127.0.0.1",

@@ -46,22 +46,29 @@ class BulkAuthTests(unittest.TestCase):
 
     def test_current_minute_key_accepted(self):
         now = datetime.now()
-        key = f"sacups{now.minute:02d}"
+        key = f"adsi{now.minute:02d}"
         self.assertTrue(self.ns["_check_bulk_auth"](key))
 
     def test_prior_minute_key_accepted(self):
         prev = (datetime.now() + timedelta(minutes=-1)).minute
-        self.assertTrue(self.ns["_check_bulk_auth"](f"sacups{prev}"))
-        self.assertTrue(self.ns["_check_bulk_auth"](f"sacups{prev:02d}"))
+        self.assertTrue(self.ns["_check_bulk_auth"](f"adsi{prev}"))
+        self.assertTrue(self.ns["_check_bulk_auth"](f"adsi{prev:02d}"))
 
     def test_rejects_unknown(self):
         self.assertFalse(self.ns["_check_bulk_auth"]("wrongkey"))
         self.assertFalse(self.ns["_check_bulk_auth"](""))
         self.assertFalse(self.ns["_check_bulk_auth"](None))
 
+    def test_rejects_retired_sacups_prefix(self):
+        # 2026-05-31 — the `sacups` prefix was retired in favour of unified
+        # `adsi`. A current-minute `sacups` key must NEVER validate again.
+        now = datetime.now()
+        self.assertFalse(self.ns["_check_bulk_auth"](f"sacups{now.minute:02d}"))
+        self.assertFalse(self.ns["_check_bulk_auth"](f"sacups{now.minute}"))
+
     def test_bearer_prefix_ok(self):
         now = datetime.now()
-        self.assertTrue(self.ns["_check_bulk_auth"](f"Bearer sacups{now.minute:02d}"))
+        self.assertTrue(self.ns["_check_bulk_auth"](f"Bearer adsi{now.minute:02d}"))
 
 
 if __name__ == "__main__":

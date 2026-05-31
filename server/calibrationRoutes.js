@@ -10,7 +10,7 @@
 // All write surfaces are gated by:
 //   • calibrationWritesEnabled feature flag (default OFF)
 //   • topology-auth (adsiM/adsiMM) for session start/end
-//   • sacupsMM bulk auth per write call
+//   • adsiMM bulk auth per write call
 //   • active calibration_session_id whose target matches the write target
 //   • critical-block check on the target inverter
 //   • range guard (≤ 50 % delta unless operator overrides)
@@ -112,7 +112,7 @@ function registerCalibrationRoutes(app, deps) {
 
   function requireBulkAuth(req, res, next) {
     if (typeof isAuthorizedPlantWideControl !== "function" || !isAuthorizedPlantWideControl(req.body || {}, req)) {
-      return res.status(403).json({ ok: false, error: "Authorization required (sacupsMM)." });
+      return res.status(403).json({ ok: false, error: "Authorization required (adsiMM)." });
     }
     next();
   }
@@ -635,7 +635,7 @@ function registerCalibrationRoutes(app, deps) {
   //   2. Session end   → auto post-write snapshot (already wired)
   //   3. Operator clicks "Backup Now" → manual snapshot (this section)
   //   4. Operator clicks "Restore" on a row → replays the 14 values via
-  //      bulk write (requires active session + sacupsMM auth).
+  //      bulk write (requires active session + adsiMM auth).
   //
   // Snapshots are kept for 5 years (DB retention policy) and surfaced
   // per (inverter, slave) so the operator can compare or roll back at
@@ -813,7 +813,7 @@ function registerCalibrationRoutes(app, deps) {
   //
   // Gated identically to a normal bulk write:
   //   • calibrationWritesEnabled feature flag
-  //   • sacupsMM bulk-control auth
+  //   • adsiMM bulk-control auth
   //   • active calibration_session on the target (inverter, slave)
   //   • critical-block check on target
   //   • range guard (configurable via body.max_delta_pct; null disables)
@@ -891,8 +891,8 @@ function registerCalibrationRoutes(app, deps) {
               verify_ok: w.verify_ok ? 1 : 0,
               operator: cur.operator,
               auth_method: gate?.forced
-                ? "sacupsMM+session+restore+force_safety"
-                : "sacupsMM+session+restore",
+                ? "adsiMM+session+restore+force_safety"
+                : "adsiMM+session+restore",
               error_detail: result?.error || null,
               notes: gate?.forced
                 ? `restore from snapshot id=${snapshotId} (${snap.source}); TrinPM20 gate forced: ${gate.blocking_reasons.join(" | ")}`
@@ -1254,7 +1254,7 @@ function registerCalibrationRoutes(app, deps) {
             value_after: result?.value_after,
             verify_ok: result?.verify_ok ? 1 : 0,
             operator: cur.operator,
-            auth_method: gate?.forced ? "sacupsMM+session+force_safety" : "sacupsMM+session",
+            auth_method: gate?.forced ? "adsiMM+session+force_safety" : "adsiMM+session",
             error_detail: result?.error || null,
             notes: gate?.forced ? `TrinPM20 gate forced: ${gate.blocking_reasons.join(" | ")}` : null,
           });
@@ -1326,7 +1326,7 @@ function registerCalibrationRoutes(app, deps) {
               value_after: w.value_after,
               verify_ok: w.verify_ok ? 1 : 0,
               operator: cur.operator,
-              auth_method: gate?.forced ? "sacupsMM+session+bulk+force_safety" : "sacupsMM+session+bulk",
+              auth_method: gate?.forced ? "adsiMM+session+bulk+force_safety" : "adsiMM+session+bulk",
               error_detail: result?.error || null,
               notes: gate?.forced ? `TrinPM20 gate forced: ${gate.blocking_reasons.join(" | ")}` : null,
             });
@@ -1346,7 +1346,7 @@ function registerCalibrationRoutes(app, deps) {
   // Distinct from /api/calibration/write above (which targets the
   // calibration scale-factor window 81-94 under an active session). This
   // route is for the Utility Tool's editable settings tabs and uses the
-  // broader cfg_trif_map.FIELDS whitelist. Auth = sacupsMM (operator
+  // broader cfg_trif_map.FIELDS whitelist. Auth = adsiMM (operator
   // preference: one prompt per page visit, cached client-side). Does
   // NOT require an active calibration session — this is a config-write
   // flow, not a calibration session.
@@ -1678,8 +1678,8 @@ function registerCalibrationRoutes(app, deps) {
               verify_ok: w.verify_ok ? 1 : 0,
               operator: cur.operator,
               auth_method: copyGate?.forced
-                ? "sacupsMM+session+copy+force_safety"
-                : "sacupsMM+session+copy",
+                ? "adsiMM+session+copy+force_safety"
+                : "adsiMM+session+copy",
               error_detail: result?.error || null,
               notes: copyGate?.forced
                 ? `copied from inv ${srcInv} / node ${srcSlave}; TrinPM20 gate forced: ${copyGate.blocking_reasons.join(" | ")}`

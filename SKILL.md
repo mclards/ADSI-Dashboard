@@ -37,6 +37,7 @@ Detailed reference material lives in `references/` — read those files when wor
 | Latest published release | `v2.11.2` |
 | GitHub release channel | `mclards/ADSI-Dashboard` |
 | Default plant name | `ADSI Plant` |
+| Supported OS | **Windows 10 21H2+ / Windows 11 21H2+ (x64)** — Windows-only by design; see CLAUDE.md "Supported Platforms" |
 
 ---
 
@@ -49,8 +50,8 @@ Detailed reference material lives in `references/` — read those files when wor
 | Login username | `admin` |
 | Login password | `1234` |
 | Admin auth key | `ADSI-2026` — resets to `admin` / `1234` |
-| Bulk inverter control | `sacupsMM` (MM = current minute ±1) |
-| Topology / IP Config auth | `adsiM` or `adsiMM` |
+| Bulk inverter control | `adsiMM` (MM = current minute ±1; unified with topology key as of 2026-05-31) |
+| Topology / IP Config auth | `adsiM` or `adsiMM` (same rolling key as bulk control) |
 | IP Config session | 1 hour |
 | Topology session | 10 minutes |
 

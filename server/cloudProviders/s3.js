@@ -24,9 +24,18 @@ const {
   DeleteObjectCommand,
 } = require("@aws-sdk/client-s3");
 const { Upload } = require("@aws-sdk/lib-storage");
+const { NodeHttpHandler } = require("@smithy/node-http-handler");
 
 const pipelineAsync = promisify(pipeline);
 const PROVIDER_PREFIX_DEFAULT = "InverterDashboardBackups";
+
+// BR-M3 (audit 2026-05-28 §3): bound every S3 request so a network partition
+// or unreachable endpoint cannot block the backup mutex indefinitely.
+// connectionTimeout bounds the TCP/TLS handshake; requestTimeout is a
+// socket-inactivity (idle) timeout — it does NOT kill a slow-but-progressing
+// transfer, only one that stalls with no bytes flowing.
+const S3_CONNECTION_TIMEOUT_MS = 15000;
+const S3_REQUEST_TIMEOUT_MS = 120000;
 
 function normalizePrefix(prefix) {
   return String(prefix || "")
@@ -96,6 +105,11 @@ class S3CompatibleProvider {
         accessKeyId: creds.accessKeyId,
         secretAccessKey: creds.secretAccessKey,
       },
+      // BR-M3 — per-request connection + idle timeouts (see constants above).
+      requestHandler: new NodeHttpHandler({
+        connectionTimeout: S3_CONNECTION_TIMEOUT_MS,
+        requestTimeout: S3_REQUEST_TIMEOUT_MS,
+      }),
     };
     if (cfg.endpoint) clientConfig.endpoint = cfg.endpoint;
     if (cfg.forcePathStyle) clientConfig.forcePathStyle = true;

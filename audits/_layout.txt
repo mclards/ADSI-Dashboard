@@ -1,0 +1,199 @@
+########## STYLE.CSS forecast-page rules ##########
+13487:#page-forecast .forecast-page-sections > .sgroup.settings-card {
+13565:#page-forecast .forecast-page-sections > .sgroup.settings-card {
+13594:#page-forecast #forecastSection > .card-tab-panel,
+13595:#page-forecast #forecastSection > .card-tab-panel[hidden] {
+13604:#page-forecast #forecastSection .forecast-provider-panel {
+13608:#page-forecast #forecastSection .forecast-access-panel {
+13612:#page-forecast #forecastSection .forecast-api-panel,
+13613:#page-forecast #forecastSection .forecast-toolkit-panel {
+13621:#page-forecast .forecast-page-sections > .sgroup.settings-card > .sgroup-title {
+13642:#page-forecast .settings-card .settings-subsection {
+13654:#page-forecast .settings-card .settings-subsection:first-of-type {
+13667:#page-forecast .forecast-page-sections > .sgroup.settings-card > .sinfo,
+13668:#page-forecast .forecast-page-sections > .sgroup.settings-card > .sgroup-actions,
+13669:#page-forecast .forecast-page-sections > .sgroup.settings-card > .card-tabs,
+13670:#page-forecast .forecast-page-sections > .sgroup.settings-card > .card-tab-panel {
+13673:#page-forecast .forecast-page-sections > .sgroup.settings-card > .card-tab-panel > .settings-subsection,
+13674:#page-forecast .forecast-page-sections > .sgroup.settings-card > .card-tab-panel > .cb-subsection,
+13675:#page-forecast .forecast-page-sections > .sgroup.settings-card > .card-tab-panel > .sgroup-actions {
+13680:#page-forecast .forecast-page-sections .srow {
+13687:#page-forecast .forecast-page-sections .srow label {
+13692:#page-forecast .forecast-page-sections .srow > small {
+13701:#page-forecast .forecast-page-sections .srow .inp,
+13702:#page-forecast .forecast-page-sections .srow .sel {
+13707:#page-forecast .forecast-page-sections .sgroup-actions {
+14019:#page-settings .settings-card .settings-subsection,
+14028:#page-settings .settings-card .settings-subsection:first-of-type,
+14054:#page-settings .settings-sections > .sgroup.settings-card > .card-tab-panel,
+14067:#page-settings .settings-sections > .sgroup.settings-card > .card-tab-panel > .settings-subsection,
+14068:#page-settings .settings-sections > .sgroup.settings-card > .card-tab-panel > .cb-subsection,
+14069:#page-settings .settings-sections > .sgroup.settings-card > .card-tab-panel > .sgroup-actions {
+14101:#page-settings .settings-sections > .sgroup.settings-card > .card-tab-panel:not([hidden]) {
+14181:#page-settings #opsCompactSection .settings-subsection:nth-of-type(2) {
+14185:#page-settings #opsCompactSection .settings-subsection:nth-of-type(3) {
+14189:#page-settings #opsCompactSection .settings-subsection:nth-of-type(4) {
+14193:#page-settings #opsCompactSection .settings-subsection:nth-of-type(5) {
+14197:#page-settings #opsCompactSection .settings-subsection .srow,
+14198:#page-settings #connectivitySection .settings-subsection .srow,
+14203:#page-settings #opsCompactSection .settings-subsection .srow label,
+14204:#page-settings #connectivitySection .settings-subsection .srow label,
+14209:#page-settings #opsCompactSection .plant-cap-settings-subsection {
+14357:#page-settings #connectivitySection .settings-subsection:nth-of-type(2) {
+14364:  .settings-subsection:nth-of-type(2)
+14371:#page-settings #connectivitySection .settings-subsection:nth-of-type(3) {
+14376:#page-settings #connectivitySection .settings-subsection:nth-of-type(4) {
+14388::is(#page-settings, #page-forecast) #forecastSection .forecast-provider-panel {
+14392::is(#page-settings, #page-forecast) #forecastSection .forecast-access-panel,
+14393::is(#page-settings, #page-forecast) #forecastSection .forecast-api-panel {
+14397::is(#page-settings, #page-forecast) #forecastSection .forecast-toolkit-panel {
+14403:  .forecast-access-panel
+14408:  .forecast-api-panel
+14416:  .forecast-provider-panel
+14424:  .forecast-toolkit-panel
+14792:   (see #page-forecast .forecast-page-sections > .sgroup.settings-card,
+14812:  #page-settings #opsCompactSection .settings-subsection:nth-of-type(2),
+14813:  #page-settings #opsCompactSection .settings-subsection:nth-of-type(3) {
+14817:  #page-settings #opsCompactSection .settings-subsection:nth-of-type(4) {
+14821:  #page-settings #opsCompactSection .settings-subsection:nth-of-type(5) {
+14845:  :is(#page-settings, #page-forecast) #forecastSection .forecast-provider-panel,
+14846:  :is(#page-settings, #page-forecast) #forecastSection .forecast-access-panel,
+14847:  :is(#page-settings, #page-forecast) #forecastSection .forecast-api-panel {
+14853:    .forecast-toolkit-panel
+14861:    .forecast-toolkit-panel
+14915:  #page-forecast .forecast-page-sections > .sgroup.settings-card {
+14939:  #page-forecast .forecast-page-sections .srow {
+14943:  #page-forecast .forecast-page-sections .srow label,
+14944:  #page-forecast .forecast-page-sections .srow > small,
+14946:    .forecast-page-sections
+14958:  #page-settings #opsCompactSection .settings-subsection:nth-of-type(2),
+14959:  #page-settings #opsCompactSection .settings-subsection:nth-of-type(3),
+14960:  #page-settings #opsCompactSection .settings-subsection:nth-of-type(4),
+14961:  #page-settings #opsCompactSection .settings-subsection:nth-of-type(5),
+14962:  #page-settings #connectivitySection .settings-subsection:nth-of-type(3),
+14963:  #page-settings #connectivitySection .settings-subsection:nth-of-type(4),
+14966:  :is(#page-settings, #page-forecast) #forecastSection .forecast-provider-panel,
+14967:  :is(#page-settings, #page-forecast) #forecastSection .forecast-access-panel,
+14968:  :is(#page-settings, #page-forecast) #forecastSection .forecast-api-panel,
+14969:  :is(#page-settings, #page-forecast) #forecastSection .forecast-toolkit-panel {
+14995:    .settings-subsection:nth-of-type(2)
+15192:  #page-forecast .forecast-page-sections .sgroup-actions,
+15198:  #page-forecast .forecast-page-sections .sgroup-actions .btn,
+17788: * `.card-tabs` / `.card-tab` / `.card-tab-panel` and the JS helper
+17932: * as `.card-tab-panel data-card-tab-panel="key"`. */
+17933:.card-tab-panel {
+17937:.card-tab-panel[hidden] {
+17944: * `.card-tab-panel` are added to that selector list, so they span the full
+18278: * the project-wide `.card-tabs` / `.card-tab-panel` framework. */
+20232:#page-field-calibration #fieldCalibrationSection .card-tab-panel {
+20240:#page-field-calibration #fieldCalibrationSection .card-tab-panel:not([hidden]) {
+20929:   .card-tab-panel, so the rightmost column needs the same scrollbar gap. */
+
+########## INDEX.HTML forecast card structure (2139-2245) ##########
+          <div class="sgroup settings-card" id="forecastSection">
+            <div class="sgroup-title"><span class="mdi mdi-weather-partly-cloudy icon-inline" aria-hidden="true"></span> Forecast</div>
+            <div class="card-tabs" role="tablist" aria-label="Forecast sub-sections">
+              <button id="fcTabProvider" class="card-tab active" type="button" role="tab" aria-selected="true" aria-controls="fcPanelProvider" data-card-tab="provider" title="Active day-ahead forecast source — Local ML or Solcast.">
+                <span class="mdi mdi-source-branch icon-inline" aria-hidden="true"></span>
+                <span class="card-tab-label">Provider</span>
+              </button>
+              <button id="fcTabAccess" class="card-tab" type="button" role="tab" aria-selected="false" aria-controls="fcPanelAccess" data-card-tab="access" title="Solcast access mode (Toolkit/API), base URL, and timezone alignment.">
+                <span class="mdi mdi-key-outline icon-inline" aria-hidden="true"></span>
+                <span class="card-tab-label">Solcast Access</span>
+              </button>
+              <button id="fcTabApi" class="card-tab" type="button" role="tab" aria-selected="false" aria-controls="fcPanelApi" data-card-tab="api" title="Formal Solcast API credentials (key + resource ID).">
+                <span class="mdi mdi-api icon-inline" aria-hidden="true"></span>
+                <span class="card-tab-label">Solcast API</span>
+              </button>
+              <button id="fcTabToolkit" class="card-tab" type="button" role="tab" aria-selected="false" aria-controls="fcPanelToolkit" data-card-tab="toolkit" title="Toolkit account credentials, forecast horizon, resolution, and live preview.">
+                <span class="mdi mdi-toolbox-outline icon-inline" aria-hidden="true"></span>
+                <span class="card-tab-label">Solcast Toolkit</span>
+              </button>
+            </div>
+            <div id="fcPanelProvider" class="card-tab-panel active" data-card-tab-panel="provider" role="tabpanel" aria-labelledby="fcTabProvider">
+            <div class="settings-subsection forecast-provider-panel">
+              <div class="srow">
+                <label
+                  >Forecast Source
+                  <select id="setForecastProvider" class="sel" title="Active day-ahead forecast source. Local ML uses the trained model; Solcast pulls external forecasts from the Solcast API.">
+                    <option value="ml_local">Local ML (Current)</option>
+                    <option value="solcast">Solcast</option>
+                  </select></label
+                >
+              </div>
+            </div>
+            <div class="settings-subsection forecast-tuning-panel" style="grid-column: 1 / -1; display: flex; flex-direction: column;">
+              <div class="settings-subtitle">Tuning</div>
+              <div class="srow">
+                <label
+                  >Est-actual Weight<input
+                    type="number"
+                    id="setForecastEstActualWeight"
+                    class="inp"
+                    step="0.01"
+                    min="0.5"
+                    max="1"
+                    placeholder="auto"
+                    title="Manual override of the satellite est-actual training weight (0.50–1.00). Leave blank to let the engine auto-tune from metered accuracy. Validate with a backtest."
+                /></label>
+                <label
+                  >Intraday Blend Max<input
+                    type="number"
+                    id="setForecastIntradayBlendMax"
+                    class="inp"
+                    step="0.01"
+                    min="0"
+                    max="1"
+                    placeholder="0.72"
+                    title="Caps how strongly intraday observed-vs-day-ahead corrections are applied (0.00–1.00). Blank = engine default 0.72. Validate with a backtest."
+                /></label>
+              </div>
+            </div>
+            </div>
+            <div id="fcPanelAccess" class="card-tab-panel" data-card-tab-panel="access" role="tabpanel" aria-labelledby="fcTabAccess" hidden>
+            <div class="settings-subsection forecast-access-panel">
+              <div class="srow">
+                <label
+                  >Access Mode
+                  <select id="setSolcastAccessMode" class="sel" title="Toolkit Login: authenticate with email/password via the toolkit chart link. API Key: use formal Solcast API credentials.">
+                    <option value="toolkit">Toolkit Login</option>
+                    <option value="api">API Key</option>
+                  </select>
+                </label>
+                <label
+                  >Solcast Base URL<input
+                    type="text"
+                    id="setSolcastBaseUrl"
+                    class="inp inp-lg"
+                    placeholder="https://api.solcast.com.au"
+                    title="Solcast API base URL. Use the default unless your account uses a custom endpoint."
+                /></label>
+              </div>
+              <div class="srow">
+                <label
+                  >Timezone<input
+                    type="text"
+                    id="setSolcastTimezone"
+                    class="inp"
+                    placeholder="Asia/Manila"
+                    title="IANA timezone identifier for the plant location (e.g. Asia/Manila). Used to align Solcast slots to local time."
+                /></label>
+              </div>
+            </div>
+            </div>
+            <div id="fcPanelApi" class="card-tab-panel" data-card-tab-panel="api" role="tabpanel" aria-labelledby="fcTabApi" hidden>
+            <div class="settings-subsection forecast-api-panel">
+              <div class="srow">
+                <label
+                  >Solcast API Key<input
+                    type="text"
+                    id="setSolcastApiKey"
+                    class="inp inp-lg"
+                    autocomplete="off"
+                    placeholder="Stored Solcast API key"
+                    title="Your Solcast API key from the Solcast portal. Required only in API Key access mode."
+                /></label>
+                <label
+                  >Resource ID<input
+                    type="text"
+                    id="setSolcastResourceId"

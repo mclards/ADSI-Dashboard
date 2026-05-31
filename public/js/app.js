@@ -1648,8 +1648,6 @@ function renderAppUpdateSummary() {
 
   const detailEl = $("updStatusDetail");
   if (detailEl) detailEl.textContent = detailText;
-  const aboutVersion = $("aboutAppVersion");
-  if (aboutVersion) aboutVersion.textContent = currentVersion;
   const headerVer = document.querySelector(".side-about-ver");
   if (headerVer && currentVersion && currentVersion !== "—") {
     headerVer.textContent = currentVersion.startsWith("v") ? currentVersion : "v" + currentVersion;
@@ -3892,6 +3890,11 @@ async function checkBootIntegrityBanner() {
     const payload = await resp.json();
     if (!payload) return;
 
+    // UI-R11 (audit 2026-05-28 §4): suppress banner when mode==="skipped"
+    // (integrity gate degraded, e.g. asar shim issue). This is defensive and
+    // doesn't need operator notification.
+    if (payload.mode === "skipped") return;
+
     // v2.8.14 — classify what (if anything) to show. Priority:
     //   1. DB quarantine (unrescuable) — bright red
     //   2. DB auto-restore (restored)  — dark red
@@ -3908,6 +3911,15 @@ async function checkBootIntegrityBanner() {
 
     if (!unrescuable && !restored && !unexpected && !windowsInitiated) return;
     if (document.getElementById("adsi-db-restore-banner")) return;
+
+    // UI-R3 (audit 2026-05-28 §4 NEW-R5): in remote mode this banner refers
+    // only to the LOCAL VIEWER's cache DB — plant data lives on the gateway
+    // and is unaffected. Reword each message to make that clear so the
+    // operator doesn't misread "Database auto-restored" / "Unexpected prior
+    // shutdown" as a plant-data incident.
+    const remoteMode = String(State?.settings?.operationMode || "gateway")
+      .trim().toLowerCase() === "remote";
+    const scopeLabel = remoteMode ? "Local viewer cache" : "Database";
 
     const banner = document.createElement("div");
     banner.id = "adsi-db-restore-banner";
@@ -3926,32 +3938,52 @@ async function checkBootIntegrityBanner() {
     let msg;
     if (unrescuable) {
       const when = payload.unrescuableAt ? new Date(payload.unrescuableAt).toLocaleString() : "";
-      msg =
-        `<strong>Database quarantined</strong> — the main DB and all backup slots were corrupt ` +
-        `${when ? `at ${when} ` : ""}and a fresh empty database was created. ` +
-        `Historical data is preserved under <code>adsi.db.unrescuable-*</code> for forensics. ` +
-        `Perform a Cloud Restore from Settings to recover historical readings.`;
+      if (remoteMode) {
+        msg =
+          `<strong>${scopeLabel} quarantined</strong> — this viewer's local cache and all backup slots were ` +
+          `corrupt ${when ? `at ${when} ` : ""}and a fresh empty cache was created. ` +
+          `<em>Plant data on the gateway is unaffected.</em> The viewer will repopulate from the gateway automatically; ` +
+          `if historical local cache matters for offline use, perform a Cloud Restore from Settings.`;
+      } else {
+        msg =
+          `<strong>${scopeLabel} quarantined</strong> — the main DB and all backup slots were corrupt ` +
+          `${when ? `at ${when} ` : ""}and a fresh empty database was created. ` +
+          `Historical data is preserved under <code>adsi.db.unrescuable-*</code> for forensics. ` +
+          `Perform a Cloud Restore from Settings to recover historical readings.`;
+      }
     } else if (restored) {
       const slot = Number(payload.restoredFromSlot);
       const when = payload.restoredAt ? new Date(payload.restoredAt).toLocaleString() : "";
-      msg =
-        `<strong>Database auto-restored</strong> from backup slot ${Number.isFinite(slot) ? slot : "?"} ` +
-        `${when ? `at ${when} ` : ""}after corrupt quick_check (${payload.quickCheck || "n/a"}). ` +
-        `Recent readings (up to ~2 h) may show gaps and will re-fill automatically.`;
+      if (remoteMode) {
+        msg =
+          `<strong>${scopeLabel} auto-restored</strong> from backup slot ${Number.isFinite(slot) ? slot : "?"} ` +
+          `${when ? `at ${when} ` : ""}after corrupt quick_check (${payload.quickCheck || "n/a"}). ` +
+          `<em>Plant data on the gateway is unaffected.</em> The viewer will resync from the gateway automatically.`;
+      } else {
+        msg =
+          `<strong>${scopeLabel} auto-restored</strong> from backup slot ${Number.isFinite(slot) ? slot : "?"} ` +
+          `${when ? `at ${when} ` : ""}after corrupt quick_check (${payload.quickCheck || "n/a"}). ` +
+          `Recent readings (up to ~2 h) may show gaps and will re-fill automatically.`;
+      }
     } else if (unexpected) {
       const when = ls.checkedAt ? new Date(ls.checkedAt).toLocaleString() : "";
+      const scopeIntro = remoteMode
+        ? "This viewer's last run"
+        : "the last run";
       msg =
-        `<strong>Unexpected prior shutdown</strong> — the last run ended without any graceful ` +
+        `<strong>Unexpected prior shutdown</strong> — ${scopeIntro} ended without any graceful ` +
         `shutdown signal ${when ? `(detected at ${when})` : ""}. Common causes: BSOD, forced power loss, ` +
         `or Windows killing the app past its shutdown budget. ` +
         `Check <em>Event Viewer → System</em> for <code>Kernel-Power 41</code> and ` +
-        `<code>Application Error</code> around that time to narrow the cause.`;
+        `<code>Application Error</code> around that time to narrow the cause.` +
+        (remoteMode ? ` <em>Plant data on the gateway is unaffected.</em>` : "");
     } else {
       // Windows-initiated reboot — informational only.
       const when = ls.timestamp ? new Date(ls.timestamp).toLocaleString() : "";
       const what = ls.reason === "session-end" ? "Windows session ended" : "Windows power-shutdown signal";
+      const scopeSuffix = remoteMode ? " on this viewer" : "";
       msg =
-        `<strong>Prior shutdown: ${what}</strong> ${when ? `at ${when}` : ""}. ` +
+        `<strong>Prior shutdown: ${what}${scopeSuffix}</strong> ${when ? `at ${when}` : ""}. ` +
         `This is usually Windows Update, Automatic Maintenance, or a user/scheduled reboot. ` +
         `If it happens nightly, check Windows Update / Task Scheduler for overnight reboots.`;
     }
@@ -4482,7 +4514,6 @@ function setupNav() {
   if (storedOrder) {
     const buttons = [...nav.querySelectorAll(".nav-btn")];
     const byPage = new Map(buttons.map((b) => [b.dataset.page, b]));
-    const sectionLabel = nav.querySelector(".nav-section-label");
     const seen = new Set();
     const ordered = [];
     for (const page of storedOrder) {
@@ -4929,11 +4960,7 @@ function renderActiveSettingsMeta(sectionId) {
   const activeId = normalizeSettingsSectionId(sectionId);
   const meta = SETTINGS_SECTION_META[activeId] || SETTINGS_SECTION_META[DEFAULT_SETTINGS_SECTION_ID];
   const mainTitle = $("settingsMainSectionTitle");
-  const mainCopy = $("settingsMainSectionCopy");
-  const sidebarChip = $("settingsSidebarCurrentChip");
   if (mainTitle) mainTitle.textContent = meta.title;
-  if (mainCopy) mainCopy.textContent = meta.copy;
-  if (sidebarChip) sidebarChip.textContent = meta.title;
 }
 
 function setActiveSettingsSection(sectionId, persist = true) {
@@ -5033,6 +5060,14 @@ function initSettingsSectionNav() {
 
   if (menu && menu.dataset.bound !== "1") {
     menu.dataset.bound = "1";
+    // Complete the ARIA tab pattern: the menu is role="tablist", so each button
+    // must be role="tab" and point at the section panel it controls. (aria-selected
+    // is maintained per-activation by setActiveSettingsSection.)
+    menu.querySelectorAll(".settings-menu-btn").forEach((btn) => {
+      btn.setAttribute("role", "tab");
+      const sec = btn.dataset.settingsSection;
+      if (sec) btn.setAttribute("aria-controls", sec);
+    });
     menu.addEventListener("click", (e) => {
       const btn = e.target.closest(".settings-menu-btn");
       if (!btn) return;
@@ -6266,6 +6301,8 @@ async function loadSettings() {
     $("setCsvPath").value = s.csvSavePath || "";
     $("setRetainDays").value = s.retainDays || 90;
     $("setForecastProvider").value = s.forecastProvider || "ml_local";
+    if ($("setForecastEstActualWeight")) $("setForecastEstActualWeight").value = s.forecastEstActualWeight ?? "";
+    if ($("setForecastIntradayBlendMax")) $("setForecastIntradayBlendMax").value = s.forecastIntradayBlendMax ?? "";
     $("setSolcastBaseUrl").value = s.solcastBaseUrl || "https://api.solcast.com.au";
     $("setSolcastAccessMode").value = s.solcastAccessMode || "toolkit";
     $("setSolcastApiKey").value = s.solcastApiKey || "";
@@ -7543,6 +7580,18 @@ async function saveSettings() {
     csvSavePath: $("setCsvPath").value,
     retainDays: Number($("setRetainDays").value),
     forecastProvider: $("setForecastProvider").value,
+    forecastEstActualWeight: (() => {
+      const raw = String($("setForecastEstActualWeight")?.value || "").trim();
+      if (!raw) return "";
+      const val = Number(raw);
+      return Number.isFinite(val) && val >= 0.5 && val <= 1.0 ? String(val) : "";
+    })(),
+    forecastIntradayBlendMax: (() => {
+      const raw = String($("setForecastIntradayBlendMax")?.value || "").trim();
+      if (!raw) return "";
+      const val = Number(raw);
+      return Number.isFinite(val) && val >= 0.0 && val <= 1.0 ? String(val) : "";
+    })(),
     ...solcastConfig,
     plantLatitude:  Number($("setPlantLatitude")?.value  ?? ""),
     plantLongitude: Number($("setPlantLongitude")?.value ?? ""),
@@ -12379,36 +12428,30 @@ function buildBulkControlPanel() {
   const wrap = el("div", "bulk-control-bar");
   wrap.innerHTML = `
     <div class="bulk-card-hdr">
-      <span class="bulk-card-icon">⚡</span>
+      <span class="bulk-card-icon mdi mdi-flash" aria-hidden="true"></span>
       <span class="bulk-card-title">Bulk Command</span>
     </div>
     <div class="bulk-card-body">
       <div class="bulk-field">
         <label class="bulk-range-label" for="bulkInvRangeInput">Inverter Targets</label>
-        <div class="bulk-input-row">
-          <input
-            id="bulkInvRangeInput"
-            class="inp bulk-range-input"
-            type="text"
-            inputmode="text"
-            autocomplete="off"
-            placeholder="1-13, 16, 23-27"
-            title="Specify inverter numbers or ranges to target for bulk commands (e.g. 1-13, 16, 23-27)."
-          />
-        </div>
-        <div class="bulk-helper">Numbers, ranges, or both. Duplicates ignored.</div>
+        <input
+          id="bulkInvRangeInput"
+          class="inp bulk-range-input"
+          type="text"
+          inputmode="text"
+          autocomplete="off"
+          placeholder="1-13, 16, 23-27"
+          title="Inverter numbers or ranges to target (e.g. 1-13, 16, 23-27). Numbers, ranges, or both; duplicates ignored."
+        />
       </div>
       <div class="bulk-quick-row">
         <button id="btnFillAllTargets" class="btn btn-outline bulk-quick-btn" title="Fill in all configured inverter numbers.">All Inverters</button>
         <button id="btnClearTargets" class="btn btn-outline bulk-quick-btn" title="Clear the selected inverter range.">Clear</button>
       </div>
-      <div class="bulk-sep"></div>
-      <div class="bulk-cmd-label">Send command to all nodes per target</div>
       <div class="bulk-cmd-row">
-        <button id="btnStartSelected" class="btn btn-green bulk-cmd-btn" title="Send START command to all nodes of each selected inverter. Requires authorization.">START</button>
-        <button id="btnStopSelected" class="btn btn-red bulk-cmd-btn" title="Send STOP command to all nodes of each selected inverter. Requires authorization.">STOP</button>
+        <button id="btnStartSelected" class="btn btn-green bulk-cmd-btn" title="Send START to all nodes of each targeted inverter. An authorization key is required before execution.">START</button>
+        <button id="btnStopSelected" class="btn btn-red bulk-cmd-btn" title="Send STOP to all nodes of each targeted inverter. An authorization key is required before execution.">STOP</button>
       </div>
-      <div class="bulk-info">Enter inverter numbers or ranges, then press START or STOP. An authorization key is required before execution.</div>
     </div>`;
   return wrap;
 }
@@ -13308,7 +13351,7 @@ async function authorizeBulkCommand(action, scopeLabel, totalTargets) {
 // (BULK_AUTH_SESSION_TTL_MS in server/bulkControlAuth.js) and
 // `_requireBulkAuth` accepts it — the client was simply discarding it and
 // re-prompting. This caches the issued token for the section and reuses it
-// until ~expiry, so the operator types `sacupsMM` once and every action in
+// until ~expiry, so the operator types `adsiMM` once and every action in
 // the section runs auth-free for the hour. Re-prompts only when the token
 // is missing/near-expiry or after a 401 invalidation. Destructive
 // plant-wide flows (MW-cap, clock-sync) intentionally keep their own
@@ -14991,6 +15034,12 @@ function connectWS() {
     setWsState(true, "ONLINE");
     State.wsRetries = 0;
     showOfflineIndicator(false);  // Clear offline banner on reconnect
+    // UI-R7 (audit 2026-05-28 §4) — the loading-screen Connection-Mode picker
+    // restarts the server, which drops + re-opens this WS. Re-apply Local
+    // Backup visibility on every (re)connect so a runtime mode flip updates the
+    // panel immediately instead of waiting up to ~10 s for the next
+    // configChanged push.
+    try { applyLocalBackupModeVisibility(); } catch (_) {}
   };
 
   ws.onmessage = ({ data }) => {
@@ -15613,8 +15662,10 @@ function initCameraPlayer() {
 function handleWS(msg) {
   // v2.8.14 R2/R4: backup health updates push live whenever any backup attempt
   // (Tier 1, Tier 3, scheduled .adsibak, manual portable, restore) completes.
+  // UI-R4 (audit 2026-05-28 §4): guard with isLocalBackupRemoteGated() since
+  // the backup-health DOM is hidden in remote mode — avoid wasted DOM mutations.
   if (msg.type === "backup_health") {
-    if (msg.payload) renderBackupHealth(msg.payload);
+    if (!isLocalBackupRemoteGated() && msg.payload) renderBackupHealth(msg.payload);
     return;
   }
   // v2.11.0 Slice δ — APC closed-loop verify result.
@@ -22355,6 +22406,24 @@ async function cbUpdateConnectionStatus() {
   }
 }
 
+// UI-R5: apply remote-mode disabling to cloud-settings form inputs.
+function applyCBSettingsRemoteGating() {
+  const remoteMode = isLocalBackupRemoteGated();
+  const formInputs = [
+    "cbEmail", "cbEnabled", "cbProvider", "cbSchedule",
+    "cbScopeDb", "cbScopeConfig", "cbScopeLogs",
+    "cbOneDriveClientId", "cbGDriveClientId", "cbGDriveClientSecret",
+    "cbS3Endpoint", "cbS3Region", "cbS3Bucket", "cbS3Prefix", "cbS3ForcePathStyle",
+    "cbS3AccessKeyId", "cbS3SecretAccessKey",
+    "btnCloudBackupSave", "btnConnectOneDrive", "btnDisconnectOneDrive",
+    "btnConnectGDrive", "btnDisconnectGDrive", "btnConnectS3", "btnDiscS3"
+  ];
+  for (const id of formInputs) {
+    const el = $(id);
+    if (el) el.disabled = remoteMode;
+  }
+}
+
 async function cbLoadSettings() {
   try {
     const data = await api("/api/backup/settings");
@@ -22402,6 +22471,8 @@ async function cbLoadSettings() {
     cbSuggestProvider(s.email || "");
     await cbUpdateConnectionStatus();
     await cbRefreshHistory();
+    // UI-R5: apply remote-mode gating to cloud-settings form.
+    applyCBSettingsRemoteGating();
   } catch (err) {
     console.warn("[CloudBackup] Settings load failed:", err.message);
   }
@@ -22436,7 +22507,12 @@ async function cbSaveSettings() {
     await api("/api/backup/settings", "POST", body);
     showMsg("cbActionMsg", "✔ Cloud settings saved", "");
   } catch (err) {
-    showMsg("cbActionMsg", "✗ Save failed: " + err.message, "error");
+    // UI-R5: improve error message for remote-mode save failures.
+    const isRemote = isLocalBackupRemoteGated();
+    const msg = isRemote
+      ? "Not available in remote mode — cloud settings cannot be changed from a remote viewer."
+      : err.message;
+    showMsg("cbActionMsg", "✗ Save failed: " + msg, "error");
   }
 }
 
@@ -22728,13 +22804,20 @@ function _formatBackupHealthDetail(entry) {
 function renderBackupHealth(snapshot) {
   const root = $("backupHealthList");
   if (!root) return;
-  if (!snapshot) {
+  // UI-R6 (audit 2026-05-28 §4): consume gatewayOnly/mode fields as a render gate.
+  // If gatewayOnly is true and we're in remote mode, skip rendering (panel is hidden anyway).
+  if (snapshot?.gatewayOnly && isLocalBackupRemoteGated()) {
+    return;
+  }
+  // Extract the health data from the response; server may wrap it in { health, mode, gatewayOnly, ... }.
+  const health = snapshot?.health || snapshot;
+  if (!health) {
     root.innerHTML = '<div class="cb-health-row cb-health-unknown"><span class="cb-health-icon mdi mdi-help-circle-outline"></span><div class="cb-health-body"><div class="cb-health-name">Health data unavailable</div></div></div>';
     return;
   }
   const types = ["tier1", "tier3", "portableScheduled", "portableManual"];
   const html = types.map((t) => {
-    const entry = snapshot[t] || {};
+    const entry = health[t] || {};
     const status = entry.status || (entry.consecutiveFailures >= 3 ? "alert" : entry.lastSuccessAt ? "ok" : "unknown");
     const icon =
       status === "alert" ? "mdi-alert-circle"
@@ -23810,7 +23893,7 @@ async function _srnHandleRefresh() {
     return;
   }
   // v2.10.x — no operator auth prompt: vendor FC 0x71 SCOPE peek is read-only
-  // on the inverter side, so the per-inverter Refresh runs without sacupsMM.
+  // on the inverter side, so the per-inverter Refresh runs without adsiMM.
   if (btn) btn.disabled = true;
   if (msgEl) { msgEl.textContent = "Reading SCOPE peek… ~3 s"; msgEl.className = "smsg"; }
   try {
@@ -25888,7 +25971,10 @@ async function loadLocalBackupSchedule() {
 
 async function saveLocalBackupSchedule() {
   const msgEl = $("lbsMsg");
+  const btn = $("btnLbsSave");
   if (msgEl) { msgEl.textContent = "Saving…"; msgEl.className = "smsg"; }
+  // UI-R12: set loading state while POST is in flight
+  if (btn) btn.disabled = true;
   try {
     const body = {
       schedule: $("lbsSchedule")?.value || "off",
@@ -25903,6 +25989,9 @@ async function saveLocalBackupSchedule() {
   } catch (err) {
     if (msgEl) { msgEl.textContent = `Failed: ${err.message}`; msgEl.className = "smsg text-error"; }
     showToast(`Schedule save failed: ${err.message}`, "error");
+  } finally {
+    // UI-R12: restore button state after response
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -26205,7 +26294,7 @@ function escapeHtml(str) {
 
 // ─── Toast Notification System ────────────────────────────────────────────────
 const Toast = (() => {
-  const MAX_STACK = 6;
+  const MAX_STACK = 4;
   const TYPE_META = {
     success: { icon: "✅", label: "Success" },
     error:   { icon: "❌", label: "Error" },
@@ -29371,12 +29460,11 @@ function _fcalSetMsg(id, text, kind = "info") {
 // that. Warnings/confirmations are still allowed; the auth-key TYPING
 // modal is what we eliminate from per-button paths.
 //
-// Both the topology key (`adsi${minute}`) and the bulk-control key
-// (`sacups${minute}`) are time-rolling formulas keyed off the same
-// minute. We accept either form in the unlock prompt, extract the
-// minute, and prime BOTH client caches plus activate BOTH server-side
-// leases (60-min rolling window) with one round-trip. From that point
-// on, every calibration handler just reads from cache.
+// As of 2026-05-31 there is ONE rolling credential, `adsi${minute}`, shared by
+// the bulk-control and topology gates (the old `sacups` prefix is retired). We
+// extract the minute from the typed key, prime BOTH client caches, and activate
+// BOTH server-side leases (60-min rolling window) with one round-trip. From that
+// point on, every calibration handler just reads from cache.
 //
 // Concurrent button clicks coalesce on `_fcalUnlockPromise` so only one
 // modal ever opens. Cache is cleared on page-leave (see switchPage) so
@@ -29411,21 +29499,18 @@ async function _fcalEnsureUnlock() {
       _fcalSetMsg("fcalReadMsg", "Cancelled — calibration page is locked.", "err");
       return false;
     }
-    const mBulk = typed.match(/^sacups(\d{1,2})$/);
-    const mTopo = typed.match(/^adsi(\d{1,2})$/);
-    const minute = mBulk ? Number(mBulk[1]) : (mTopo ? Number(mTopo[1]) : NaN);
+    const mKey = typed.match(/^adsi(\d{1,2})$/);
+    const minute = mKey ? Number(mKey[1]) : NaN;
     if (!Number.isFinite(minute) || minute < 0 || minute > 59) {
       _fcalSetMsg("fcalReadMsg",
         "Authorization failed — key incorrect or expired.",
         "err");
       return false;
     }
-    // CRITICAL: bulk auth server ONLY accepts the 2-digit padded form
-    // (`sacups07`). Topology accepts both, so we pad uniformly. Without
-    // this, minutes 0-9 unlock client-side but every server request
-    // would 403 → caches wipe → modal re-fires every action.
+    // Both gates now accept padded (`adsi07`) and unpadded (`adsi7`) forms, but
+    // we still pad uniformly so the cached value is canonical across requests.
     const mm = String(minute).padStart(2, "0");
-    setCachedBulkAuthKey(`sacups${mm}`);
+    setCachedBulkAuthKey(`adsi${mm}`);
     setCachedTopologyKey(`adsi${mm}`);
     _fcalSetMsg("fcalReadMsg", "Calibration page unlocked. No further auth prompts on this visit.", "ok");
     return true;
@@ -29995,7 +30080,7 @@ function _fcalRenderSettingsGroup(view) {
     const disBtn = writable && writesGated ? " disabled" : "";
     const btnTip = writesGated
       ? "Read live values first — Write is disabled until then."
-      : "Write this value to the inverter (sacupsMM authorization required).";
+      : "Write this value to the inverter (adsiMM authorization required).";
     const writeCell = writable
       ? `<button class="btn btn-outline btn-xs fcal-write-one" ` +
         `data-field="${escapeHtml(r.field)}" title="${escapeHtml(btnTip)}"${disBtn}>Write</button>`
@@ -30064,7 +30149,7 @@ function _fcalRenderSettingsGroup(view) {
     wa.disabled = writesGated;
     wa.title = writesGated
       ? "Read live values first — Write all is disabled until then."
-      : "Write every row whose New value column is non-empty (sacupsMM authorization required).";
+      : "Write every row whose New value column is non-empty (adsiMM authorization required).";
   }
 }
 
@@ -30095,7 +30180,7 @@ function _fcalReadConfigInput(field) {
 //
 // Cache layering: prefer the page-wide bulk-auth cache primed by
 // _fcalEnsureUnlock() when Calibration Mode was enabled — that key is
-// `sacupsMM`, identical to what /api/calibration/config-write requires —
+// `adsiMM`, identical to what /api/calibration/config-write requires —
 // so the operator only ever types it once per visit.
 let _fcalConfigAuthKey = null;
 async function _fcalEnsureConfigAuth() {
@@ -30119,7 +30204,7 @@ async function _fcalEnsureConfigAuth() {
       initBulkAuthModal();
       k = await requestBulkAuthorization(
         "Enable inverter config writes",
-        "— enter your bulk-control key (sacupsMM)",
+        "— enter your bulk-control key (adsiMM)",
         1,
       );
     } catch (_) {
@@ -30129,7 +30214,7 @@ async function _fcalEnsureConfigAuth() {
     // Last-ditch fallback for dev/test contexts without the modal HTML.
     try {
       k = window.prompt(
-        "Enter authorization key (sacupsMM) to enable inverter config writes for this session:",
+        "Enter authorization key (adsiMM) to enable inverter config writes for this session:",
         "",
       );
     } catch (_) {
@@ -31859,7 +31944,7 @@ async function _fcalWriteOne(offset, { silent = false } = {}) {
   const forceSafety = !!(document.getElementById("fcalForceSafetyGate")?.checked
     || FieldCalibrationUI.forceSafety);
 
-  // Calibration Mode supplies the cached sacupsMM bulk key. _fcalGetBulkAuth
+  // Calibration Mode supplies the cached adsiMM bulk key. _fcalGetBulkAuth
   // NEVER prompts (4.1) — if the page is locked it returns "" and the
   // caller surfaces the "Enter Calibration Mode first" guidance.
   const authKey = await _fcalGetBulkAuth();
