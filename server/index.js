@@ -524,6 +524,11 @@ const REMOTE_ARCHIVE_TRANSFER_CONCURRENCY = 3; // parallel archive file download
 const PRIORITY_PULL_ARCHIVE_TRANSFER_CONCURRENCY = 3;
 const REPLICATION_TRANSFER_STREAM_HWM = 4 * 1024 * 1024; // 4 MB stream buffers (was 1 MB)
 const REPLICATION_STREAM_GZIP_MIN_BYTES = 256 * 1024;
+// Min gap between per-chunk transfer-progress WS broadcasts. Network chunks can
+// arrive far faster than the UI needs; coalescing to ~4 fps keeps the live WS
+// lane clear during a pull/send and the terminal (done/error) frame always
+// fires unthrottled so the panel still converges to 100%.
+const REPLICATION_XFER_PROGRESS_MIN_MS = 250;
 const GATEWAY_MAIN_DB_SNAPSHOT_CACHE_TTL_MS = 60 * 1000;
 const GATEWAY_MAIN_DB_SNAPSHOT_CHECKPOINT_MIN_MS = 10 * 60 * 1000;
 const REPLICATION_HASH_CACHE_LIMIT = 256;
@@ -4815,10 +4820,17 @@ async function pullMainDbFromRemote(baseUrl, opts = {}) {
       ...transferMeta,
     });
 
+    let lastChunkEmitTs = 0;
     body.on("data", (chunk) => {
       const bytes = Math.max(0, Buffer.byteLength(chunk || Buffer.alloc(0)));
       if (bytes <= 0) return;
       recvBytes += bytes;
+      // Throttle per-chunk progress frames so a fast download doesn't flood the
+      // live WS lane. The terminal "done" frame below always fires unthrottled,
+      // so the panel still lands on 100%.
+      const nowTs = Date.now();
+      if (nowTs - lastChunkEmitTs < REPLICATION_XFER_PROGRESS_MIN_MS) return;
+      lastChunkEmitTs = nowTs;
       broadcastUpdate({
         type: "xfer_progress",
         dir: "rx",
@@ -5749,11 +5761,12 @@ async function proxyToRemote(req, res, tokenOverride = "", options = {}) {
     const bodyText = await upstream.text();
     res.status(upstream.status);
     if (/application\/json/i.test(contentType)) {
-      try {
-        return res.json(JSON.parse(bodyText || "{}"));
-      } catch {
-        return res.json({ ok: false, error: "Invalid JSON from remote gateway." });
-      }
+      // Forward the gateway's JSON bytes verbatim instead of parsing then
+      // re-stringifying (a wasteful CPU + allocation round-trip on the remote
+      // viewer for large analytics/energy/alarm reads). An empty body becomes
+      // "{}" so the browser's response.json() never chokes.
+      res.set("Content-Type", contentType || "application/json; charset=utf-8");
+      return res.send(bodyText && bodyText.trim() ? bodyText : "{}");
     }
     return res.send(bodyText);
   } catch (err) {
@@ -18210,8 +18223,15 @@ app.get("/api/replication/main-db", async (req, res) => {
       label: "Sending main database",
     });
 
+    let lastSendEmitTs = 0;
     stream.on("data", (chunk) => {
       sentBytes += Math.max(0, Buffer.byteLength(chunk || Buffer.alloc(0)));
+      // Throttle per-chunk progress frames so streaming the snapshot to a
+      // remote doesn't flood the gateway's local WS clients. The terminal
+      // "done" frame below always fires unthrottled.
+      const nowTs = Date.now();
+      if (nowTs - lastSendEmitTs < REPLICATION_XFER_PROGRESS_MIN_MS) return;
+      lastSendEmitTs = nowTs;
       broadcastUpdate({
         type: "xfer_progress",
         dir: "tx",

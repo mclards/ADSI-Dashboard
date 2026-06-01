@@ -1259,6 +1259,57 @@ def _fw_live_worker(job_id: str, path: str, node: int, slave: int,
                 break
             time.sleep(0.5)
 
+    def _fw_post_flash_verify():
+        """ISM Ingecon.Identifica — best-effort re-read of FC11 AFTER a
+        successful flash to confirm the unit booted the new firmware and
+        refresh its reported version. READ-ONLY; never flips job["ok"]. The
+        DSP reboots into the new image, so a couple of spaced retries give it
+        time to come back; if it still can't be read we say so plainly rather
+        than fail the (already-successful) flash."""
+        old_model = (getattr(slave_id, "model_code", "") or "")
+        new_model = None
+        err = None
+        for _attempt in range(3):
+            if job["abort"]:
+                break
+            try:
+                if link_serial:
+                    sid = transport_obj.report_slave_id(int(slave),
+                                                        timeout_s=3.0)
+                else:
+                    client = _registry.get_client()
+                    if not client:
+                        raise RuntimeError("no client for re-identify")
+                    with bus_lock:
+                        sid = _vendor_pdu.read_slave_id(client, int(slave),
+                                                        timeout_s=3.0)
+                new_model = (getattr(sid, "model_code", "") or "")
+                break
+            except Exception as e:
+                err = e
+                time.sleep(3.0)          # allow the DSP reboot to settle
+        if new_model is not None:
+            changed = (new_model.strip().upper()
+                       != old_model.strip().upper())
+            audit("firmware.live.verify_ok", {
+                "host": job["host"], "node": node, "slave": slave,
+                "old_model_code": old_model, "new_model_code": new_model,
+                "changed": changed,
+            })
+            job["verify"] = {"ok": True, "old": old_model,
+                             "new": new_model, "changed": changed}
+            _prog(f"Verified — inverter now reports {new_model or '—'}", 100)
+        else:
+            audit("firmware.live.verify_warn", {
+                "host": job["host"], "node": node, "slave": slave,
+                "old_model_code": old_model,
+                "error": str(err) if err else "no_reply",
+            })
+            job["verify"] = {"ok": False, "old": old_model,
+                             "error": str(err) if err else "no_reply"}
+            _prog("Flash done, but could not re-read identity (unit may "
+                  "still be rebooting) — verify manually.", 100)
+
     # Injected transports are owned by US, not flash_inverter_node (it only
     # connects/closes a transport it created itself), so close it here.
     abortable = _AbortableTransport(transport_obj)
@@ -1285,6 +1336,14 @@ def _fw_live_worker(job_id: str, path: str, node: int, slave: int,
             "message": res.message, "diag": res.diag(),
         }
         job["ok"] = bool(res.ok)
+        if res.ok:
+            # ISM re-identifies the node after each flash; mirror that as a
+            # read-only confirmation step (guarded — a failure here never
+            # un-does a successful flash).
+            try:
+                _fw_post_flash_verify()
+            except Exception:
+                pass
     except Exception as exc:  # FlashGateError / FirmwareError / abort / link
         job["ok"] = False
         job["error"] = str(exc)
@@ -1443,6 +1502,7 @@ async def api_firmware_flash(req: Request):
         _fw_jobs[job_id] = {
             "id": job_id, "done": False, "ok": None, "error": None,
             "abort": False, "progress": [], "events": [], "result": None,
+            "verify": None,
             "node": node, "slave": slave, "host": link_label,
             "file": os.path.basename(path), "started_ms": int(time.time() * 1000),
         }
@@ -1483,7 +1543,7 @@ async def api_firmware_job(job_id: str):
         "aborting": job["abort"], "node": job["node"],
         "slave": job["slave"], "host": job["host"], "file": job["file"],
         "progress": job["progress"], "events": job["events"],
-        "result": job["result"],
+        "result": job["result"], "verify": job.get("verify"),
     }
 
 

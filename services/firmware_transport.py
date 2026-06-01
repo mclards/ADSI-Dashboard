@@ -431,22 +431,66 @@ def verify_inverter_compatible(slave_id, image: FirmwareImage,
             "compatibility before flashing")
     code = _fw_code_from_filename(firmware_path)        # e.g. AAV1003IJK01BC
     model = (getattr(slave_id, "model_code", "") or "").upper().strip()
-    cur_fw = (getattr(slave_id, "firmware_main", "") or "").upper().strip()
-    # Family/model prefix must appear consistently. Model code is like
-    # "AAV1003BA"; file code starts with the same product key "AAV1003".
-    model_key = re.sub(r"[^A-Z0-9]", "", model)[:7]
-    if model_key and not code.startswith(model_key):
+    # The AUTHORITATIVE running firmware for our Freescale/Motorola fleet is
+    # FC11 model_code (AAV1003xx) — the SAME namespace as the .S filename
+    # code. firmware_main / firmware_aux (FC11 AAS… bytes) are UNVERIFIED
+    # auxiliary IDs and are NEVER the running firmware (proven by decompiling
+    # ISM Ingecon::Identifica; see memory/fc11_freescale_slaveid_layout.md),
+    # so they must not drive the compatibility/downgrade decision. (Earlier
+    # code compared firmware_main vs the AAV filename code — two different
+    # namespaces, so the guard never fired; fixed 2026-05-31.)
+    model_alnum = re.sub(r"[^A-Z0-9]", "", model)
+    code_alnum = re.sub(r"[^A-Z0-9]", "", code)
+    model_key = model_alnum[:7]
+    if model_key and not code_alnum.startswith(model_key):
         raise FlashGateError(
             f"firmware {code} is not for this unit (model {model!r}); "
             "refusing to flash a mismatched image")
-    # Downgrade heuristic: ISM compares CodigoFirmware.Version. We do not
-    # have the embedded-code scan yet, so use the FC11 firmware string vs
-    # the filename trailer as a conservative guard — any time the running
-    # firmware string sorts AFTER the file's, require an explicit override.
-    if cur_fw and code and cur_fw > code and not allow_downgrade:
+    # Downgrade guard — mirrors ISM's CodigoFirmware.Version comparison: the
+    # version is the trailing field of the code, both sides in the shared
+    # AAV namespace (model_code = product-key + version; file = product-key +
+    # IJK-variant + version). Compare version trailers, not the whole string.
+    model_version = model_alnum[-2:] if len(model_alnum) >= 2 else ""
+    file_version = code_alnum[-2:] if len(code_alnum) >= 2 else ""
+    if (model_version and file_version and model_version > file_version
+            and not allow_downgrade):
         raise FlashGateError(
-            f"installed firmware {cur_fw!r} appears newer than file "
-            f"{code!r}; downgrade requires explicit allow_downgrade=True")
+            f"installed firmware version {model_version!r} (model {model!r}) "
+            f"appears newer than file version {file_version!r} ({code!r}); "
+            "downgrade requires explicit allow_downgrade=True")
+
+
+def firmware_upgrade_direction(slave_id, firmware_path: str) -> dict:
+    """ISM QueHableAhoraOCalleParaSiempre — classify the pending flash as
+    upgrade / downgrade / same / unknown by comparing the running model_code
+    version against the file's version (both AAV-namespace trailers).
+
+    Pure, side-effect-free; returns a machine-readable dict the orchestrator
+    logs to the audit trail and the UI surfaces BEFORE the irreversible step,
+    exactly as ISM tells the operator "will be upgraded" / "will be
+    DOWNGRADED" before flashing.
+    """
+    code = _fw_code_from_filename(firmware_path)
+    model = (getattr(slave_id, "model_code", "") or "").upper().strip()
+    code_alnum = re.sub(r"[^A-Z0-9]", "", code)
+    model_alnum = re.sub(r"[^A-Z0-9]", "", model)
+    file_version = code_alnum[-2:] if len(code_alnum) >= 2 else ""
+    model_version = model_alnum[-2:] if len(model_alnum) >= 2 else ""
+    if not model_version or not file_version:
+        direction = "unknown"
+    elif model_version < file_version:
+        direction = "upgrade"
+    elif model_version > file_version:
+        direction = "downgrade"
+    else:
+        direction = "same"
+    return {
+        "direction": direction,
+        "current": model_version,
+        "new": file_version,
+        "model_code": model,
+        "file_code": code,
+    }
 
 
 # ─── The gated orchestrator ────────────────────────────────────────────────
@@ -492,6 +536,10 @@ def flash_inverter_node(
         firmware_path, allowed_dir=allowed_dir,
         expected_sha256=expected_sha256)
     image = fw.load_srec(firmware_path, arg_dsp, frame_len)
+    # ISM VerificaFicheroFirmware — embedded-code-vs-filename anti-"wrong
+    # file" guard. Runs for BOTH modes so a renamed / corrupt image is
+    # refused at dry-run time, before the operator can ever arm a live flash.
+    fw.verify_embedded_firmware_code(firmware_path, arg_dsp)
 
     if mode == "dry-run":
         return fw.dry_run(image, node, legacy50=legacy50,
@@ -543,17 +591,25 @@ def flash_inverter_node(
             "live flash blocked: an audit sink is required")
     verify_inverter_compatible(slave_id, image, firmware_path,
                                allow_downgrade=allow_downgrade)
+    # ISM QueHableAhoraOCalleParaSiempre — record the upgrade/downgrade
+    # direction BEFORE the irreversible step (the UI surfaces it; the audit
+    # trail keeps the ground truth of what the operator was told).
+    direction = firmware_upgrade_direction(slave_id, firmware_path)
 
     own_transport = False
     if transport is None:                       # TCP only — see gate above
         transport = ModbusVendorTcpTransport(host)
         own_transport = True
 
+    audit("firmware.pre_flash.direction", {
+        "host": link_label, "node": node,
+        "allow_downgrade": allow_downgrade, **direction,
+    })
     audit("firmware.live.start", {
         "host": link_label, "node": node,
         "file": os.path.basename(firmware_path),
         "sha256": digest, "frames": image.counts.num_tramas_total + 2,
-        "legacy50": legacy50,
+        "legacy50": legacy50, "direction": direction["direction"],
     })
     started = time.monotonic()
 

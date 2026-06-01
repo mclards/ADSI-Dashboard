@@ -2614,9 +2614,25 @@ function updateXferRateState(slot, nextDoneBytes, now = Date.now()) {
   slot.lastSampleTs = now;
 }
 
+// Cached transfer-monitor row + speed nodes. These flash/update at sub-second
+// cadence while bytes flow, so resolve them once and re-resolve only if a node
+// detaches (DOM rebuild).
+const _netIoEls = { rxRow: null, txRow: null, rxSpeed: null, txSpeed: null };
+function _resolveNetIoEls() {
+  _netIoEls.rxRow = document.getElementById("netIoRxRow");
+  _netIoEls.txRow = document.getElementById("netIoTxRow");
+  _netIoEls.rxSpeed = document.getElementById("netIoRxSpeed");
+  _netIoEls.txSpeed = document.getElementById("netIoTxSpeed");
+}
+
 function _netIOFlash(rowId, timerKey) {
   const io = State.netIO;
-  const rowEl = document.getElementById(rowId);
+  const isTx = rowId === "netIoTxRow";
+  let rowEl = isTx ? _netIoEls.txRow : _netIoEls.rxRow;
+  if (!rowEl || !rowEl.isConnected) {
+    _resolveNetIoEls();
+    rowEl = isTx ? _netIoEls.txRow : _netIoEls.rxRow;
+  }
   if (!rowEl) return;
   rowEl.classList.add("active");
   if (io[timerKey]) clearTimeout(io[timerKey]);
@@ -2641,6 +2657,7 @@ function startNetIOMonitor() {
   io.lastCalcTs = Date.now();
   io.lastRxBytes = io.rxBytes;
   io.lastTxBytes = io.txBytes;
+  _resolveNetIoEls();
   io.monitorTimer = setInterval(() => {
     const now = Date.now();
     const elapsed = (now - io.lastCalcTs) / 1000;
@@ -2650,11 +2667,61 @@ function startNetIOMonitor() {
     io.lastCalcTs = now;
     io.lastRxBytes = io.rxBytes;
     io.lastTxBytes = io.txBytes;
-    const rxEl = document.getElementById("netIoRxSpeed");
-    const txEl = document.getElementById("netIoTxSpeed");
+    let rxEl = _netIoEls.rxSpeed;
+    let txEl = _netIoEls.txSpeed;
+    if (!rxEl || !rxEl.isConnected || !txEl || !txEl.isConnected) {
+      _resolveNetIoEls();
+      rxEl = _netIoEls.rxSpeed;
+      txEl = _netIoEls.txSpeed;
+    }
     if (rxEl) rxEl.textContent = fmtBps(io.rxBps);
     if (txEl) txEl.textContent = fmtBps(io.txBps);
   }, 1000);
+}
+
+// Cached references to the transfer-panel DOM nodes. renderXferPanel runs on
+// every WS xfer_progress frame (chunk cadence during a pull), so resolving
+// these 10 nodes by id each time is wasteful. Resolve once and re-resolve only
+// if the panel detaches (e.g. a DOM rebuild).
+let _xferEls = null;
+function getXferEls() {
+  const cached = _xferEls;
+  if (cached && cached.panel && cached.panel.isConnected) return cached;
+  const panel = document.getElementById("xferPanel");
+  if (!panel) {
+    _xferEls = null;
+    return null;
+  }
+  _xferEls = {
+    panel,
+    dirIcon: document.getElementById("xferDirIcon"),
+    label: document.getElementById("xferLabel"),
+    pct: document.getElementById("xferPct"),
+    fill: document.getElementById("xferBarFill"),
+    curr: document.getElementById("xferSizeCurr"),
+    total: document.getElementById("xferSizeTotal"),
+    scopeChip: document.getElementById("xferScopeChip"),
+    detail: document.getElementById("xferDetail"),
+    phaseBadge: document.getElementById("xferPhaseBadge"),
+  };
+  return _xferEls;
+}
+
+// Coalesce bursty xfer_progress frames into one DOM paint per animation frame.
+// Slot state is updated synchronously by handleXferProgress; only the paint is
+// deferred, so no progress data is lost.
+let _xferRenderScheduled = false;
+function scheduleRenderXferPanel() {
+  if (_xferRenderScheduled) return;
+  _xferRenderScheduled = true;
+  const raf =
+    typeof window !== "undefined" && window.requestAnimationFrame
+      ? window.requestAnimationFrame.bind(window)
+      : (fn) => setTimeout(fn, 16);
+  raf(() => {
+    _xferRenderScheduled = false;
+    renderXferPanel();
+  });
 }
 
 function handleXferProgress(msg) {
@@ -2697,7 +2764,7 @@ function handleXferProgress(msg) {
     slot.note = String(msg?.note || "").trim();
     slot.updatedAt = now;
     resetXferRateState(slot, now);
-    renderXferPanel();
+    scheduleRenderXferPanel();
     return;
   }
 
@@ -2732,7 +2799,7 @@ function handleXferProgress(msg) {
       else netIOTrackRx(delta);
     }
     slot.updatedAt = now;
-    renderXferPanel();
+    scheduleRenderXferPanel();
     return;
   }
 
@@ -2769,14 +2836,14 @@ function handleXferProgress(msg) {
       slot.lastSampleTs = 0;
       slot.updatedAt = Date.now();
       slot.hideTimer = null;
-      renderXferPanel();
+      scheduleRenderXferPanel();
     }, phase === "done" ? 3500 : phase === "cancelled" ? 2200 : 3000);
-    renderXferPanel();
+    scheduleRenderXferPanel();
     return;
   }
 
   slot.updatedAt = now;
-  renderXferPanel();
+  scheduleRenderXferPanel();
 }
 
 function getVisibleXferSlot() {
@@ -2872,8 +2939,20 @@ function getXferDetailText(x) {
 }
 
 function renderXferPanel() {
-  const panel = document.getElementById("xferPanel");
-  if (!panel) return;
+  const els = getXferEls();
+  if (!els) return;
+  const {
+    panel,
+    dirIcon,
+    label: labelEl,
+    pct: pctEl,
+    fill: fillEl,
+    curr: currEl,
+    total: totalEl,
+    scopeChip: scopeChipEl,
+    detail: detailEl,
+    phaseBadge: phaseBadgeEl,
+  } = els;
   const x = getVisibleXferSlot();
 
   if (!x) {
@@ -2882,16 +2961,6 @@ function renderXferPanel() {
   }
 
   panel.hidden = false;
-
-  const dirIcon = document.getElementById("xferDirIcon");
-  const labelEl = document.getElementById("xferLabel");
-  const pctEl = document.getElementById("xferPct");
-  const fillEl = document.getElementById("xferBarFill");
-  const currEl = document.getElementById("xferSizeCurr");
-  const totalEl = document.getElementById("xferSizeTotal");
-  const scopeChipEl = document.getElementById("xferScopeChip");
-  const detailEl = document.getElementById("xferDetail");
-  const phaseBadgeEl = document.getElementById("xferPhaseBadge");
 
   if (dirIcon) dirIcon.textContent = x.dir === "tx" ? "↑" : "↓";
   if (dirIcon) dirIcon.className = `xfer-dir-icon xfer-dir-${x.dir || "rx"}`;
@@ -4539,84 +4608,146 @@ function initNavDrag() {
   const nav = $("mainNav");
   if (!nav || nav.dataset.navDragInit === "1") return;
   nav.dataset.navDragInit = "1";
-  let dragSrcPage = null;
-  let placeholder = null;
 
-  function setNavDraggable(enabled) {
-    nav.querySelectorAll(".nav-btn").forEach((b) => { b.draggable = !!enabled; });
+  // Reorder gesture: press-and-hold a nav item (~240 ms) to "arm" it, then drag.
+  // A plain click still navigates; a quick move before the hold completes is
+  // treated as a normal click/scroll, never a drag. The About card stays pinned
+  // at the bottom (we only ever reorder among `.nav-btn`s, before #aboutSection).
+  const HOLD_MS = 240;
+  const MOVE_CANCEL_PX = 8;
+  let holdTimer = null;
+  let armedBtn = null;        // armed (draggable) but not yet dragging
+  let dragBtn = null;         // currently dragging
+  let originalOrder = null;
+  let dropped = false;
+  let downX = 0, downY = 0;
+  let suppressClickPage = null;
+
+  const buttons = () => [...nav.querySelectorAll(".nav-btn")];
+  const aboutSection = () => nav.querySelector("#aboutSection");
+
+  function disarm() {
+    if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+    if (armedBtn) {
+      armedBtn.classList.remove("nav-armed");
+      if (armedBtn !== dragBtn) armedBtn.draggable = false;
+      armedBtn = null;
+    }
   }
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Shift" && !dragSrcPage) setNavDraggable(true);
-  });
-  document.addEventListener("keyup", (e) => {
-    if (e.key === "Shift" && !dragSrcPage) setNavDraggable(false);
-  });
-  window.addEventListener("blur", () => {
-    if (!dragSrcPage) setNavDraggable(false);
-  });
 
-  function removePlaceholder() {
-    if (placeholder && placeholder.parentNode) placeholder.parentNode.removeChild(placeholder);
-    placeholder = null;
+  // Vertical list → simple midpoint test. null/About → append after the buttons.
+  function getInsertBeforeRef(y) {
+    for (const b of buttons()) {
+      if (b === dragBtn) continue;
+      const r = b.getBoundingClientRect();
+      if (y < r.top + r.height / 2) return b;
+    }
+    return aboutSection();
   }
 
-  function getInsertRef(targetBtn, mouseY) {
-    const r = targetBtn.getBoundingClientRect();
-    return mouseY < r.top + r.height / 2 ? targetBtn : (targetBtn.nextElementSibling || null);
-  }
+  // ── Press-and-hold arming ──────────────────────────────────────────
+  nav.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    const btn = e.target.closest(".nav-btn");
+    if (!btn) return;
+    downX = e.clientX; downY = e.clientY;
+    disarm();
+    suppressClickPage = null; // each press starts clean — never inherit a stale suppression
+    holdTimer = setTimeout(() => {
+      holdTimer = null;
+      armedBtn = btn;
+      btn.draggable = true;
+      btn.classList.add("nav-armed");
+    }, HOLD_MS);
+  });
 
+  document.addEventListener("pointermove", (e) => {
+    if (!holdTimer) return;
+    if (Math.hypot(e.clientX - downX, e.clientY - downY) > MOVE_CANCEL_PX) {
+      clearTimeout(holdTimer);
+      holdTimer = null;
+    }
+  }, { passive: true });
+
+  document.addEventListener("pointerup", () => {
+    if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+    // Armed but released without dragging → cancel, and swallow the trailing
+    // click so a long-press alone never navigates.
+    if (armedBtn && !dragBtn) {
+      suppressClickPage = armedBtn.dataset.page;
+      disarm();
+    }
+  });
+
+  // The UA can revoke the pointer without a pointerup — pen/touch cancellation,
+  // a competing multi-touch, a system edge-gesture, or the app backgrounding.
+  // Without this, a hold armed mid-gesture would stay armed/draggable until the
+  // next window blur. Clear everything so the next interaction starts fresh.
+  document.addEventListener("pointercancel", () => {
+    disarm();
+    dragBtn = null;
+    dropped = false;
+    originalOrder = null;
+  }, { passive: true });
+
+  nav.addEventListener("click", (e) => {
+    if (!suppressClickPage) return;
+    const btn = e.target.closest(".nav-btn");
+    if (btn && btn.dataset.page === suppressClickPage) {
+      e.stopPropagation();
+      e.preventDefault();
+    }
+    suppressClickPage = null;
+  }, true);
+
+  // ── Native drag (only the armed button is draggable) ────────────────
   nav.addEventListener("dragstart", (e) => {
     const btn = e.target.closest(".nav-btn[draggable='true']");
-    if (!btn) return;
-    dragSrcPage = btn.dataset.page;
-    requestAnimationFrame(() => btn.classList.add("nav-dragging"));
+    if (!btn) { e.preventDefault(); return; }
+    dragBtn = btn;
+    dropped = false;
+    originalOrder = buttons();
+    // Drop the arming "lift" so its scale() can't fight the FLIP transform.
+    btn.classList.remove("nav-armed");
     e.dataTransfer.effectAllowed = "move";
-    e.dataTransfer.setData("text/plain", btn.dataset.page);
-  });
-
-  nav.addEventListener("dragend", () => {
-    nav.querySelectorAll(".nav-btn.nav-dragging").forEach((b) => b.classList.remove("nav-dragging"));
-    removePlaceholder();
-    dragSrcPage = null;
+    try { e.dataTransfer.setData("text/plain", btn.dataset.page); } catch (_) {}
+    requestAnimationFrame(() => btn.classList.add("nav-dragging"));
   });
 
   nav.addEventListener("dragover", (e) => {
+    if (!dragBtn) return;
     e.preventDefault();
-    if (!dragSrcPage) return;
-    const btn = e.target.closest(".nav-btn[draggable='true']");
-    if (!btn || btn.dataset.page === dragSrcPage) return;
     e.dataTransfer.dropEffect = "move";
-    const insertRef = getInsertRef(btn, e.clientY);
-    if (placeholder && placeholder.nextSibling === insertRef) return;
-    removePlaceholder();
-    placeholder = document.createElement("div");
-    placeholder.className = "nav-drag-placeholder";
-    placeholder.setAttribute("aria-hidden", "true");
-    nav.insertBefore(placeholder, insertRef);
-  });
-
-  nav.addEventListener("dragleave", (e) => {
-    if (!e.relatedTarget || !nav.contains(e.relatedTarget)) {
-      removePlaceholder();
-    }
+    const ref = getInsertBeforeRef(e.clientY);
+    if (ref === dragBtn) return;
+    if (ref === dragBtn.nextElementSibling) return; // already in place
+    flipReorder(buttons(), () => nav.insertBefore(dragBtn, ref));
   });
 
   nav.addEventListener("drop", (e) => {
     e.preventDefault();
-    const srcBtn = dragSrcPage ? nav.querySelector(`.nav-btn[data-page="${dragSrcPage}"]`) : null;
-    if (srcBtn && placeholder && placeholder.parentNode) {
-      nav.insertBefore(srcBtn, placeholder);
-    } else if (srcBtn) {
-      const targetBtn = e.target.closest(".nav-btn[draggable='true']");
-      if (targetBtn && targetBtn.dataset.page !== dragSrcPage) nav.insertBefore(srcBtn, targetBtn);
-    }
-    removePlaceholder();
-    dragSrcPage = null;
-    const newOrder = [...nav.querySelectorAll(".nav-btn")]
-      .map((b) => b.dataset.page)
-      .filter(Boolean);
-    persistNavOrder(newOrder);
+    dropped = true;
   });
+
+  nav.addEventListener("dragend", () => {
+    if (dragBtn) {
+      dragBtn.classList.remove("nav-dragging");
+      dragBtn.draggable = false;
+    }
+    if (!dropped && originalOrder) {
+      const about = aboutSection();
+      const snapshot = originalOrder.slice();
+      flipReorder(snapshot, () => { for (const b of snapshot) nav.insertBefore(b, about); });
+    } else {
+      persistNavOrder(buttons().map((b) => b.dataset.page).filter(Boolean));
+    }
+    disarm();
+    dragBtn = null;
+    originalOrder = null;
+    dropped = false;
+  });
+
+  window.addEventListener("blur", disarm);
 }
 
 function switchPage(page) {
@@ -5088,6 +5219,7 @@ function initSettingsSectionNav() {
     storageKey: "adsi_connectivity_active_tab",
     defaultKey: "access",
   });
+  bindConnectivityTabImmediateRefresh();
   initCardTabs("forecastSection", {
     storageKey: "adsi_forecast_active_tab",
     defaultKey: "provider",
@@ -8191,15 +8323,53 @@ function stopReplicationHealthPolling() {
   }
 }
 
+// Which Connectivity monitor panels are actually on screen. A non-active
+// settings section and an inactive tab panel are both `display:none`, so
+// `offsetParent === null` reliably means "not visible" — we use that to avoid
+// remote round-trips for a panel the operator isn't even looking at.
+function _connectivityMonitorVisible() {
+  if (State.currentPage !== "settings") return { link: false, runtime: false };
+  const linkPanel = document.getElementById("connPanelLink");
+  const runtimePanel = document.getElementById("connPanelRuntime");
+  return {
+    link: !!linkPanel && linkPanel.offsetParent !== null,
+    runtime: !!runtimePanel && runtimePanel.offsetParent !== null,
+  };
+}
+
 function startReplicationHealthPolling() {
   stopReplicationHealthPolling();
+  // Prime both panels once so the first view is never blank, regardless of
+  // which Connectivity tab the operator opens.
   refreshReplicationHealth().catch(() => {});
   refreshRuntimePerf().catch(() => {});
   State.replicationHealthTimer = setInterval(() => {
-    if (State.currentPage !== "settings") return;
-    refreshReplicationHealth().catch(() => {});
-    refreshRuntimePerf().catch(() => {});
+    const vis = _connectivityMonitorVisible();
+    // Only fetch the data lane that is currently visible. Gateway Link →
+    // /api/runtime/network; Runtime Health → /api/runtime/perf. The transfer
+    // monitor is WS-driven, so polling pausing here never stalls live progress.
+    if (vis.link) refreshReplicationHealth().catch(() => {});
+    if (vis.runtime) refreshRuntimePerf().catch(() => {});
   }, 6000);
+}
+
+// Refresh the relevant lane the instant the operator opens Gateway Link or
+// Runtime Health, instead of waiting up to 6 s for the next poll tick.
+function bindConnectivityTabImmediateRefresh() {
+  const linkTab = document.getElementById("connTabLink");
+  const runtimeTab = document.getElementById("connTabRuntime");
+  if (linkTab && linkTab.dataset._immRefresh !== "1") {
+    linkTab.dataset._immRefresh = "1";
+    linkTab.addEventListener("click", () => {
+      refreshReplicationHealth().catch(() => {});
+    });
+  }
+  if (runtimeTab && runtimeTab.dataset._immRefresh !== "1") {
+    runtimeTab.dataset._immRefresh = "1";
+    runtimeTab.addEventListener("click", () => {
+      refreshRuntimePerf().catch(() => {});
+    });
+  }
 }
 
 async function refreshReplicationHealth(silent = true) {
@@ -11831,6 +12001,12 @@ function applyPlantCapStatusClient(statusRaw, options = {}) {
 function buildInverterGrid() {
   const grid = $("invGrid");
   if (!grid) return;
+  // A rebuild can land mid-drag (e.g. a settings save fires buildInverterGrid
+  // while the operator is dragging). Invalidate any pending FLIP timeouts and
+  // null the drag state BEFORE wiping innerHTML, so the orphaned drag — whose
+  // listeners persist on this container — can't touch the detached cards.
+  grid.querySelectorAll(".inv-card, .camera-card").forEach((el) => { el._flipToken = -1; });
+  grid._resetGridDragState?.();
   grid.innerHTML = "";
   State.nodeOrderSig = {};
   const count = State.settings.inverterCount;
@@ -11861,92 +12037,172 @@ function buildInverterGrid() {
   initCameraPlayer();
 }
 
+// ── Shared drag-reorder smoothing (FLIP) ───────────────────────────────────
+// Both the inverter-card grid and the sidebar nav reorder live as the pointer
+// moves (SortableJS-style: the dragged element itself becomes the moving gap).
+// To stop neighbours from snapping to their new slots, we run a FLIP pass:
+// capture each element's rect (First), apply the DOM move (Last), then play an
+// inverted transform back to zero so everything glides. prefers-reduced-motion
+// short-circuits straight to the final layout.
+function _prefersReducedMotion() {
+  return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+}
+
+function flipReorder(els, mutate, durationMs = 200) {
+  if (_prefersReducedMotion()) { mutate(); return; }
+  const first = new Map();
+  for (const el of els) first.set(el, el.getBoundingClientRect());
+  mutate();
+  for (const el of els) {
+    const a = first.get(el);
+    if (!a) continue;
+    // Neutralise any in-flight transform so we read the true target slot.
+    el.style.transition = "none";
+    el.style.transform = "";
+    const b = el.getBoundingClientRect();
+    const dx = a.left - b.left;
+    const dy = a.top - b.top;
+    if (!dx && !dy) continue;
+    el.style.transform = `translate(${dx}px, ${dy}px)`;
+    void el.getBoundingClientRect(); // commit the start frame before animating
+    const token = (el._flipToken || 0) + 1;
+    el._flipToken = token;
+    requestAnimationFrame(() => {
+      el.style.transition = `transform ${durationMs}ms cubic-bezier(0.2, 0.7, 0.2, 1)`;
+      el.style.transform = "";
+    });
+    // Clear inline residue once settled — but only if no newer FLIP took over,
+    // so rapid reorders never get their animation cut short.
+    setTimeout(() => {
+      if (el._flipToken !== token) return;
+      el.style.transition = "";
+      el.style.transform = "";
+    }, durationMs + 40);
+  }
+}
+
 function initInverterGridDrag() {
   const grid = $("invGrid");
   if (!grid || grid.dataset.dragInit === "1") return;
   grid.dataset.dragInit = "1";
-  let dragSrcId = null;
-  let placeholder = null;
-
-  function removePlaceholder() {
-    if (placeholder && placeholder.parentNode) placeholder.parentNode.removeChild(placeholder);
-    placeholder = null;
-  }
-
-  // Returns the DOM node to insertBefore (null = append at end).
-  // Splits the target card at its vertical midpoint: top half → before, bottom half → after.
-  function getInsertRef(targetCard, mouseY) {
-    const r = targetCard.getBoundingClientRect();
-    return mouseY < r.top + r.height / 2 ? targetCard : (targetCard.nextSibling || null);
-  }
 
   const DRAG_SEL = ".inv-card[draggable='true'], .camera-card[draggable='true']";
-  function findDragCard(target) { return target.closest(DRAG_SEL); }
+  let dragEl = null;          // the card currently being dragged
+  let originalOrder = null;   // snapshot of card order at drag start (for cancel)
+  let dropped = false;        // did a valid drop happen (vs. Esc / drop outside)?
+
+  const cards = () => [...grid.querySelectorAll(DRAG_SEL)];
+
+  // buildInverterGrid() calls this after wiping innerHTML so a rebuild that
+  // lands mid-drag nulls the drag state. The listeners stay bound to the
+  // persistent #invGrid container (the dragInit guard prevents re-binding,
+  // which would duplicate them), so resetting state — not re-init — is the fix.
+  grid._resetGridDragState = () => { dragEl = null; originalOrder = null; dropped = false; };
+
+  // `dragstart.target` is the draggable CARD itself, not the inner element the
+  // pointer grabbed — so to honour a drag handle we must remember where the
+  // press actually landed. pointerdown always precedes dragstart, and capture
+  // phase guarantees we see it even if a child stops propagation.
+  let pressTarget = null;
+  grid.addEventListener("pointerdown", (e) => { pressTarget = e.target; }, true);
+
+  // Decide where the dragged card should land. Returns the node to insertBefore
+  // (null → append at end) or the `dragEl` sentinel meaning "leave the order
+  // alone". The bulk-control panel is the grid's first child and never a
+  // candidate, so it stays pinned at the front.
+  //
+  // We only react when the pointer is physically OVER another card. Hovering the
+  // dragged card's own slot, the grid gaps, or the empty trailing space leaves
+  // the order untouched — this is what stops neighbours from twitching on every
+  // small movement (the old nearest-by-centre rule retargeted constantly).
+  function getInsertBeforeRef(x, y) {
+    // Snapshot rects once — batched reads, no interleaved writes, no reflow.
+    const rects = cards().map((card) => [card, card.getBoundingClientRect()]);
+    let target = null, tr = null;
+    for (const [card, r] of rects) {
+      if (card === dragEl) continue;
+      if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
+        target = card; tr = r; break;
+      }
+    }
+    if (!target) return dragEl; // not over a card → no change
+
+    // Split along the layout's flow: multi-column rows split left/right, a
+    // single column splits top/bottom, so the drop point matches the eye.
+    // "Multi-column" = some other card shares this card's row.
+    const sameRow = rects.some(([c, r]) =>
+      c !== target && c !== dragEl && Math.abs(r.top - tr.top) < tr.height / 2);
+    const after = sameRow
+      ? x > tr.left + tr.width / 2
+      : y > tr.top + tr.height / 2;
+
+    if (!after) return target;
+    let ref = target.nextElementSibling;
+    while (ref && ref === dragEl) ref = ref.nextElementSibling;
+    return ref; // null → append at end
+  }
 
   grid.addEventListener("dragstart", (e) => {
-    const card = findDragCard(e.target);
+    const card = e.target.closest(DRAG_SEL);
     if (!card) return;
-    // Prevent drag from starting on interactive elements inside camera card
-    if (card.classList.contains("camera-card") && e.target.closest(".cam-controls, button, input, select")) {
+    // Where the pointer actually pressed (see pressTarget note above). Only
+    // trust it if it belongs to the card being dragged.
+    const handle = pressTarget && card.contains(pressTarget) ? pressTarget : null;
+    // Inverter cards reorder from their header only — cancel drags begun
+    // anywhere else so the body's values and node buttons stay usable. The
+    // grab cursor already lives on `.card-hdr` to advertise the handle.
+    if (card.classList.contains("inv-card") && !(handle && handle.closest(".card-hdr"))) {
       e.preventDefault();
       return;
     }
-    dragSrcId = card.id;
-    requestAnimationFrame(() => card.classList.add("dragging"));
+    // Don't hijack drags begun on interactive controls in the camera card.
+    if (card.classList.contains("camera-card") &&
+        handle && handle.closest(".cam-controls, button, input, select")) {
+      e.preventDefault();
+      return;
+    }
+    dragEl = card;
+    dropped = false;
+    originalOrder = cards();
     e.dataTransfer.effectAllowed = "move";
-    e.dataTransfer.setData("text/plain", card.id);
-  });
-
-  grid.addEventListener("dragend", () => {
-    grid.querySelectorAll(".dragging, .drag-over").forEach(c => {
-      c.classList.remove("dragging", "drag-over");
-    });
-    removePlaceholder();
-    dragSrcId = null;
+    try { e.dataTransfer.setData("text/plain", card.id); } catch (_) {}
+    // Defer the dimmed "gap" styling so the native drag image is a solid card.
+    requestAnimationFrame(() => card.classList.add("dragging"));
   });
 
   grid.addEventListener("dragover", (e) => {
+    if (!dragEl) return;
     e.preventDefault();
-    if (!dragSrcId) return;
-    const card = findDragCard(e.target);
-    if (!card || card.id === dragSrcId) return;
     e.dataTransfer.dropEffect = "move";
-
-    const insertRef = getInsertRef(card, e.clientY);
-    if (placeholder && placeholder.nextSibling === insertRef) return;
-
-    if (placeholder && placeholder.parentNode) placeholder.parentNode.removeChild(placeholder);
-
-    placeholder = document.createElement("div");
-    placeholder.className = "inv-card drag-placeholder";
-    placeholder.setAttribute("aria-hidden", "true");
-    grid.insertBefore(placeholder, insertRef);
-  });
-
-  grid.addEventListener("dragleave", (e) => {
-    if (!e.relatedTarget || !grid.contains(e.relatedTarget)) {
-      grid.querySelectorAll(".drag-over").forEach(c => c.classList.remove("drag-over"));
-      removePlaceholder();
-    }
+    const ref = getInsertBeforeRef(e.clientX, e.clientY);
+    if (ref === dragEl) return;
+    if (ref === dragEl.nextElementSibling) return; // already in place
+    flipReorder(cards(), () => grid.insertBefore(dragEl, ref));
   });
 
   grid.addEventListener("drop", (e) => {
     e.preventDefault();
-    const srcCard = dragSrcId ? $(dragSrcId) : null;
-    if (srcCard && placeholder && placeholder.parentNode) {
-      grid.insertBefore(srcCard, placeholder);
-    } else if (srcCard) {
-      const targetCard = findDragCard(e.target);
-      if (targetCard && targetCard.id !== dragSrcId) grid.insertBefore(srcCard, targetCard);
+    dropped = true;
+  });
+
+  grid.addEventListener("dragend", () => {
+    const moved = dragEl;
+    if (moved) moved.classList.remove("dragging");
+    if (!dropped && originalOrder) {
+      // Cancelled (Esc or released off-grid) → glide every card home. Filter to
+      // still-connected nodes so a concurrent rebuild can't re-attach stale cards.
+      const snapshot = originalOrder.filter((el) => el.isConnected);
+      flipReorder(snapshot, () => { for (const el of snapshot) grid.appendChild(el); });
+    } else {
+      // Persist order: inverter cards as numbers, camera card as "cam".
+      const newOrder = cards()
+        .map(c => c.id === "cameraCard" ? "cam" : parseInt(c.id.replace("inv-card-", ""), 10))
+        .filter(v => v === "cam" || (Number.isFinite(v) && v > 0));
+      persistInverterCardOrder(newOrder);
     }
-    grid.querySelectorAll(".drag-over").forEach(c => c.classList.remove("drag-over"));
-    removePlaceholder();
-    dragSrcId = null;
-    // Persist order: inverter cards as numbers, camera card as "cam"
-    const newOrder = [...grid.querySelectorAll(DRAG_SEL)]
-      .map(c => c.id === "cameraCard" ? "cam" : parseInt(c.id.replace("inv-card-", ""), 10))
-      .filter(v => v === "cam" || (Number.isFinite(v) && v > 0));
-    persistInverterCardOrder(newOrder);
+    dragEl = null;
+    originalOrder = null;
+    dropped = false;
   });
 }
 
@@ -22941,8 +23197,21 @@ function _invClockBaselineSourcePill(state) {
 async function invClockRefreshUnits() {
   const bodies = document.querySelectorAll(".js-invclock-unit-body");
   if (!bodies.length) return;
+  // Re-entrancy guard: on a cold start the first /api/counter-state/all can be
+  // slow (Python engine + DB still warming up). Without this the 10 s polling
+  // interval would stack overlapping requests and make the just-opened panel
+  // feel sluggish. Skip a tick if the previous one is still in flight.
+  if (InvClock.unitsRefreshing) return;
+  InvClock.unitsRefreshing = true;
   try {
-    const r = await fetch("/api/counter-state/all", { cache: "no-store" });
+    const ctrl = new AbortController();
+    const killTimer = setTimeout(() => ctrl.abort("timeout"), 12000);
+    let r;
+    try {
+      r = await fetch("/api/counter-state/all", { cache: "no-store", signal: ctrl.signal });
+    } finally {
+      clearTimeout(killTimer);
+    }
     if (!r.ok) return;
     const data = await r.json().catch(() => ({ rows: [] }));
     const allRows = Array.isArray(data.rows) ? data.rows : [];
@@ -23014,7 +23283,7 @@ async function invClockRefreshUnits() {
         </tr>
       `;
     }).join("");
-    const emptyHtml = `<tr><td colspan="7" class="invclock-empty">No unit state yet — waiting for first Python poll.</td></tr>`;
+    const emptyHtml = `<tr><td colspan="8" class="invclock-empty">No unit state yet — waiting for first Python poll.</td></tr>`;
     bodies.forEach((body) => { body.innerHTML = trs || emptyHtml; });
     document.querySelectorAll(".js-invclock-count-nodes").forEach((el) => { el.textContent = `${nodesShown} nodes`; });
     document.querySelectorAll(".js-invclock-count-ok").forEach((el) => { el.textContent = `${okCount} OK`; });
@@ -23023,6 +23292,8 @@ async function invClockRefreshUnits() {
     _invClockPopulateInverterSelect(rows);
   } catch (err) {
     console.warn("[invclock] units refresh failed:", err?.message || err);
+  } finally {
+    InvClock.unitsRefreshing = false;
   }
 }
 
@@ -24243,7 +24514,7 @@ function initSerialNumberSection() {
   const readBtn = document.getElementById("btnSnbRead");
   const sendBtn = document.getElementById("btnSnbSend");
   const newSerialEl = document.getElementById("snbNewSerial");
-  if (!invPicker || !slavePicker || !readBtn || !sendBtn || !newSerialEl) return;
+  if (!invPicker || !slavePicker || !fmtPicker || !readBtn || !sendBtn || !newSerialEl) return;
 
   _snbPopulateInverterPicker(invPicker);
   _snbPopulateSlavePicker(slavePicker);
@@ -28918,6 +29189,7 @@ async function _fcalApplyTransport() {
     });
     const j = await r.json().catch(() => null);
     if (!r.ok || !j?.ok) {
+      FieldCalibrationUI.transportReady = false;
       _fcalSetMsg(
         "fcalTransportMsg",
         `Connect failed: ${j?.error || "HTTP " + r.status}`,
@@ -28932,6 +29204,7 @@ async function _fcalApplyTransport() {
     FieldCalibrationUI.transportReady = true;
     _fcalSetMsg("fcalTransportMsg", `Connected: ${label}`, "ok");
   } catch (err) {
+    FieldCalibrationUI.transportReady = false;
     _fcalSetMsg(
       "fcalTransportMsg",
       `Connect failed: ${err?.message || err}`,
@@ -28939,6 +29212,8 @@ async function _fcalApplyTransport() {
     );
   } finally {
     if (btn) btn.disabled = false;
+    // Keep the firmware modal's transport chip in sync if it is open.
+    if (typeof _fwSyncTransportStatus === "function") _fwSyncTransportStatus();
   }
 }
 
@@ -29001,8 +29276,10 @@ const _fwState = {
   argDsp: null,
   frameLen: null,
   legacy50: null,
+  allowDowngrade: null, // part of the blessing: toggling it forces a re-dry-run
   jobId: null,
   poll: null,
+  lastFlashOk: null, // true after a finished flash (drives the all-done rail)
 };
 
 async function _fwApi(path, { method = "GET", body = null, key = null } = {}) {
@@ -29035,10 +29312,9 @@ function _fwParams() {
   };
 }
 
-// Invalidate a prior dry-run blessing whenever the targeted image / unit
-// changes. This is the client mirror of the server's "successful dry-run
-// of THIS image first" gate — keeps the UI honest before the round-trip.
-function _fwInvalidateDryRun() {
+// Hide the arm controls + dry-run result and drop the dry-run blessing.
+// Shared by the "params changed" path and the "job finished" path.
+function _fwHideArm() {
   _fwState.dryOk = false;
   _fwState.sha = null;
   const arm = document.getElementById("fwArmBlock");
@@ -29046,20 +29322,82 @@ function _fwInvalidateDryRun() {
   const box = document.getElementById("fwDryRunBox");
   if (box) box.hidden = true;
   _fcalSetMsg("fwDryRunMsg", "", "info");
-  _fwRecomputeArmState();
 }
 
-function _fwRecomputeArmState() {
-  const btn = document.getElementById("btnFwFlash");
-  if (!btn) return;
-  const p = _fwParams();
-  const sameImage =
+// Invalidate a prior dry-run blessing whenever the targeted image / unit
+// changes. This is the client mirror of the server's "successful dry-run
+// of THIS image first" gate — keeps the UI honest before the round-trip.
+function _fwInvalidateDryRun() {
+  _fwHideArm();
+  _fwState.lastFlashOk = false; // a fresh target is no longer "flashed"
+  // A changed file / node / param also makes any prior identity readout stale
+  // — it described a different target. Clear it so the panel never shows
+  // node 5's serial + firmware under a fwNode of 6.
+  const idBox = document.getElementById("fwIdentityBox");
+  if (idBox) {
+    idBox.hidden = true;
+    idBox.innerHTML = "";
+  }
+  _fcalSetMsg("fwIdentityMsg", "", "info");
+  _fwRecomputeArmState();       // also refreshes the step rail
+}
+
+// True when the cached dry-run blessing matches the currently-entered image.
+// All flash-affecting params are compared — including allow_downgrade, which
+// IS sent to the live flash (so changing it must invalidate the blessing).
+function _fwSameImage(p) {
+  return (
     _fwState.dryOk &&
     _fwState.file === p.file &&
     _fwState.node === p.node &&
     _fwState.argDsp === p.arg_dsp &&
     _fwState.frameLen === p.frame_len &&
-    _fwState.legacy50 === p.legacy50;
+    _fwState.legacy50 === p.legacy50 &&
+    _fwState.allowDowngrade === p.allow_downgrade
+  );
+}
+
+// Reflect the calibration transport state into the modal's status chip so the
+// operator knows BEFORE clicking whether a Modbus transport is open. The
+// transport itself is opened on the calibration page behind this dialog;
+// FieldCalibrationUI.transportReady is an optimistic flag (set on Connect,
+// cleared on a no-client failure) — the server stays authoritative.
+function _fwSyncTransportStatus() {
+  const chip = document.getElementById("fwTransportStatus");
+  if (!chip) return;
+  const ready = !!FieldCalibrationUI?.transportReady;
+  const ico = chip.querySelector(".fcal-fw-transport-status-ico");
+  const txt = chip.querySelector(".fcal-fw-transport-status-text");
+  chip.dataset.state = ready ? "ready" : "down";
+  if (ico) {
+    ico.className =
+      "mdi icon-inline fcal-fw-transport-status-ico " +
+      (ready ? "mdi-lan-connect" : "mdi-lan-disconnect");
+  }
+  if (txt) {
+    txt.textContent = ready
+      ? "Transport connected — ready to read identity and flash."
+      : "No transport connected. Reading identity and flashing need an open link.";
+  }
+}
+
+// "Connect…" affordance on the chip: the transport bar lives on the
+// calibration page behind this dialog, so close the dialog (never mid-flash)
+// and drop the operator onto the Connect control.
+function _fwGotoTransport() {
+  if (_fwState.jobId) return; // never dismiss mid-flash
+  const modal = document.getElementById("fcalFirmwarePanel");
+  if (modal) modal.hidden = true;
+  const connectBtn = document.getElementById("btnFcalTransportConnect");
+  if (connectBtn) {
+    try { connectBtn.scrollIntoView({ block: "center", behavior: "smooth" }); } catch {}
+    connectBtn.focus({ preventScroll: true });
+  }
+}
+
+function _fwRecomputeArmState() {
+  const btn = document.getElementById("btnFwFlash");
+  const p = _fwParams();
   // Arm gate: passing dry-run for THIS exact image/node + the explicit
   // irreversible checkbox + the authorization key. (The type-to-confirm
   // phrase was removed 2026-05-19 — redundant friction; the checkbox +
@@ -29067,7 +29405,68 @@ function _fwRecomputeArmState() {
   const ack = !!document.getElementById("fwAck")?.checked;
   const authKey = String(document.getElementById("fwAuthKey")?.value || "").trim();
   const running = !!_fwState.jobId;
-  btn.disabled = !(sameImage && ack && authKey && !running);
+  if (btn) {
+    const dis = !(_fwSameImage(p) && ack && authKey && !running);
+    btn.disabled = dis;
+    btn.setAttribute("aria-disabled", dis ? "true" : "false");
+  }
+  _fwUpdateStepUI();
+}
+
+// ── Guided stepper state ────────────────────────────────────────────────
+// Reflects which of the 4 steps is done / active / locked so the operator
+// always sees the single next action. Cosmetic guidance layered on top of
+// the server-side gates, which remain authoritative.
+function _fwSetStep(n, state) {
+  const card = document.querySelector(`.fcal-fw-step[data-step="${n}"]`);
+  const chip = document.querySelector(`[data-stepchip="${n}"]`);
+  const status = document.querySelector(`[data-stepstatus="${n}"]`);
+  [card, chip].forEach((el) => {
+    if (!el) return;
+    el.classList.remove("is-done", "is-active", "is-locked");
+    el.classList.add(`is-${state}`);
+  });
+  if (status) {
+    status.textContent =
+      state === "done" ? "✓ Done"
+        : state === "active" ? "● Current"
+        : "○ Locked";
+  }
+}
+
+function _fwUpdateStepUI() {
+  const p = _fwParams();
+  const hasFile = !!p.file;
+  const nodeOk = p.node >= 1 && p.node <= 247;
+  const dryOk = _fwSameImage(p);
+  const running = !!_fwState.jobId;
+  const flashed = _fwState.lastFlashOk === true;
+
+  // A completed flash shows every step done; otherwise a single step is
+  // "current" and later steps stay locked until their prerequisite is met,
+  // so the wizard always points at exactly one next action.
+  _fwSetStep(1, flashed || hasFile ? "done" : "active");
+  _fwSetStep(
+    2,
+    flashed ? "done" : !hasFile ? "locked" : nodeOk ? "done" : "active",
+  );
+  _fwSetStep(
+    3,
+    flashed ? "done" : !(hasFile && nodeOk) ? "locked" : dryOk ? "done" : "active",
+  );
+  _fwSetStep(4, flashed ? "done" : running ? "active" : dryOk ? "active" : "locked");
+
+  // Gate the dry-run button on a chosen file + valid node (server re-checks).
+  const dryBtn = document.getElementById("btnFwDryRun");
+  if (dryBtn) {
+    const dis = !(hasFile && nodeOk) || running;
+    dryBtn.disabled = dis;
+    dryBtn.setAttribute("aria-disabled", dis ? "true" : "false");
+  }
+
+  // The lock note shows only until the dry-run unlocks the live block.
+  const lockNote = document.getElementById("fwLockNote");
+  if (lockNote) lockNote.hidden = dryOk || running || flashed;
 }
 
 // Open the Electron native file picker and put the chosen ABSOLUTE path
@@ -29112,9 +29511,27 @@ async function _fwReadIdentity() {
     _fcalSetMsg("fwIdentityMsg", "Enter a target node first.", "err");
     return;
   }
+  // Reading FC11 identity touches the bus, so a transport must be open. Guide
+  // the operator up-front instead of firing a round-trip that returns the
+  // cryptic "connect a transport first" (mirrors the calibration Read path).
+  if (_fcalInCalibratorMode() && !FieldCalibrationUI.transportReady) {
+    _fcalSetMsg(
+      "fwIdentityMsg",
+      "Connect a transport first — use Connect… above (Ethernet or COM port), then Read Identity.",
+      "err",
+    );
+    _fwSyncTransportStatus();
+    return;
+  }
   _fcalSetMsg("fwIdentityMsg", "Reading FC11 identity…", "info");
   const { j } = await _fwApi(`/api/firmware/identity/${node}`);
   if (!j.ok) {
+    // A transport-level failure means the optimistic ready flag is stale —
+    // clear it so the chip + guidance re-engage on the next attempt.
+    if (/transport|no.?client|connect|no reply|timed? ?out/i.test(String(j.error || ""))) {
+      FieldCalibrationUI.transportReady = false;
+      _fwSyncTransportStatus();
+    }
     _fcalSetMsg("fwIdentityMsg", `Identity read failed: ${j.error || "error"}`, "err");
     if (box) box.hidden = true;
     return;
@@ -29127,12 +29544,35 @@ async function _fwReadIdentity() {
     // are unverified aux IDs (usually blank) — show only if present, as a
     // de-emphasised diagnostic, so the panel never reads a blank "Firmware:".
     const aux = [j.firmware_main, j.firmware_aux].filter(Boolean).map(_fcalEsc).join(" / ");
+    // ISM QueHableAhoraOCalleParaSiempre cue: if a file is chosen, show
+    // whether this flash is an upgrade / downgrade / no-change BEFORE the
+    // operator arms it (the server re-checks authoritatively). Versions are
+    // the trailing 2 chars of the shared AAV-namespace codes.
     box.innerHTML =
       `<strong>Node ${node}</strong>\n` +
       `Serial:   ${_fcalEsc(j.serial)} (${_fcalEsc(j.serial_format)})\n` +
       `Firmware: ${_fcalEsc(j.model_code) || "—"}` +
-      (aux ? `\nAux ID:   ${aux}` : "");
+      (aux ? `\nAux ID:   ${aux}` : "") +
+      _fwDirectionLine(j.model_code);
   }
+  _fwUpdateStepUI();
+}
+
+// Client-side pre-flash direction hint (the server's
+// firmware.pre_flash.direction audit event is authoritative). Returns a
+// "\nThis flash: …" line or "" when a file/version can't be compared.
+function _fwDirectionLine(modelCode) {
+  const filePath = String(document.getElementById("fwFilePath")?.value || "").trim();
+  if (!filePath || !modelCode) return "";
+  const base = filePath.split(/[\\/]/).pop() || "";
+  const fileCode = base.replace(/\.[sS]$/, "").split("_")[0].toUpperCase();
+  const fileVer = fileCode.replace(/[^A-Z0-9]/g, "").slice(-2);
+  const modelVer = String(modelCode).replace(/[^A-Z0-9]/g, "").toUpperCase().slice(-2);
+  if (fileVer.length < 2 || modelVer.length < 2) return "";
+  const dir = modelVer < fileVer ? "UPGRADE"
+    : modelVer > fileVer ? "DOWNGRADE (needs Allow downgrade)"
+    : "no change — same version";
+  return `\nThis flash: ${_fcalEsc(dir)}  (unit ${_fcalEsc(modelVer)} → file ${_fcalEsc(fileVer)})`;
 }
 
 async function _fwRunDryRun() {
@@ -29177,6 +29617,7 @@ async function _fwRunDryRun() {
     _fwState.argDsp = p.arg_dsp;
     _fwState.frameLen = p.frame_len;
     _fwState.legacy50 = p.legacy50;
+    _fwState.allowDowngrade = p.allow_downgrade;
     _fcalSetMsg("fwDryRunMsg", "Dry-run PASSED — review, then arm below.", "ok");
     if (box) {
       box.hidden = false;
@@ -29189,7 +29630,16 @@ async function _fwRunDryRun() {
     const shaEl = document.getElementById("fwShaText");
     if (shaEl) shaEl.textContent = j.sha256 || "—";
     const arm = document.getElementById("fwArmBlock");
-    if (arm) arm.hidden = false;
+    if (arm) {
+      arm.hidden = false;
+      // Land the cursor on the next required input (the authorization key)
+      // so the operator isn't hunting for it in an irreversible flow.
+      const authKey = document.getElementById("fwAuthKey");
+      if (authKey) {
+        authKey.focus();
+        authKey.select();
+      }
+    }
   } finally {
     if (btn) btn.disabled = false;
     _fwRecomputeArmState();
@@ -29212,9 +29662,17 @@ function _fwRenderJob(j) {
   }
   if (log) {
     log.hidden = false;
-    const evLines = (j.events || []).map(
-      (e) => `· ${e.event} ${JSON.stringify(e.detail)}`,
-    );
+    // Render event detail as compact "k=v" pairs instead of raw JSON so the
+    // operator log reads cleanly (no braces/quotes noise).
+    const fmtDetail = (d) => {
+      if (d == null) return "";
+      if (typeof d !== "object") return String(d);
+      return Object.entries(d).map(([k, v]) => `${k}=${v}`).join(" ");
+    };
+    const evLines = (j.events || []).map((e) => {
+      const d = fmtDetail(e.detail);
+      return `· ${e.event}${d ? " — " + d : ""}`;
+    });
     const pLines = prog.map((s) => `  ${s.pct || 0}%  ${s.msg}`);
     let tail = "";
     if (j.done) {
@@ -29223,9 +29681,21 @@ function _fwRenderJob(j) {
         (j.flash_ok
           ? `RESULT: OK  ${j.result ? j.result.diag : ""}`
           : `RESULT: FAILED — ${j.error || (j.result ? j.result.message : "unknown")}`);
+      // ISM re-identifies the node after each flash — surface that result.
+      if (j.verify) {
+        tail += j.verify.ok
+          ? `\nVERIFY: inverter now reports ${j.verify.new || "—"}` +
+            (j.verify.changed ? " (firmware changed)" : " (unchanged)")
+          : `\nVERIFY: could not re-read identity — ${j.verify.error || "no reply"} (verify manually)`;
+      }
     }
+    // Preserve a manual scroll-up: only stick to the bottom when the operator
+    // is already there (or the job just finished). Measured BEFORE replacing
+    // the text so a 1.5 s poll can't yank them away from an earlier line.
+    const stick =
+      j.done || log.scrollHeight - log.clientHeight - log.scrollTop < 24;
     log.textContent = evLines.concat(pLines).join("\n") + tail;
-    log.scrollTop = log.scrollHeight;
+    if (stick) log.scrollTop = log.scrollHeight;
   }
 }
 
@@ -29238,13 +29708,22 @@ async function _fwPollJob() {
       clearInterval(_fwState.poll);
       _fwState.poll = null;
       _fwState.jobId = null;
+      _fwState.lastFlashOk = !!j.flash_ok;
       const abortBtn = document.getElementById("btnFwAbort");
       if (abortBtn) abortBtn.hidden = true;
-      _fcalSetMsg(
-        "fwFlashMsg",
-        j.flash_ok ? "Flash completed." : `Flash stopped: ${j.error || "failed"}`,
-        j.flash_ok ? "ok" : "err",
-      );
+      // Reset the arm chain so any further flash REQUIRES a fresh dry-run
+      // (mirrors ISM's per-operation reset, and prevents a stale auth/ack
+      // from re-arming). The final status + verify stay visible in the
+      // progress bar and log below, which sit OUTSIDE the arm block; the
+      // step rail shows all-done on a successful flash.
+      _fwHideArm();
+      // Clear the irreversible acknowledgement + auth key so any further flash
+      // demands explicit re-entry (a fresh dry-run is already required; this is
+      // defence in depth, matching ISM's per-operation reset).
+      const ackEl = document.getElementById("fwAck");
+      if (ackEl) ackEl.checked = false;
+      const authEl = document.getElementById("fwAuthKey");
+      if (authEl) authEl.value = "";
       _fwRecomputeArmState();
     }
   }
@@ -29253,13 +29732,29 @@ async function _fwPollJob() {
 async function _fwStartFlash() {
   const p = _fwParams();
   const authKey = String(document.getElementById("fwAuthKey")?.value || "").trim();
-  if (!_fwState.dryOk || _fwState.file !== p.file || _fwState.node !== p.node) {
-    _fcalSetMsg("fwFlashMsg", "Re-run the dry-run for this exact file/node first.", "err");
+  // Full blessing match — file, node AND every flash-affecting param. The
+  // FLASH button is already gated on _fwSameImage, but re-checking here means
+  // a race or a stale DOM can never push a mismatched image to the live path.
+  if (!_fwSameImage(p)) {
+    _fcalSetMsg("fwFlashMsg", "Re-run the dry-run for this exact image/target first.", "err");
+    return;
+  }
+  // The live flash writes the bus, so a transport must be open (dry-run is
+  // hardware-free and intentionally does NOT require one).
+  if (_fcalInCalibratorMode() && !FieldCalibrationUI.transportReady) {
+    _fcalSetMsg(
+      "fwFlashMsg",
+      "Connect a transport first — use Connect… at the top of this dialog, then flash.",
+      "err",
+    );
+    _fwSyncTransportStatus();
     return;
   }
   // No extra confirm() dialog — arming already requires the irreversible
-  // checkbox + the exact typed phrase + the authorization key, and the
-  // dry-run-match guard above. A browser confirm on top is redundant.
+  // checkbox + the authorization key + a dry-run match for this exact
+  // image/target, plus the authoritative server-side gates. A browser
+  // confirm() on top would be redundant friction. (The type-to-confirm
+  // phrase was retired 2026-05-19.)
   const btn = document.getElementById("btnFwFlash");
   if (btn) btn.disabled = true;
   _fcalSetMsg("fwFlashMsg", "Arming live flash…", "info");
@@ -29284,9 +29779,11 @@ async function _fwStartFlash() {
     return;
   }
   _fwState.jobId = j.job_id;
+  _fwState.lastFlashOk = null;
   _fcalSetMsg("fwFlashMsg", `Flashing node ${p.node}… do NOT power off.`, "info");
   const abortBtn = document.getElementById("btnFwAbort");
   if (abortBtn) abortBtn.hidden = false;
+  _fwUpdateStepUI(); // reflect "running" on the rail immediately
   _fwState.poll = setInterval(_fwPollJob, 1500);
   _fwPollJob();
 }
@@ -29305,12 +29802,48 @@ function _fwPanelInit() {
 
   const modal = document.getElementById("fcalFirmwarePanel");
   const openBtn = document.getElementById("btnFwOpen");
+
+  // Focusable controls currently VISIBLE inside the dialog. offsetParent is
+  // null for a display:none subtree, so the hidden arm block / abort button
+  // are correctly excluded from the tab order and the focus trap.
+  const _fwFocusable = () =>
+    Array.from(
+      modal.querySelectorAll(
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ),
+    ).filter((el) => el.offsetParent !== null);
+
   const _fwOpen = () => {
     if (!modal) return;
     modal.hidden = false;
+    // Refresh state that may have changed while the dialog was closed (the
+    // operator might have connected a transport on the page behind it).
+    _fwSyncTransportStatus();
+    _fwUpdateStepUI();
+    // Move focus into the dialog — the file path is the first real action —
+    // so keyboard/screen-reader users start inside the modal, not on the page
+    // behind it. setTimeout(0) lets the `hidden` removal settle first.
+    setTimeout(() => {
+      const fp = document.getElementById("fwFilePath");
+      (fp || _fwFocusable()[0] || modal).focus?.();
+    }, 0);
   };
   const _fwClose = () => {
+    // Never dismiss while a flash job is live — the worker keeps flashing
+    // server-side, so a closed modal would hide an in-progress irreversible
+    // operation. The X button and the backdrop both route through here, so
+    // this single guard covers them as well as the Escape handler below.
+    if (_fwState.jobId) {
+      _fcalSetMsg(
+        "fwFlashMsg",
+        "Flash in progress — wait for it to finish or use Abort.",
+        "err",
+      );
+      return;
+    }
     if (modal) modal.hidden = true;
+    // Restore focus to the opener so keyboard users resume where they were.
+    openBtn?.focus?.();
   };
   openBtn?.addEventListener("click", _fwOpen);
   modal?.querySelectorAll("[data-fw-close]").forEach((el) => {
@@ -29323,22 +29856,43 @@ function _fwPanelInit() {
       _fwClose();
     }
   });
+  // Trap Tab within the dialog so focus can't wander onto the dimmed page
+  // behind this irreversible flow (WCAG 2.4.3 / modal focus management).
+  modal?.addEventListener("keydown", (e) => {
+    if (e.key !== "Tab" || modal.hidden) return;
+    const f = _fwFocusable();
+    if (!f.length) return;
+    const first = f[0];
+    const last = f[f.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  });
 
   document.getElementById("btnFwBrowse")?.addEventListener("click", _fwBrowse);
   document.getElementById("btnFwIdentity")?.addEventListener("click", _fwReadIdentity);
   document.getElementById("btnFwDryRun")?.addEventListener("click", _fwRunDryRun);
   document.getElementById("btnFwFlash")?.addEventListener("click", _fwStartFlash);
   document.getElementById("btnFwAbort")?.addEventListener("click", _fwAbortFlash);
+  document.getElementById("btnFwGotoTransport")?.addEventListener("click", _fwGotoTransport);
 
-  // Any image/target/param change invalidates the dry-run blessing.
-  ["fwNode", "fwArgDsp", "fwFrameLen", "fwLegacy50"].forEach((id) => {
+  // Any image/target/param change invalidates the dry-run blessing. allow
+  // downgrade is included because it IS sent to the live flash — toggling it
+  // after a dry-run must force a fresh one (the server validates downgrade
+  // direction, so the blessing has to cover it too).
+  ["fwNode", "fwArgDsp", "fwFrameLen", "fwLegacy50", "fwAllowDowngrade"].forEach((id) => {
     const el = document.getElementById(id);
     el?.addEventListener("change", _fwInvalidateDryRun);
   });
-  // The path field is free-text (paste-able), so invalidate on input too.
-  document
-    .getElementById("fwFilePath")
-    ?.addEventListener("input", _fwInvalidateDryRun);
+  // The path + node fields are typed, so invalidate on 'input' too (not just
+  // on blur) — the rail/arm never lag a half-typed change.
+  ["fwFilePath", "fwNode"].forEach((id) => {
+    document.getElementById(id)?.addEventListener("input", _fwInvalidateDryRun);
+  });
   // Arm-state inputs only recompute the FLASH enable (no dry-run reset).
   ["fwAck", "fwAuthKey"].forEach((id) => {
     const el = document.getElementById(id);
@@ -29353,6 +29907,7 @@ function _fwPanelInit() {
     if (seed) nodeInp.value = seed;
   }
   _fwRecomputeArmState();
+  _fwSyncTransportStatus(); // seed the chip before the first open
 }
 
 // v2.11.x — operator preference: the Field Calibration inverter & node
@@ -29449,7 +30004,16 @@ function _fcalSetMsg(id, text, kind = "info") {
   const el = document.getElementById(id);
   if (!el) return;
   el.textContent = String(text || "");
-  el.className = "smsg" + (kind === "err" ? " smsg-err" : kind === "ok" ? " smsg-ok" : "");
+  // Map the message kind to a defined color modifier. "info" is neutral
+  // (muted) rather than the base green so a progress line never reads as a
+  // success. err→red, ok→green, warn→orange, info/blank→muted.
+  const mod =
+    kind === "err" ? " smsg-err"
+      : kind === "ok" ? " smsg-ok"
+      : kind === "warn" ? " smsg-warn"
+      : text ? " smsg-info"
+      : "";
+  el.className = "smsg" + mod;
 }
 
 // ─────────────────────────────────────────────────────────────────────────

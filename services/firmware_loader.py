@@ -34,6 +34,7 @@ This module is pure — no I/O beyond reading the given S-record file path.
 from __future__ import annotations
 
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Protocol, runtime_checkable
@@ -513,6 +514,123 @@ def load_srec(path: str, arg_dsp: int, arg_longitud_trama: int) -> FirmwareImage
     )
 
 
+# ─── Embedded firmware-code verification (ISM VerificaFicheroFirmware) ──────
+#
+# ISM's primary anti-"wrong file" guard. Before flashing, ISM opens the .S,
+# finds the S-record line at a DSP-class-specific flash address, and asserts
+# the firmware code embedded THERE matches the code derived from the filename
+# — so a renamed or corrupted image (right name, wrong contents, or vice
+# versa) is refused with "Invalid firmware" BEFORE any byte hits the wire.
+#
+# Decoded byte-for-byte from FV.IngeBLL IL (2026-05-31):
+#   FreescaleDSP56F.VerificaFicheroFirmware (base get_Posicion… throws
+#   NotImplementedException — the constant lives in the DSP807/DSP803
+#   overrides), plus the FV.Common.Utiles transforms and
+#   FV.idinormasHelper.CodigoFirmware.RemoveIJKcode. Proven to PASS the real
+#   docs/AAV1003IJK01BC_InverterFirmware.S (its line at 0x202000 carries
+#   `41413156303042332043` = endian-inverted ASCII of "AAV1003BC ").
+
+# The S-record line whose 32-bit address field holds the embedded firmware
+# code, per DSP class (ISM DSP807/DSP803 get_PosicionDelCodigoFirmwareEnFichero):
+#   DSP807 (arg_dsp ∈ {1,6}) → S3 record at byte-address 0x00202000
+#   DSP803 (else)            → S3 record at byte-address 0x00201000
+# (0x20xxxx ⇒ X-data flash; this is the start of X-flash bank B, §1.)
+_FW_CODE_POS_DSP807 = "S35100202000"
+_FW_CODE_POS_DSP803 = "S35100201000"
+
+_RE_IJK = re.compile(r"ijk[0-9][0-9]", re.IGNORECASE)   # ISM RemoveIJKcode
+
+
+def fw_code_from_filename(path: str) -> str:
+    """`AAV1003IJK01BC_InverterFirmware.S` → `AAV1003IJK01BC` (upper, the bare
+    code before any `_` suffix). Shared so the embedded-code check and the
+    model-prefix compat check derive the filename code identically."""
+    stem = os.path.splitext(os.path.basename(path))[0].upper()
+    return stem.split("_")[0]
+
+
+def _remove_ijk_code(name: str) -> str:
+    """Port of ISM CodigoFirmware.RemoveIJKcode — strip every `ijkNN`
+    (case-insensitive) group. `AAV1003IJK01BC` → `AAV1003BC`."""
+    if not name:
+        raise FirmwareError("Empty Codfirmware")
+    return _RE_IJK.sub("", name)
+
+
+def _invierte_endianness(s: str) -> str:
+    """Port of ISM Utiles.InvierteEndianness — swap adjacent character pairs
+    (the DSP56F 16-bit-word byte-swap): out[2k]=in[2k+1], out[2k+1]=in[2k]."""
+    a = list(s)
+    out = list(a)
+    for i in range(0, len(a) - 1, 2):
+        out[i], out[i + 1] = a[i + 1], a[i]
+    return "".join(out)
+
+
+def _string_to_hex(s: str) -> str:
+    """Port of ISM Utiles.String2HexString — each char → 2 uppercase hex
+    digits of its ASCII byte. .NET ASCIIEncoding maps non-ASCII to '?'
+    (0x3F); our inputs are ASCII firmware codes so that never triggers."""
+    return "".join("{:02X}".format(ord(c) if ord(c) <= 0x7F else 0x3F)
+                   for c in s)
+
+
+def _embedded_code_position(arg_dsp: int) -> str:
+    return (_FW_CODE_POS_DSP807 if arg_dsp in _DSP807_ARG_DSP
+            else _FW_CODE_POS_DSP803)
+
+
+def verify_embedded_firmware_code(path: str, arg_dsp: int) -> str:
+    """Port of ISM FreescaleDSP56F.VerificaFicheroFirmware.
+
+    Opens the .S, finds the S-record line at the DSP-class flash position,
+    and asserts the firmware code embedded there matches the filename-derived
+    code. Raises FirmwareError("Invalid firmware") (ISM-verbatim) on any
+    mismatch / missing line. Returns the verified code on success.
+
+    Catches a renamed or corrupted image whose embedded version code no
+    longer matches its filename — exactly ISM's primary pre-flash protection,
+    and a layer the SHA/filename/FC11 gates do not cover. Proven to PASS the
+    real docs/AAV1003IJK01BC_InverterFirmware.S.
+    """
+    code = _remove_ijk_code(fw_code_from_filename(path))   # AAV1003IJK01BC→AAV1003BC
+    if len(code) == 10:
+        pass
+    elif len(code) == 9:
+        code = code + " "                                  # ISM pads to 10
+    elif len(code) == 8:
+        raise FirmwareError(
+            "Invalid firmware: filename code is 8 chars after IJK removal "
+            "(boot-file naming) — not a main-app image for this flash path")
+    else:
+        raise FirmwareError(
+            "Invalid firmware: cannot derive a 10-char code from filename "
+            f"{os.path.basename(path)!r} (got {code.strip()!r})")
+    expected_hex = _string_to_hex(_invierte_endianness(code))   # 20 hex chars
+    loc5 = expected_hex[0:16]       # first 8 bytes
+    loc6 = expected_hex[18:20]      # byte 9 (byte 8 = pad, skipped — as ISM)
+    position = _embedded_code_position(arg_dsp)
+
+    try:
+        with open(path, "r", encoding="latin-1") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if position not in line:
+                    continue
+                # The S-record line at the firmware-code flash address.
+                if loc5 in line:
+                    idx = line.index(loc5)
+                    if line[idx + 18:idx + 20] == loc6:
+                        return code.strip()        # embedded code matches
+                # Position line present but the embedded code mismatches the
+                # filename → wrong / renamed / corrupt image.
+                raise FirmwareError("Invalid firmware")
+    except OSError as exc:
+        raise FirmwareError(f"cannot read firmware file: {exc}") from exc
+    # No S-record carried the firmware-code at the expected flash address.
+    raise FirmwareError("Invalid firmware")
+
+
 # ════════════════════════════════════════════════════════════════════════════
 #  Phase 1b — frame construction (still pure: builds byte[] frames in RAM,
 #  sends NOTHING). Byte-for-byte port of ISM Cargador.CrearTrama0x90/91/92/96,
@@ -909,11 +1027,13 @@ def flash_node(frames: List[bytes], transport: Transport, *, node: int,
             accepted = True
             break
         if status == 1 and attempt == num_intentos - 1:
+            # Lead with ISM's verbatim "error code 1" wording (precise),
+            # then the actionable next step (graceful).
             raise FirmwareError(
-                "Load-start rejected (0x90 status 1) — the inverter DSP "
-                "received a malformed start frame (checksum or format). "
-                "Confirm the target node/slave address and that the firmware "
-                "image matches this unit, then retry.")
+                "Firmware load start (0x90) error code 1 — the inverter DSP "
+                "rejected the start frame (checksum or format). Confirm the "
+                "target node/slave address and that the firmware image "
+                "matches this unit, then retry.")
         if status == 2 and attempt == num_intentos - 1:
             # status==2 is the DSP's own 'busy / will not enter load' byte
             # (ISM Cargador bTramaRx[2]==2), NOT a transport/socket error.
@@ -921,11 +1041,12 @@ def flash_node(frames: List[bytes], transport: Transport, *, node: int,
             # Modbus master on the line — surface both as the next action.
             # Multi-PC poller and per-IP/per-RS-485 reality are called out
             # explicitly because operators routinely disable only the target
-            # node on a second dashboard, which does not free the bus.
+            # node on a second dashboard, which does not free the bus. Lead
+            # with ISM's verbatim "error code 2" wording (precise).
             raise FirmwareError(
-                "Load-start refused by the inverter (0x90 status 2). "
-                "The DSP will not enter firmware-load mode. The inverter "
-                "itself reported this — it is NOT a network or cable error. "
+                "Firmware load start (0x90) error code 2 — the inverter DSP "
+                "will not enter firmware-load mode. The inverter itself "
+                "reported this; it is NOT a network or cable error. "
                 "To retry, ALL of the following must be true: "
                 "(1) the inverter is STOPPED — not running, not "
                 "grid-connected; "

@@ -1,12 +1,12 @@
 # ADSI Inverter Dashboard User Manual
 
-**Applies to:** ADSI Inverter Dashboard `v2.11.2`
+**Applies to:** ADSI Inverter Dashboard `v2.11.3`
 **Document type:** Operator and administrator reference  
 **Scope:** Main dashboard, forecast workspace, settings center, cloud backup, standby database workflow, alarm handling, exports, IP Configuration, and Topology
 
 ---
 
-## Service documentation (v2.11.2+)
+## Service documentation (v2.11.3+)
 
 Four Ingeteam reference PDFs ship with the installer under `docs/` and are
 also hosted on GitHub for in-app auto-download from the alarm drilldown:
@@ -265,8 +265,8 @@ The `About` card also shows:
 | Daily report record | inverter, energy, peak output, average output, uptime, alarms, availability, performance | Report page, report export | Formal daily performance review |
 | Forecast data | date, interval, forecast energy/power, estimated actual, variance | Analytics page, Forecast page, forecast export | Day-ahead planning and comparison |
 | Weather data | date, sky, temperature min/max, rainfall, cloud cover | Analytics page, Forecast context | Production context and expectation setting |
-| Runtime health data | CPU, memory, uptime, polling metrics, fetch errors, connected clients | Settings -> Connectivity & Sync | Technical health monitoring |
-| Replication and standby data | mode, gateway link, last success, standby status, transfer progress, archive option | Settings -> Connectivity & Sync | Remote readiness and local standby maintenance |
+| Runtime health data | CPU, memory, uptime, polling metrics, fetch errors, connected clients | Settings -> Connectivity & Gateway Link | Technical health monitoring |
+| Replication and standby data | mode, gateway link, last success, standby status, transfer progress, archive option | Settings -> Connectivity & Gateway Link | Remote readiness and local standby maintenance |
 | Backup package | provider, scope, size, created time, status | Settings -> Cloud Backup & Restore | Disaster recovery and controlled rollback |
 
 ### 4.2 Core Display Units
@@ -1356,7 +1356,7 @@ These settings define the default values loaded into the **Plant Cap** page. The
 | `Exempted Inverter Numbers` | Default comma-separated inverter exclusion list used by `Exemption` mode |
 | `Cooldown (s)` | Default settling delay after each controller action |
 
-### 6.9.3 Connectivity & Sync
+### 6.9.3 Connectivity & Gateway Link
 
 This section defines whether the workstation is acting locally at the plant or as a remote viewer.
 
@@ -1378,23 +1378,33 @@ This section defines whether the workstation is acting locally at the plant or a
 | `Refresh` | Refreshes replication and link-health information |
 | `Refresh Standby DB` | Stages archive DB files first (when included) for historical consistency, then downloads a fresh gateway main DB snapshot for local use; if newer local standby data exists, the app blocks and offers explicit `Force Pull` |
 
-#### Gateway Link and Standby Fields
+The Gateway Link tab groups its status tiles into two labelled groups so the
+network state and the standby-refresh activity read separately at a glance.
+
+#### Connection Fields
+
+Shown under the **Connection** group.
 
 | Field | Meaning |
 | --- | --- |
 | `Mode` | Current runtime mode |
 | `Gateway URL` | Remote gateway target |
-| `Gateway Link` | Link status to the gateway |
+| `Gateway Reachable` | Whether the gateway can currently be reached over the network |
 | `Tailscale` | Secure path status |
-| `Gateway Live Link` | Current data-link activity state |
-| `Last Successful Contact` | Last successful contact timestamp |
+| `Gateway Live Link` | Current data-link (WebSocket) activity state |
+| `Last Successful Contact` | Last successful gateway response timestamp |
+
+#### Standby Refresh Fields
+
+Shown under the **Standby Refresh** group, with the `Last Errors` panel below it.
+
+| Field | Meaning |
+| --- | --- |
 | `Last Standby Refresh` | Last background or manual standby operation |
 | `Rows Received` | Received row counter for related operations |
 | `Last Standby DB Pull` | Last full standby DB staging event |
 | `Background Job` | Current standby or transfer job state |
 | `Last Errors` | Most recent connectivity or transfer errors |
-| `Standby DB Scope` | Current meaning of standby DB refresh |
-| `Archive Scope` | Whether archive inclusion is optional or enabled |
 
 #### Transfer Monitor
 
@@ -2008,9 +2018,11 @@ visible at a glance.
 > sign-off.
 
 A **FW Upgrade** button at the top-right of the per-node controls row
-(standalone calibrator only) opens the **Firmware Upgrade** dialog. The
-workflow is deliberately staged so the irreversible step cannot be
-reached by accident:
+(standalone calibrator only) opens the **Firmware Upgrade** dialog,
+presented as a guided **4-step wizard** — *File → Target → Dry-run →
+Flash*. A progress rail shows each step's status (done / current /
+locked); a later step stays locked until its prerequisite is met, so the
+irreversible step cannot be reached by accident:
 
 1. **Connect a transport** to the target inverter — either **Ethernet**
    (Modbus-TCP via the transparent gateway) or **RS485-USB** (Modbus-RTU,
@@ -2029,6 +2041,12 @@ reached by accident:
    DSP reject the start with *"firmware load start (0x90) error code 2"*.
    The claim self-expires (~2 min) if the calibrator crashes, so polling
    can never be permanently silenced.
+   *Transport status:* the dialog shows a **transport-status line** near the
+   top — **green** when a link is open, **amber** with an inline **Connect…**
+   shortcut when none is. So you know *before* clicking whether **Read
+   Identity** and **FLASH (live)** can actually reach the unit; both guide you
+   to connect a transport instead of failing with a cryptic error. (Dry-Run is
+   hardware-free and needs no transport.)
 2. **Browse… to the firmware file.** The native OS file picker opens;
    choose the `.S` Motorola S-record image (you may also paste an
    absolute path). The filename must follow the ISM `LLLnnnn…` rule
@@ -2038,11 +2056,18 @@ reached by accident:
 3. **Set the target node** (1–247; broadcast/0 is forbidden) and
    optionally **Read Identity** — an FC11 Report-Slave-ID showing the
    exact serial / model / running firmware of the unit you would flash.
+   When a file is already selected, the readout also states whether the
+   flash is an **upgrade**, **downgrade**, or **no change** (unit version →
+   file version), mirroring ISM's pre-flash advisory so you confirm the
+   direction *before* arming.
 4. **Dry-Run (safe).** This simulates the *entire* flash against an
    in-memory DSP with **zero hardware contact**. It also computes and
-   displays the file's **SHA-256**. A successful dry-run of the *exact*
-   selected file/node/parameters is a hard precondition for arming the
-   live flash — changing any of them re-disables the live button.
+   displays the file's **SHA-256**, and verifies that the firmware **code
+   embedded in the image matches the filename** (ISM's
+   `VerificaFicheroFirmware` *"Invalid firmware"* guard) — so a renamed or
+   corrupt file is rejected here, before you can arm. A successful dry-run
+   of the *exact* selected file/node/parameters is a hard precondition for
+   arming the live flash — changing any of them re-disables the live button.
 5. **Arm.** The live block reveals only after a passing dry-run. You
    must (a) tick the irreversible-acknowledgement box and (b) supply the
    authorization key (`adsiMM`). The **FLASH (live)** button stays
@@ -2055,7 +2080,9 @@ refused unless *all* hold: explicit irreversible confirmation; a prior
 successful dry-run of the same SHA-256; exactly one link (a TCP host or
 a serial COM port — never both, never neither); a
 single non-broadcast node; a verified file (real regular file, `.S`,
-size capped, ISM filename rule, SHA-256 match); an FC11 model/version
+size capped, ISM filename rule, SHA-256 match); the **embedded
+firmware-code match** (the code stored in the image must match the
+filename — ISM `VerificaFicheroFirmware`); an FC11 model/version
 compatibility check (apparent downgrades blocked unless **Allow
 downgrade** is ticked); an exclusive RS-485 bus lock; an audit sink; and
 a watchdog deadline.
@@ -2064,7 +2091,16 @@ a watchdog deadline.
 or reset-vector banks. An interrupted or aborted application flash
 therefore leaves the unit **re-flashable** — Abort is fail-safe and is
 intentionally *not* behind an auth prompt so it is always immediately
-available.
+available. While a flash is running the dialog **cannot be closed** (the
+X, the backdrop, and Escape are all blocked); wait for completion or use
+**Abort**, so an in-progress irreversible operation is never hidden.
+
+**Post-flash verification.** After a successful flash the tool re-reads
+the unit's FC11 identity (ISM `Identifica`) and reports the firmware it
+now runs, so you can confirm the new image booted. This is read-only and
+best-effort: if the unit is still rebooting and cannot be re-read, the
+log says so and asks you to verify manually — it never marks a
+successful flash as failed.
 
 **Downgrade is possible.** The DSP bootloader and the on-wire protocol
 enforce no version monotonicity — the loader erases and writes whatever
@@ -2072,20 +2108,23 @@ compatible image you send, older or newer. In ISM the
 upgrade-vs-downgrade decision is purely an application-layer policy
 (`QueHableAhoraOCalleParaSiempre(newCode, forceDowngrade)` /
 `CheckCanUpgradeFirmware`), bypassable with ISM's own *force* flag. This
-tool mirrors that: the downgrade block is a conservative software
-heuristic (FC11 firmware string vs the filename version trailer), lifted
-by ticking **Allow downgrade** under Advanced. The heuristic compares the
-FC11 string, not the embedded `CodigoFirmware.Version` ISM reads, so it
-is conservative and does not change what the hardware accepts — the
+tool mirrors that: the downgrade block compares the unit's **authoritative
+`model_code` version** (the `AAV1003xx` firmware FC11 actually reports)
+against the file's version trailer, and is lifted by ticking **Allow
+downgrade** under Advanced. (It deliberately does *not* use the FC11
+`AAS…` auxiliary IDs, which are not the running firmware.) This guard is
+conservative and does not change what the hardware accepts — the
 bootloader takes any compatible image. The file↔model prefix check
-(`AAV1003…`) and the SHA-pinned dry-run still apply, and
-bootloader-bank preservation keeps even a mistaken-direction flash
-recoverable.
+(`AAV1003…`), the embedded firmware-code match, and the SHA-pinned
+dry-run still apply, and bootloader-bank preservation keeps even a
+mistaken-direction flash recoverable.
 
 **Audit trail.** Every live attempt and its outcome is appended to
 `firmware-audit.jsonl` under `%PROGRAMDATA%\InverterDashboard\`
-(`firmware.live.start` / `.ok` / `.fail` with host, node, file, SHA-256,
-and frame counters).
+(`firmware.pre_flash.direction` with the upgrade/downgrade decision;
+`firmware.live.start` / `.ok` / `.fail` with host, node, file, SHA-256,
+and frame counters; and `firmware.live.verify_ok` / `.verify_warn` with
+the old → new firmware codes from the post-flash re-read).
 
 ### What this does NOT replace
 
@@ -2166,7 +2205,7 @@ Operational note:
 5. Check the header connection dot and clock.
 6. Review `TOTAL PAC` and `TODAY MWh`.
 7. Open the `Inverters` page and confirm online, alarmed, and offline counts.
-8. If operating remotely, confirm `Connectivity & Sync` status in Settings.
+8. If operating remotely, confirm `Connectivity & Gateway Link` status in Settings.
 
 ## 8.2 Live Control Workflow
 
@@ -2234,7 +2273,7 @@ Important:
 ## 8.7 Remote Standby Refresh Workflow
 
 1. Confirm the workstation is in `Remote` mode.
-2. Open `Settings -> Connectivity & Sync`.
+2. Open `Settings -> Connectivity & Gateway Link`.
 3. Review gateway link and transfer monitor status.
 4. Decide whether archive DB files are required.
 5. Run `Refresh Standby DB`.
@@ -2455,7 +2494,7 @@ This manual intentionally does not publish authorization-key generation rules or
 | Operator action traceability | `Audit` |
 | Formal daily summary | `Report` |
 | File generation | `Export` |
-| Mode, link, standby DB, runtime health | `Settings -> Connectivity & Sync` |
+| Mode, link, standby DB, runtime health | `Settings -> Connectivity & Gateway Link` |
 | License and update management | `Settings -> License` and `Settings -> App Updates` |
 | Backup and restore | `Settings -> Cloud Backup & Restore` |
 | Network configuration | `IP Configuration` |
