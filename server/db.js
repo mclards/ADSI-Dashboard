@@ -132,6 +132,35 @@ let _archiveLruEvictionCount = 0;
 let _archiveLruLastEvictedKey = null;
 let _archiveLruLastEvictedAtMs = 0;
 const STARTUP_COMPACT_MAX_BYTES = 64 * 1024 * 1024;
+// ─── Row-count safety caps for the archive-aware "...RangeAll" readers ──────
+// better-sqlite3 is synchronous and these helpers materialize the ENTIRE range
+// into a JS Map + Array + sort. The route-level guard bounds *time* (366 days)
+// but NOT row COUNT, so a high-poll-rate plant requesting a wide range could
+// run the Node process out of heap. Because Node shares the gateway box with
+// the Electron renderer AND the Python poller, an OOM there can drag the whole
+// Windows machine into swap-thrash and a hard freeze (the reported whole-PC
+// crash). We now abort with a clear, catchable error BEFORE the heap blows —
+// strictly safer than the old "caller will OOM loudly" behaviour, and a no-op
+// for every legitimately-sized export. Operator-overridable via env for
+// gateways with ample RAM that genuinely need a bigger one-shot pull.
+const READINGS_RANGE_MAX_ROWS = Math.max(
+  100000,
+  Number(process.env.ADSI_READINGS_RANGE_MAX_ROWS) || 2000000,
+);
+const ENERGY5MIN_RANGE_MAX_ROWS = Math.max(
+  100000,
+  Number(process.env.ADSI_ENERGY5MIN_RANGE_MAX_ROWS) || 2000000,
+);
+function _rangeRowCapError(kind, rows, cap, envVar) {
+  const err = new Error(
+    `${kind} query range too large: ${rows.toLocaleString()} rows exceeds the ` +
+      `${cap.toLocaleString()}-row safety cap. Narrow the date range or use a ` +
+      `per-inverter export. (Raise ${envVar} only if the gateway has spare RAM.)`,
+  );
+  err.code = "RANGE_ROW_CAP";
+  err.userMessage = `The selected range returns too many rows (over ${cap.toLocaleString()}). Please choose a shorter date range.`;
+  return err;
+}
 const READING_STORAGE_COLUMNS = [
   "id",
   "ts",
@@ -665,6 +694,13 @@ db.pragma("busy_timeout = 1500");   // Low timeout: better-sqlite3 blocks event 
 db.pragma("cache_size = -64000");
 db.pragma("temp_store = memory");
 db.pragma("mmap_size = 268435456");
+// Pin the WAL auto-checkpoint threshold explicitly (1000 pages ≈ 4 MB, the
+// SQLite default) so continuous poller writes keep checkpointing the WAL in
+// small PASSIVE batches instead of letting it grow large and forcing a single
+// long synchronous flush. Made explicit (not relying on the driver default) so
+// the bound can't drift if a future better-sqlite3/SQLite changes the default;
+// audited 2026-06-01 as part of the freeze/crash hardening pass.
+db.pragma("wal_autocheckpoint = 1000");
 
 // Post-open quick_check — covers the case where the file validated readonly
 // but became inconsistent after WAL playback on open.
@@ -4727,8 +4763,14 @@ function queryReadingsRangeAll(startTs, endTs) {
     const entry = getArchiveEntry(monthKey, false);
     if (!entry) continue;
     pushUniqueRows(out, entry.selectReadingsRangeAll.all(s, e), readingsNaturalKey);
+    if (out.size > READINGS_RANGE_MAX_ROWS) {
+      throw _rangeRowCapError("readings", out.size, READINGS_RANGE_MAX_ROWS, "ADSI_READINGS_RANGE_MAX_ROWS");
+    }
   }
   pushUniqueRows(out, stmts.getReadingsRangeAll.all(s, e), readingsNaturalKey);
+  if (out.size > READINGS_RANGE_MAX_ROWS) {
+    throw _rangeRowCapError("readings", out.size, READINGS_RANGE_MAX_ROWS, "ADSI_READINGS_RANGE_MAX_ROWS");
+  }
   return Array.from(out.values()).sort(sortReadingsAsc);
 }
 
@@ -5049,8 +5091,14 @@ function queryEnergy5minRangeAll(startTs, endTs) {
     const entry = getArchiveEntry(monthKey, false);
     if (!entry) continue;
     pushUniqueRows(out, entry.selectEnergyRangeAll.all(s, e), energyNaturalKey);
+    if (out.size > ENERGY5MIN_RANGE_MAX_ROWS) {
+      throw _rangeRowCapError("energy_5min", out.size, ENERGY5MIN_RANGE_MAX_ROWS, "ADSI_ENERGY5MIN_RANGE_MAX_ROWS");
+    }
   }
   pushUniqueRows(out, stmts.get5minRangeAll.all(s, e), energyNaturalKey);
+  if (out.size > ENERGY5MIN_RANGE_MAX_ROWS) {
+    throw _rangeRowCapError("energy_5min", out.size, ENERGY5MIN_RANGE_MAX_ROWS, "ADSI_ENERGY5MIN_RANGE_MAX_ROWS");
+  }
   return Array.from(out.values()).sort(sortEnergyAsc);
 }
 

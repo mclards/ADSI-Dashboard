@@ -618,13 +618,22 @@ class CloudBackupService {
     return [...this.history];
   }
 
-  _recordFilesFromDir(dir, relPrefix, checksums, files) {
+  async _recordFilesFromDir(dir, relPrefix, checksums, files) {
     if (!dir || !fs.existsSync(dir)) return;
+    let _sinceYield = 0;
     for (const rel of listFilesRecursive(dir)) {
       const abs = path.join(dir, ...rel.split("/"));
       const outRel = relPrefix ? `${relPrefix}/${rel}` : rel;
       checksums[outRel] = sha256File(abs);
       files.push({ name: outRel, size: fs.statSync(abs).size });
+      // Yield to the event loop periodically. SHA-256-hashing a large
+      // forecast/history/weather/archive tree was fully synchronous and could
+      // stall the API + poller for seconds during a (possibly daytime, manual)
+      // backup. Hashing stays synchronous per file; we just hand the loop a
+      // breather every 50 files. (2026-06-01 freeze hardening.)
+      if ((++_sinceYield % 50) === 0) {
+        await new Promise((r) => setImmediate(r));
+      }
     }
   }
 
@@ -823,13 +832,13 @@ class CloudBackupService {
       const historyDest = path.join(dir, "history");
       const weatherDest = path.join(dir, "weather");
       if (forecastDir && copyDirRecursive(forecastDir, forecastDest)) {
-        this._recordFilesFromDir(forecastDest, "forecast", checksums, files);
+        await this._recordFilesFromDir(forecastDest, "forecast", checksums, files);
       }
       if (historyDir && copyDirRecursive(historyDir, historyDest)) {
-        this._recordFilesFromDir(historyDest, "history", checksums, files);
+        await this._recordFilesFromDir(historyDest, "history", checksums, files);
       }
       if (weatherDir && copyDirRecursive(weatherDir, weatherDest)) {
-        this._recordFilesFromDir(weatherDest, "weather", checksums, files);
+        await this._recordFilesFromDir(weatherDest, "weather", checksums, files);
       }
     }
 
@@ -2356,7 +2365,7 @@ class CloudBackupService {
         this._setProgress({ pct: 50, message: "Backing up archive databases…" });
         const archiveDest = path.join(dir, "archive");
         copyDirRecursive(archiveDir, archiveDest);
-        this._recordFilesFromDir(archiveDest, "archive", manifest.checksums, manifest.files);
+        await this._recordFilesFromDir(archiveDest, "archive", manifest.checksums, manifest.files);
       }
 
       // License files
@@ -2365,7 +2374,7 @@ class CloudBackupService {
         this._setProgress({ pct: 58, message: "Backing up license files…" });
         const licenseDest = path.join(dir, "license");
         copyDirRecursive(licenseDir, licenseDest);
-        this._recordFilesFromDir(licenseDest, "license", manifest.checksums, manifest.files);
+        await this._recordFilesFromDir(licenseDest, "license", manifest.checksums, manifest.files);
       }
 
       // Auth tokens
@@ -2374,7 +2383,7 @@ class CloudBackupService {
         this._setProgress({ pct: 62, message: "Backing up auth tokens…" });
         const authDest = path.join(dir, "auth");
         copyDirRecursive(authDir, authDest);
-        this._recordFilesFromDir(authDest, "auth", manifest.checksums, manifest.files);
+        await this._recordFilesFromDir(authDest, "auth", manifest.checksums, manifest.files);
       }
 
       // Update manifest with full scope

@@ -7437,13 +7437,36 @@ def collect_training_data_hardened(
     return X_train, y_train, w_train, class_scale_train, day_train
 
 
+def _lgbm_n_jobs():
+    """Bounded LightGBM worker-thread count for the shared gateway box.
+
+    n_jobs=-1 let LightGBM grab EVERY CPU core during the daily training run.
+    Because the Node API server, the Modbus poller and the Electron renderer
+    all run on this same machine, that saturated every core for the 0.5-6 min
+    training window and froze the live dashboard via CPU contention (verified
+    2026-06-01 freeze/crash audit). Leave 2 cores for the rest of the stack;
+    overridable via ADSI_LGBM_N_JOBS for operators who tune by hand.
+    """
+    try:
+        override = int(os.environ.get("ADSI_LGBM_N_JOBS", "0"))
+        if override > 0:
+            return override
+    except Exception:
+        pass
+    try:
+        cores = os.cpu_count() or 2
+    except Exception:
+        cores = 2
+    return max(1, cores - 2)
+
+
 def _make_residual_regressor_lgbm():
     if not _LIGHTGBM_AVAILABLE:
         raise RuntimeError("LightGBM is not installed")
     return lgb.LGBMRegressor(
         n_estimators=650, learning_rate=0.040, max_depth=8, num_leaves=71,
         subsample=0.78, colsample_bytree=0.75, min_child_samples=22,
-        reg_alpha=0.08, reg_lambda=0.12, n_jobs=-1, random_state=42,
+        reg_alpha=0.08, reg_lambda=0.12, n_jobs=_lgbm_n_jobs(), random_state=42,
         verbose=-1, early_stopping_rounds=50,
     )
 
@@ -7454,7 +7477,7 @@ def _make_error_classifier_lgbm():
     return lgb.LGBMClassifier(
         n_estimators=400, learning_rate=0.05, max_depth=6, num_leaves=47,
         subsample=0.80, colsample_bytree=0.80, min_child_samples=20,
-        n_jobs=-1, random_state=42, verbose=-1, early_stopping_rounds=30,
+        n_jobs=_lgbm_n_jobs(), random_state=42, verbose=-1, early_stopping_rounds=30,
     )
 
 

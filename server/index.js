@@ -1000,10 +1000,27 @@ async function _runNextCloudOp() {
   }
 }
 
+const CLOUD_OP_QUEUE_LIMIT = 25; // absolute backstop; coalescing keeps it far below this
 function enqueueCloudOp(label, fn) {
+  const lbl = String(label || "cloud-op");
+  // Coalesce duplicates: if an identical op is already WAITING in the queue,
+  // don't pile on another. During a cloud outage the retry-spiral plus operator
+  // click-spam previously let this queue grow unbounded (each job pins an async
+  // closure) → gradual heap growth / OOM. One queued op per label still captures
+  // the latest state when it eventually runs, so coalescing is loss-free here.
+  const existingIdx = _cloudOpQueue.findIndex((j) => j.label === lbl);
+  if (existingIdx >= 0) {
+    return { position: existingIdx + 1 + (_cloudOpRunnerBusy ? 1 : 0), coalesced: true };
+  }
+  // Absolute backstop in case many *distinct* labels arrive during an outage.
+  if (_cloudOpQueue.length >= CLOUD_OP_QUEUE_LIMIT) {
+    const err = new Error("Cloud operation queue is full — please retry shortly.");
+    err.code = "CLOUD_QUEUE_FULL";
+    throw err;
+  }
   const pending = _cloudOpQueue.length + (_cloudOpRunnerBusy ? 1 : 0);
   _cloudOpQueue.push({
-    label: String(label || "cloud-op"),
+    label: lbl,
     fn,
     busyRetries: 0,
   });
@@ -1075,7 +1092,39 @@ function isExportQueueBusyError(err) {
   return String(err?.code || "").toUpperCase() === "EXPORT_QUEUE_BUSY";
 }
 
+// Refuse to start an export when the export drive is nearly full, instead of
+// letting the write fill the last few MB — a full Windows system drive causes
+// I/O stalls that freeze the dashboard and can hang the whole machine. FAIL-OPEN:
+// any statfs/probe failure (older Node, odd path) skips the check so a valid
+// export is never wrongly blocked. Operator-tunable via ADSI_EXPORT_MIN_FREE_MB.
+// (2026-06-01 freeze/crash hardening.)
+const EXPORT_MIN_FREE_MB = Math.max(50, Number(process.env.ADSI_EXPORT_MIN_FREE_MB) || 500);
+async function _assertExportDiskSpace() {
+  try {
+    const fsp = fs.promises;
+    if (!fsp || typeof fsp.statfs !== "function") return; // older Node — skip
+    const dir = getSetting("csvSavePath", "C:\\Logs\\InverterDashboard");
+    let probe = dir;
+    if (!dir || !fs.existsSync(probe)) {
+      probe = path.parse(path.resolve(dir || ".")).root || probe;
+    }
+    const st = await fsp.statfs(probe);
+    const freeBytes = Number(st.bavail) * Number(st.bsize);
+    if (Number.isFinite(freeBytes) && freeBytes < EXPORT_MIN_FREE_MB * 1024 * 1024) {
+      const err = new Error(
+        `Not enough free disk space for export: ${(freeBytes / 1048576).toFixed(0)} MB free on the export drive (need ≥ ${EXPORT_MIN_FREE_MB} MB). Free up space or change the export folder.`,
+      );
+      err.code = "EXPORT_DISK_LOW";
+      throw err;
+    }
+  } catch (err) {
+    if (err && err.code === "EXPORT_DISK_LOW") throw err;
+    // Probe failed for any other reason → fail open, never block a valid export.
+  }
+}
+
 async function runGatewayExportJob(label, fn) {
+  await _assertExportDiskSpace();
   return enqueueGatewayExportJob(label, async () => {
     await new Promise((resolve) => setImmediate(resolve));
     return fn();
@@ -7683,6 +7732,15 @@ function getTodayEnergyRowsForLivePayload(day = localDateStr()) {
   return mergeTodayEnergyRowsMax(cachedRows, liveRows);
 }
 
+// Throttle the (relatively expensive) plant-cap preview rebuild that the live
+// broadcast enricher would otherwise force on EVERY poll tick (~5×/sec). The
+// preview iterates every inverter/unit; at 5 Hz on the shared gateway box that
+// is a measurable, sustained event-loop cost. The plant-cap *control* path
+// keeps its own refresh:true cadence, so for the WS display payload we rebuild
+// at most every 2 s and otherwise reuse the controller's cached lastPreview via
+// refresh:false (O(1)). Display staleness ≤2 s is invisible to operators.
+let _plantCapEnrichRefreshAtMs = 0;
+const PLANT_CAP_ENRICH_THROTTLE_MS = 2000;
 setBroadcastPayloadEnricher((payload) => {
   if (!payload || typeof payload !== "object") return payload;
   if (String(payload.type || "").trim().toLowerCase() !== "live") return payload;
@@ -7700,8 +7758,11 @@ setBroadcastPayloadEnricher((payload) => {
     plantCapController &&
     !Object.prototype.hasOwnProperty.call(enriched, "plantCap")
   ) {
+    const now = Date.now();
+    const doRefresh = now - _plantCapEnrichRefreshAtMs >= PLANT_CAP_ENRICH_THROTTLE_MS;
+    if (doRefresh) _plantCapEnrichRefreshAtMs = now;
     enriched.plantCap = plantCapController.getStatus({
-      refresh: true,
+      refresh: doRefresh, // refresh:false returns the cached lastPreview (O(1))
       includePreview: false,
     });
   }
@@ -11328,8 +11389,10 @@ async function buildPacEnergyBuckets({ inverter, startTs, endTs, bucketMin = 5 }
   // per-row dedup Set is needed and heap stays O(nodes + buckets), not O(rows).
   const sources = listReadingsRangeSources(s, e, invFilter);
   let _rowsSinceYield = 0;
+  let _lastYieldMs = Date.now();
   for (const src of sources) {
     await _yieldToLibuv();
+    _lastYieldMs = Date.now();
     let shardRows;
     try {
       shardRows = src.run() || [];
@@ -11367,8 +11430,17 @@ async function buildPacEnergyBuckets({ inverter, startTs, endTs, bucketMin = 5 }
 
       nodeState.set(key, { ts, pac: pacW });
       // Yield within very large shards too so a single high-row month can't
-      // monopolize the loop between shard boundaries.
-      if ((++_rowsSinceYield % 5000) === 0) await _yieldToLibuv();
+      // monopolize the loop between shard boundaries. Time-based (≤~8 ms slices)
+      // rather than a fixed 5000-row stride, so the bound holds regardless of
+      // per-row cost or shard size; Date.now() is sampled only every 1000 rows
+      // to keep the check itself free. (2026-06-01 freeze hardening.)
+      if ((++_rowsSinceYield % 1000) === 0) {
+        const nowMs = Date.now();
+        if (nowMs - _lastYieldMs >= 8) {
+          await _yieldToLibuv();
+          _lastYieldMs = nowMs;
+        }
+      }
     }
   }
 
@@ -12821,7 +12893,13 @@ app.get("/api/system/heartbeat", (req, res) => {
         connectedClients: Number(wsStats.connectedClients || 0),
         sentFrames: Number(wsStats.sentFrames || 0),
         lastSentTs: Number(wsStats.lastSentTs || 0),
+        droppedFramesBackpressure: Number(wsStats.droppedFramesBackpressure || 0),
       },
+      // Surfaced 2026-06-01: a rising unhandledRejection count is an early
+      // warning of a background async fault that the process intentionally
+      // survives (see the unhandledRejection handler) — visible here instead
+      // of buried in stderr.
+      unhandledRejections: getUnhandledRejectionStats(),
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -23472,6 +23550,48 @@ app.post("/api/export/forecast-actual", async (req, res) => {
 // to complete before other heavy tasks resume.
 cron.schedule("30 21 * * *", pruneOldData);
 
+// ─── Export-file retention (2026-06-01 freeze/crash hardening) ──────────────
+// CSV/XLSX exports were written to csvSavePath with NO cleanup, accumulating
+// over months/years until the gateway's system drive fills. A full Windows
+// system drive causes I/O stalls that freeze the dashboard and can hang the
+// whole machine (one of the verified whole-PC-crash vectors). Prune our export
+// files older than the operator-tunable window (csvExportRetainDays, default
+// 365; set 0 to disable). Scoped to .csv/.xlsx inside the dedicated export
+// directory only, runs once daily at 02:15 — well off any request hot path.
+const EXPORT_FILE_EXT_RE = /\.(csv|xlsx)$/i;
+function pruneOldExportFiles() {
+  try {
+    const retainDays = Math.max(0, Number(getSetting("csvExportRetainDays", "365")) || 0);
+    if (retainDays <= 0) return; // operator-disabled
+    const dir = getSetting("csvSavePath", "C:\\Logs\\InverterDashboard");
+    if (!dir || !fs.existsSync(dir)) return;
+    const cutoff = Date.now() - retainDays * 86400000;
+    let removed = 0;
+    const walk = (d, depth) => {
+      if (depth > 3) return; // bound recursion (top dir + forecast/solcast subfolders)
+      let entries;
+      try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch (_) { return; }
+      for (const ent of entries) {
+        const p = path.join(d, ent.name);
+        if (ent.isDirectory()) { walk(p, depth + 1); continue; }
+        if (!ent.isFile() || !EXPORT_FILE_EXT_RE.test(ent.name)) continue;
+        let st;
+        try { st = fs.statSync(p); } catch (_) { continue; }
+        if (st.mtimeMs < cutoff) {
+          try { fs.unlinkSync(p); removed++; } catch (_) {}
+        }
+      }
+    };
+    walk(dir, 0);
+    if (removed > 0) {
+      console.log(`[Cron:export-prune] Removed ${removed} export file(s) older than ${retainDays}d from ${dir}`);
+    }
+  } catch (err) {
+    console.warn("[Cron:export-prune] failed:", err.message);
+  }
+}
+cron.schedule("15 2 * * *", pruneOldExportFiles);
+
 // Prune solcast_snapshot_history rows older than 90 days (v2.8+).
 // v2.8.14 — moved from 03:35 to 21:35, keeping the 5-minute offset from
 // pruneOldData so any long-running VACUUM has released its write lock.
@@ -23508,12 +23628,22 @@ for (const cronExpr of ["30 4 * * *", "30 9 * * *", "30 18 * * *", "0 20 * * *",
       return;
     }
     _forecastCronRunning = true;
-    // FIX-08: Safety timeout — auto-reset if cron generation hangs for 45 minutes
-    const cronSafetyTimer = setTimeout(() => {
-      if (_forecastCronRunning) {
-        console.warn("[Cron:forecast] Safety timeout: cron running flag auto-reset after 45 minutes");
-        _forecastCronRunning = false;
-        // M5 fix: attempt to kill hanging forecast process
+    // FIX (2026-06-01 freeze/crash hardening): previously a SEPARATE 45-min
+    // safety timer reset `_forecastCronRunning = false` on its own, while the
+    // awaited generation could still be hung (e.g. a Node-side network fetch
+    // with no timeout — killing the Python PID does not unblock that await).
+    // With crons hours apart, a multi-hour hang then let each subsequent cron
+    // start ANOTHER concurrent generation, stacking up across the day and
+    // contending for the (synchronous) SQLite DB + CPU → UI freeze / crash.
+    // Now we RACE the generation against a rejecting timeout so the await
+    // always settles within the window and the flag is cleared exactly once in
+    // `finally`. Since the crons are ≥90 min apart and the run is bounded to
+    // ≤45 min, two runs can never overlap.
+    const FORECAST_CRON_TIMEOUT_MS = 45 * 60 * 1000;
+    let cronTimeoutHandle = null;
+    const cronTimeout = new Promise((_resolve, reject) => {
+      cronTimeoutHandle = setTimeout(() => {
+        // Kill any hung Python child before bailing.
         if (_lastForecastPid) {
           try {
             if (process.platform === "win32") {
@@ -23525,8 +23655,10 @@ for (const cronExpr of ["30 4 * * *", "30 9 * * *", "30 18 * * *", "0 20 * * *",
           } catch {}
           _lastForecastPid = null;
         }
-      }
-    }, 45 * 60 * 1000);
+        reject(new Error("forecast cron generation timed out after 45 minutes"));
+      }, FORECAST_CRON_TIMEOUT_MS);
+      if (cronTimeoutHandle.unref) cronTimeoutHandle.unref();
+    });
     try {
       if (isRemoteMode()) return;
       const tomorrow = addDaysIso(localDateStr(), 1);
@@ -23543,11 +23675,16 @@ for (const cronExpr of ["30 4 * * *", "30 9 * * *", "30 18 * * *", "0 20 * * *",
           console.warn(`[Cron:forecast] skipping ${cronExpr} — manual generation started during quality assessment`);
           return;
         }
-        const result = await runDayAheadGenerationPlan({
+        const genPromise = runDayAheadGenerationPlan({
           dates: [tomorrow],
           trigger: "node_fallback",
           replaceExisting: true,
         });
+        // If the timeout wins the race, the generation promise becomes an
+        // orphan — attach a no-op catch so its late rejection isn't reported
+        // as an unhandledRejection.
+        genPromise.catch(() => {});
+        const result = await Promise.race([genPromise, cronTimeout]);
         console.log(
           `[Cron:forecast] Day-ahead for ${tomorrow} generated via Node fallback (provider=${result?.provider_used}, variant=${result?.forecast_variant}, ${result?.durationMs || 0}ms)`,
         );
@@ -23558,7 +23695,7 @@ for (const cronExpr of ["30 4 * * *", "30 9 * * *", "30 18 * * *", "0 20 * * *",
       }
     } finally {
       _forecastCronRunning = false;
-      clearTimeout(cronSafetyTimer);
+      if (cronTimeoutHandle) clearTimeout(cronTimeoutHandle);
     }
   });
 }
@@ -24448,9 +24585,26 @@ process.on("uncaughtException", (err) => {
   try { _flushAndClose(); } catch (_) {}
 });
 
+let _unhandledRejectionCount = 0;
+let _lastUnhandledRejection = null;
 process.on("unhandledRejection", (reason) => {
-  console.error("[Server] Unhandled rejection:", reason);
+  _unhandledRejectionCount += 1;
+  _lastUnhandledRejection = {
+    at: Date.now(),
+    reason: String(reason?.stack || reason?.message || reason || "").slice(0, 800),
+  };
+  console.error(`[Server] Unhandled rejection (#${_unhandledRejectionCount}):`, reason);
+  // DELIBERATELY do NOT exit here. All live hot paths (poller, cloud-op queue,
+  // remote bridge, forecast) carry explicit .catch() handlers (verified
+  // 2026-06-01), so a stray background rejection must not take down live
+  // polling / write-control — and with the electron-side restart caps now in
+  // place, force-exiting on a transient reject could eventually trip the
+  // crash-loop halt and leave the dashboard down. We track count + last reason
+  // so a genuine spike is observable (see /api/health) instead of silent.
 });
+function getUnhandledRejectionStats() {
+  return { count: _unhandledRejectionCount, last: _lastUnhandledRejection };
+}
 
 // â"€â"€â"€ Periodic WAL Checkpoint â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 // Keeps the WAL file from growing unbounded between auto-checkpoints.

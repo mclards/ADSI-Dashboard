@@ -430,6 +430,18 @@ const FORECAST_RESTART_MAX_MS = 30000;
 // service, used by scheduleBackendRestart().
 const BACKEND_RESTART_BASE_MS = 1500;
 const BACKEND_RESTART_MAX_MS = 30000;
+// Crash-loop storm guard (2026-06-01): cap consecutive auto-restarts that are
+// NOT separated by a stable run. Without this, a deterministic startup crash
+// (corrupt DB, port conflict, missing module, bad EXE path) respawns a fresh
+// process tree forever — on the gateway PC this exhausts RAM/handles/CPU and
+// can take the whole machine down. The backoff alone never stopped because the
+// 'spawn' event reset the attempt counter every cycle. We now reset the counter
+// only after the process has survived *_STABLE_RESET_MS, so a fast crash-loop
+// escalates to the cap and halts; a healthy run that later dies still recovers.
+const BACKEND_RESTART_MAX_ATTEMPTS = 10;
+const FORECAST_RESTART_MAX_ATTEMPTS = 10;
+const BACKEND_STABLE_RESET_MS = 60000;
+const FORECAST_STABLE_RESET_MS = 60000;
 const FORECAST_MODE_SYNC_MS = 10000;
 const APP_SHUTDOWN_WEB_TIMEOUT_MS = 5000;
 const APP_SHUTDOWN_FORCE_KILL_WAIT_MS = 2000;
@@ -595,6 +607,15 @@ let forecastRestartTimer = null;
 let backendRestartTimer = null;
 let backendRestartAttempts = 0;
 let forecastRestartAttempts = 0;
+// Timestamps of the last successful spawn — used to decide whether an exit
+// followed a *stable* run (reset the attempt counter) or a fast crash-loop
+// (let the counter climb toward the *_MAX_ATTEMPTS cap). See restart constants.
+let backendSpawnedAt = 0;
+let forecastSpawnedAt = 0;
+// Latched once the forecast service exhausts its restart budget — gates BOTH
+// the restart-timer path and the 10s mode-sync respawn path. Cleared on a
+// stable run or a manual/mode stop so recovery is always possible.
+let forecastRestartHalted = false;
 let forecastModeSyncTimer = null;
 let forecastModeSyncInFlight = false;
 let forecastStopExpected = false;
@@ -4115,8 +4136,11 @@ function spawnBackendProcess(backendLaunch, logPrefix = "[main] Spawning backend
     console.error("[main] Backend spawn error:", err.message);
   });
   backendProc.on("spawn", () => {
-    // Successful spawn resets backoff so next unexpected exit retries fast.
-    backendRestartAttempts = 0;
+    // Record spawn time. The backoff/cap counter is reset on a *stable* run
+    // (see the exit handler), NOT merely on spawn — otherwise a process that
+    // spawns then immediately crashes resets the counter every cycle and loops
+    // forever at the 1.5s floor (the crash-loop storm we are guarding against).
+    backendSpawnedAt = Date.now();
   });
   backendProc.on("exit", (code, signal) => {
     const expectedStop = backendStopExpected;
@@ -4130,6 +4154,11 @@ function spawnBackendProcess(backendLaunch, logPrefix = "[main] Spawning backend
     // T6.9 fix (Phase 3, 2026-04-14): previously the handler only logged and
     // the app hung with a blank renderer.  Schedule an auto-restart with
     // exponential backoff, matching the forecast service pattern.
+    // Crash-loop guard: only treat this as a "fresh" recovery (reset backoff)
+    // if the process actually stayed alive for a stable window. A fast crash
+    // keeps the counter so scheduleBackendRestart can trip the max-attempt cap.
+    const backendAliveMs = backendSpawnedAt ? Date.now() - backendSpawnedAt : 0;
+    if (backendAliveMs >= BACKEND_STABLE_RESET_MS) backendRestartAttempts = 0;
     scheduleBackendRestart(`unexpected exit code=${code} signal=${signal}`);
   });
 }
@@ -4144,6 +4173,12 @@ function scheduleBackendRestart(reason) {
   if (isAppShuttingDown) return;
   if (backendRestartTimer) return;
   if (backendProc && !backendProc.killed) return;
+  if (backendRestartAttempts >= BACKEND_RESTART_MAX_ATTEMPTS) {
+    console.error(
+      `[main] Backend exceeded ${BACKEND_RESTART_MAX_ATTEMPTS} restart attempts without a stable run — halting auto-restart to avoid a crash-loop storm. Restart manually from the tray/menu once the underlying fault is resolved.`,
+    );
+    return;
+  }
 
   const delay = Math.min(
     BACKEND_RESTART_MAX_MS,
@@ -4193,7 +4228,9 @@ function spawnForecastProcess(forecastLaunch, logPrefix = "[main] Spawning forec
     scheduleForecastRestart("spawn error");
   });
   forecastProc.on("spawn", () => {
-    forecastRestartAttempts = 0;
+    // Record spawn time; counter reset happens on a stable run (exit handler),
+    // not on spawn — same crash-loop-storm guard as the backend.
+    forecastSpawnedAt = Date.now();
   });
   forecastProc.on("exit", (code, signal) => {
     const expectedStop = forecastStopExpected;
@@ -4204,6 +4241,8 @@ function spawnForecastProcess(forecastLaunch, logPrefix = "[main] Spawning forec
       return;
     }
     console.warn("[main] Forecast exited - code=" + code + " signal=" + signal);
+    const forecastAliveMs = forecastSpawnedAt ? Date.now() - forecastSpawnedAt : 0;
+    if (forecastAliveMs >= FORECAST_STABLE_RESET_MS) forecastRestartAttempts = 0;
     scheduleForecastRestart(`exit code=${code} signal=${signal}`);
   });
 }
@@ -4250,6 +4289,18 @@ function startBackendProcess() {
 
 function startForecastProcess() {
   if (forecastProc && !forecastProc.killed) return true;
+  // Crash-loop storm guard: once the restart budget is exhausted, refuse to
+  // respawn — this is the single spawn choke-point shared by the restart timer
+  // AND the 10s forecast mode-sync interval, so latching here stops both.
+  if (forecastRestartAttempts >= FORECAST_RESTART_MAX_ATTEMPTS) {
+    if (!forecastRestartHalted) {
+      forecastRestartHalted = true;
+      console.error(
+        `[main] Forecast service halted after ${FORECAST_RESTART_MAX_ATTEMPTS} crash-restarts without a stable run. It will stay down (core dashboard unaffected) until a mode change or manual restart.`,
+      );
+    }
+    return false;
+  }
   const launch = resolveForecastLaunch();
   if (!launch) {
     console.warn("[main] Forecast service not found. Skipping day-ahead background process.");
@@ -4262,6 +4313,7 @@ function startForecastProcess() {
 function stopForecastProcess(reason = "") {
   clearForecastRestartTimer();
   forecastRestartAttempts = 0;
+  forecastRestartHalted = false; // clear crash-loop latch on an intentional stop
   if (!forecastProc || forecastProc.killed) {
     forecastProc = null;
     return;
@@ -4284,6 +4336,9 @@ function scheduleForecastRestart(reason) {
   if (isAppShuttingDown) return;
   if (forecastRestartTimer) return;
   if (forecastProc && !forecastProc.killed) return;
+  // Budget exhausted — don't schedule. startForecastProcess() owns the single
+  // halt log so we stay quiet here to avoid per-crash spam.
+  if (forecastRestartAttempts >= FORECAST_RESTART_MAX_ATTEMPTS) return;
 
   const delay = Math.min(
     FORECAST_RESTART_MAX_MS,
