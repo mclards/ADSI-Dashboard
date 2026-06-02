@@ -17,16 +17,28 @@ function run() {
     // 2026-05-31 — the plant-wide bulk-control key was unified with the
     // topology key: the prefix is now `adsi` (the old `sacups` is retired) and
     // BOTH padded (`adsi05`) and unpadded (`adsi5`) minute forms validate, for
-    // parity with requireTopologyAuth. At minute 5 the valid set is
-    // {adsi5, adsi05, adsi4, adsi04}.
+    // parity with requireTopologyAuth.
+    // 2026-06-02 — the window is ±1 minute in BOTH directions (prior, current,
+    // next) to match the documented Credentials Reference contract and to
+    // tolerate a gateway clock that lags the operator's reference clock. At
+    // minute 5 the valid set is {adsi4, adsi04, adsi5, adsi05, adsi6, adsi06}.
     const keys = [...getPlantWideAuthKeys(base)];
-    assert.deepEqual(keys.sort(), ["adsi04", "adsi05", "adsi4", "adsi5"]);
+    assert.deepEqual(
+      keys.sort(),
+      ["adsi04", "adsi05", "adsi06", "adsi4", "adsi5", "adsi6"],
+    );
     assert.equal(isValidPlantWideAuthKey("adsi05", base), true);
     assert.equal(isValidPlantWideAuthKey("adsi5", base), true);
     assert.equal(isValidPlantWideAuthKey("adsi04", base), true);
     assert.equal(isValidPlantWideAuthKey("adsi4", base), true);
+    // Next minute (clock-lag tolerance) — previously rejected, now valid.
+    assert.equal(isValidPlantWideAuthKey("adsi06", base), true);
+    assert.equal(isValidPlantWideAuthKey("adsi6", base), true);
+    // Two minutes away in either direction stays invalid (window is exactly ±1).
     assert.equal(isValidPlantWideAuthKey("adsi03", base), false);
     assert.equal(isValidPlantWideAuthKey("adsi3", base), false);
+    assert.equal(isValidPlantWideAuthKey("adsi07", base), false);
+    assert.equal(isValidPlantWideAuthKey("adsi7", base), false);
     // Regression guard: the retired `sacups` prefix must NEVER validate again.
     assert.equal(isValidPlantWideAuthKey("sacups05", base), false);
     assert.equal(isValidPlantWideAuthKey("sacups5", base), false);

@@ -47,17 +47,26 @@ function getPlantWideAuthKeys(nowMs = Date.now()) {
   const baseMs = Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now();
   const now = new Date(baseMs);
   const prev = new Date(baseMs - 60000);
+  const next = new Date(baseMs + 60000);
   const m = now.getMinutes();
   const pm = prev.getMinutes();
-  // Accept BOTH zero-padded (`adsi05`) and unpadded (`adsi5`) minute forms so the
-  // single typed key behaves identically to the topology gate (requireTopologyAuth),
-  // which also accepts both. Same ±1-minute window either way — no extra minutes
-  // are admitted, so this is strictly a usability change, not a security one.
+  const nm = next.getMinutes();
+  // Accept the PRIOR, CURRENT and NEXT minute — a true ±1-minute window in BOTH
+  // directions. This matches the documented contract in the Credentials
+  // Reference ("at 14:35, valid keys are adsi34, adsi35 or adsi36") and, more
+  // importantly, fixes the always-fail case where the gateway PC clock lags the
+  // operator's reference clock: the operator types the minute on their watch
+  // (the gateway's *next* minute) and every gate used to reject it.
+  // Accept BOTH zero-padded (`adsi05`) and unpadded (`adsi5`) forms so the single
+  // typed key behaves identically to every other gate (requireTopologyAuth,
+  // requireSubstationAuth, the calibrator gate, Python `_check_bulk_auth`).
   return new Set([
     `${PLANT_WIDE_AUTH_PREFIX}${m}`,
     `${PLANT_WIDE_AUTH_PREFIX}${String(m).padStart(2, "0")}`,
     `${PLANT_WIDE_AUTH_PREFIX}${pm}`,
     `${PLANT_WIDE_AUTH_PREFIX}${String(pm).padStart(2, "0")}`,
+    `${PLANT_WIDE_AUTH_PREFIX}${nm}`,
+    `${PLANT_WIDE_AUTH_PREFIX}${String(nm).padStart(2, "0")}`,
   ]);
 }
 

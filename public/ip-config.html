@@ -815,8 +815,18 @@
       });
 
       function getMinuteKeys() {
+        // ±1 minute in BOTH directions (prior + current + next) so this local
+        // gate matches the server's window. Current-minute-only used to falsely
+        // reject a valid key when the clock ticked over between the operator
+        // reading it and clicking Continue.
         const m = new Date().getMinutes();
-        return [`adsi${m}`, `adsi${String(m).padStart(2, "0")}`];
+        const prev = (m + 59) % 60;
+        const next = (m + 1) % 60;
+        return [
+          `adsi${m}`, `adsi${String(m).padStart(2, "0")}`,
+          `adsi${prev}`, `adsi${String(prev).padStart(2, "0")}`,
+          `adsi${next}`, `adsi${String(next).padStart(2, "0")}`,
+        ];
       }
       function verifyKey(v) {
         return getMinuteKeys().includes(

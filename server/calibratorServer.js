@@ -159,9 +159,15 @@ function startCalibratorServer({
     const valid = new Set([
       `adsi${m}`, `adsi${String(m).padStart(2, "0")}`,
     ]);
+    // ±1 minute in BOTH directions (prior + next) — same window as the
+    // dashboard's requireTopologyAuth / getPlantWideAuthKeys, so a key that
+    // works in the main app also works against the standalone calibrator.
     const mPrev = (m + 59) % 60;
+    const mNext = (m + 1) % 60;
     valid.add(`adsi${mPrev}`);
     valid.add(`adsi${String(mPrev).padStart(2, "0")}`);
+    valid.add(`adsi${mNext}`);
+    valid.add(`adsi${String(mNext).padStart(2, "0")}`);
 
     // Accept if lease exists and is valid, or key is in current ±1 minute window
     const lease = _topologyAuthLeases.get(key);

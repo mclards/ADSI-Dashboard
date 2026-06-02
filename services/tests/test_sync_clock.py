@@ -54,6 +54,13 @@ class BulkAuthTests(unittest.TestCase):
         self.assertTrue(self.ns["_check_bulk_auth"](f"adsi{prev}"))
         self.assertTrue(self.ns["_check_bulk_auth"](f"adsi{prev:02d}"))
 
+    def test_next_minute_key_accepted(self):
+        # 2026-06-02 — ±1 window in BOTH directions, matching the Node gates.
+        # Tolerates a gateway clock that lags the operator's reference clock.
+        nxt = (datetime.now() + timedelta(minutes=1)).minute
+        self.assertTrue(self.ns["_check_bulk_auth"](f"adsi{nxt}"))
+        self.assertTrue(self.ns["_check_bulk_auth"](f"adsi{nxt:02d}"))
+
     def test_rejects_unknown(self):
         self.assertFalse(self.ns["_check_bulk_auth"]("wrongkey"))
         self.assertFalse(self.ns["_check_bulk_auth"](""))

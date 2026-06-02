@@ -12809,15 +12809,21 @@ app.ws("/ws/camera", (ws, req) => {
 
 /* ── go2rtc process control (gateway-mode only) ───────────────────── */
 app.get("/api/streaming/go2rtc-status", (req, res) => {
+  // Remote viewer: the camera service (go2rtc) runs on the GATEWAY, not the
+  // viewer. Proxy so the modal shows the gateway's real status instead of the
+  // local manager's perpetual "stopped". Registered before the catch-all proxy
+  // middleware, so we must proxy explicitly here.
+  if (isRemoteMode()) return proxyToRemote(req, res);
   res.json(go2rtcManager.getStatus());
 });
 
 app.post("/api/streaming/go2rtc/start", (req, res) => {
-  if (isRemoteMode()) {
-    return res
-      .status(403)
-      .json({ ok: false, error: "go2rtc is only available in gateway mode." });
-  }
+  // Remote viewer: proxy to the gateway so the operator can start the camera
+  // service that runs ON the gateway. This route previously returned 403 here
+  // ("go2rtc is only available in gateway mode"), which the renderer's api()
+  // helper maps to the misleading "Authentication failed. Please log in again."
+  // — so the START button could never work from a remote viewer.
+  if (isRemoteMode()) return proxyToRemote(req, res);
   go2rtcManager
     .start(true)
     .then((r) => res.json(r))
@@ -12825,6 +12831,9 @@ app.post("/api/streaming/go2rtc/start", (req, res) => {
 });
 
 app.post("/api/streaming/go2rtc/stop", (req, res) => {
+  // Remote viewer: proxy to the gateway (symmetry with start/status) so STOP
+  // acts on the gateway's go2rtc rather than the viewer's idle local manager.
+  if (isRemoteMode()) return proxyToRemote(req, res);
   go2rtcManager
     .stop()
     .then(() => res.json({ ok: true }))
@@ -13073,9 +13082,16 @@ function requireTopologyAuth(req, res, next) {
   const valid = new Set([
     `adsi${m}`, `adsi${String(m).padStart(2, "0")}`,
   ]);
+  // ±1 minute in BOTH directions (prior + next) — tolerates the operator
+  // submitting a moment after reading the clock AND a gateway clock that lags
+  // the operator's reference clock. Matches getPlantWideAuthKeys in
+  // server/bulkControlAuth.js and the documented Credentials Reference contract.
   const mPrev = (m + 59) % 60;
+  const mNext = (m + 1) % 60;
   valid.add(`adsi${mPrev}`);
   valid.add(`adsi${String(mPrev).padStart(2, "0")}`);
+  valid.add(`adsi${mNext}`);
+  valid.add(`adsi${String(mNext).padStart(2, "0")}`);
   // Three acceptance paths in order:
   //   1) Active 60-min lease for this exact key string (rolling window
   //      re-stamped on each validation).
@@ -19573,9 +19589,13 @@ function requireSubstationAuth(req, res, next) {
   if (!key) return res.status(401).json({ ok: false, error: "Authorization required." });
   const m = new Date().getMinutes();
   const valid = [`adsi${m}`, `adsi${String(m).padStart(2, "0")}`];
-  // Allow ±1 minute tolerance for clock skew
+  // Allow ±1 minute tolerance for clock skew in BOTH directions (prior + next)
+  // so the gate matches getPlantWideAuthKeys / requireTopologyAuth and never
+  // rejects a key the operator typed off a slightly-fast or slightly-slow clock.
   const mPrev = (m + 59) % 60;
+  const mNext = (m + 1) % 60;
   valid.push(`adsi${mPrev}`, `adsi${String(mPrev).padStart(2, "0")}`);
+  valid.push(`adsi${mNext}`, `adsi${String(mNext).padStart(2, "0")}`);
   if (!valid.includes(key)) return res.status(403).json({ ok: false, error: "Invalid authorization key." });
   next();
 }

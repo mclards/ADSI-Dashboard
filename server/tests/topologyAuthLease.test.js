@@ -63,6 +63,7 @@ function makeAuthChecker() {
     const valid = new Set([
       `adsi${m}`, `adsi${String(m).padStart(2, "0")}`,
       `adsi${(m + 59) % 60}`, `adsi${String((m + 59) % 60).padStart(2, "0")}`,
+      `adsi${(m + 1) % 60}`, `adsi${String((m + 1) % 60).padStart(2, "0")}`,
     ]);
     const lease = leases.get(key);
     const leaseOk = lease && Number(lease.expiresAt || 0) > now;
@@ -114,6 +115,12 @@ function run() {
     const c = makeAuthChecker();
     const t = Date.parse("2026-05-13T12:30:15Z");
     assert.strictEqual(c("adsi29", "1.1.1.1", t).status, 200);
+  });
+
+  test("accepts next minute (current ±1 window — gateway-clock-lag tolerance)", () => {
+    const c = makeAuthChecker();
+    const t = Date.parse("2026-05-13T12:30:15Z"); // minute 30
+    assert.strictEqual(c("adsi31", "1.1.1.1", t).status, 200);
   });
 
   test("rejects two-minute-stale key WITHOUT lease (the original bug)", () => {

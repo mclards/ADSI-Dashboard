@@ -2659,7 +2659,11 @@ async def sync_clock_inverter(ip: str, units, target_dt=None,
 
 # ── Bulk-auth helper (mirrors server/bulkControlAuth.js adsiMM pattern) ──
 def _check_bulk_auth(header_value: str) -> bool:
-    """Accept `adsiMM` (current or prior minute, padded or unpadded). Case-insensitive."""
+    """Accept `adsiMM` for the prior, current OR next minute (±1 in both
+    directions), padded or unpadded. Case-insensitive. The next-minute offset
+    keeps this in lock-step with the Node gates (getPlantWideAuthKeys,
+    requireTopologyAuth) so a key the operator typed off a slightly-fast clock
+    is accepted here too."""
     if not header_value:
         return False
     raw = str(header_value).strip()
@@ -2670,7 +2674,7 @@ def _check_bulk_auth(header_value: str) -> bool:
     from datetime import datetime as _dt, timedelta
     now = _dt.now()
     candidates = set()
-    for offset in (0, -1):
+    for offset in (0, -1, 1):
         m = (now + timedelta(minutes=offset)).minute
         candidates.add(f"adsi{m}")
         candidates.add(f"adsi{m:02d}")

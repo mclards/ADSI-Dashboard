@@ -3784,7 +3784,11 @@ function shouldPreserveServerErrorMessage(url = "") {
     u.includes("/api/replication/") ||
     u.includes("/api/export/") ||
     u.includes("/api/forecast/solcast/") ||
-    u.includes("/api/export/solcast-preview")
+    u.includes("/api/export/solcast-preview") ||
+    // Camera/go2rtc service control: surface the real reason (e.g. "go2rtc
+    // executable not found", gateway-only) instead of the generic 401/403
+    // "Authentication failed. Please log in again." mapping.
+    u.includes("/api/streaming/")
   );
 }
 
