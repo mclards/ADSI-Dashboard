@@ -1,8 +1,8 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <title>Inverter IP Configuration</title>
+    <title>ADSI Inverter Dashboard Network Configuration</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="icon" type="image/x-icon" href="/assets/icon.ico" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -20,7 +20,7 @@
         --border2: #bdd0e8;
         --accent: #0d6efd;
         --accent2: #0a58ca;
-        --accent-glow: rgba(13, 110, 253, 0.2);
+        --accent-glow: rgba(13, 110, 253, 0.18);
         --text: #1a2b44;
         --text2: #4f6788;
         --ok: #0ea765;
@@ -31,12 +31,12 @@
         --bg: #061022;
         --surface: #0b162b;
         --surface2: #0f1e38;
-        --surface3: #132647;
+        --surface3: #102245;
         --border: #1f3252;
         --border2: #2a4772;
         --accent: #60a5fa;
         --accent2: #2563eb;
-        --accent-glow: rgba(96, 165, 250, 0.2);
+        --accent-glow: rgba(96, 165, 250, 0.18);
         --text: #dbe7ff;
         --text2: #8ea4c8;
         --ok: #10b981;
@@ -47,75 +47,72 @@
         margin: 0;
         padding: 0;
       }
+      html,
+      body {
+        height: 100%;
+      }
       body {
         background: var(--bg);
         color: var(--text);
-        font:
-          13px "Sora",
-          sans-serif;
+        font: 13px "Sora", sans-serif;
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+        overflow: hidden;
       }
-      .page {
-        max-width: 1100px;
-        margin: 0 auto;
-        padding: 24px 20px 40px;
-      }
+
+      /* ── Header ──────────────────────────────────────────── */
       .header {
-        display: grid;
-        grid-template-columns: 1fr auto 1fr;
-        gap: 12px;
+        flex: 0 0 auto;
+        display: flex;
         align-items: center;
-        margin-bottom: 18px;
+        gap: 12px;
+        padding: 10px 18px;
+        background: var(--surface);
+        border-bottom: 1px solid var(--border);
       }
       .header-left {
         display: flex;
         align-items: center;
-        gap: 10px;
+        gap: 11px;
+        min-width: 0;
       }
       #header-logo {
         height: 34px;
         width: auto;
         object-fit: contain;
-        filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.15));
       }
-      .header-title {
-        font:
-          800 19px Sora,
-          sans-serif;
-        text-align: center;
+      .h-title {
+        font: 800 16px Sora, sans-serif;
+        letter-spacing: 0.01em;
+        line-height: 1.1;
       }
-      .header-title span {
-        color: var(--accent);
+      .h-sub {
+        margin-top: 1px;
+        font: 600 9px "JetBrains Mono", monospace;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--text2);
       }
       .header-right {
         display: flex;
-        justify-content: flex-end;
         align-items: center;
-        gap: 10px;
-        grid-column: 3;
-      }
-      .btn-exit {
-        border-color: rgba(224, 49, 91, 0.45) !important;
-        color: var(--warn) !important;
-      }
-      .btn-exit:hover {
-        background: rgba(224, 49, 91, 0.08) !important;
+        gap: 8px;
+        margin-left: auto;
       }
       .reach-badge {
-        padding: 7px 12px;
+        padding: 6px 11px;
         background: var(--surface2);
         border: 1px solid var(--border2);
         border-radius: 8px;
-        font:
-          11px "JetBrains Mono",
-          monospace;
+        font: 700 11px "JetBrains Mono", monospace;
         color: var(--text2);
+        white-space: nowrap;
       }
       .scan-indicator {
         display: none;
         color: var(--accent);
-        font:
-          10px "JetBrains Mono",
-          monospace;
+        font: 10px "JetBrains Mono", monospace;
       }
       .scan-indicator.active {
         display: flex;
@@ -135,179 +132,299 @@
           transform: rotate(360deg);
         }
       }
+      .clock-wrap {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        height: 32px;
+        padding: 0 10px;
+        border: 1px solid var(--border2);
+        border-radius: 8px;
+        background: var(--surface2);
+      }
+      .ws-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--ok);
+        box-shadow: 0 0 8px var(--ok);
+      }
+      #clock {
+        font: 700 12px "JetBrains Mono", monospace;
+        color: var(--text2);
+        min-width: 62px;
+        text-align: right;
+      }
       .btn {
         border: none;
-        border-radius: 10px;
-        padding: 8px 16px;
+        border-radius: 8px;
+        height: 32px;
+        padding: 0 13px;
         cursor: pointer;
-        font:
-          600 12px "Sora",
-          sans-serif;
+        font: 700 12px "Sora", sans-serif;
+        transition: filter 0.14s, transform 0.1s, border-color 0.15s, background 0.15s, color 0.15s;
+      }
+      .btn:active {
+        transform: translateY(1px);
       }
       .btn-primary {
         background: linear-gradient(135deg, var(--accent2), var(--accent));
-        color: #001018;
+        color: #fff;
+        box-shadow: 0 4px 14px var(--accent-glow);
+      }
+      .btn-primary:hover {
+        filter: brightness(1.08);
       }
       .btn-ghost {
         background: var(--surface2);
         color: var(--text2);
         border: 1px solid var(--border2);
       }
-      #themeToggle {
-        min-width: 74px;
-      }
-      .table-card {
-        background: var(--surface);
-        border: 1px solid var(--border);
-        border-radius: var(--radius);
-        overflow: hidden;
-      }
-      table {
-        width: 100%;
-        border-collapse: collapse;
-      }
-      thead tr {
-        background: var(--surface2);
-      }
-      th {
-        padding: 10px 12px;
-        text-align: center;
-        font:
-          600 9px "JetBrains Mono",
-          monospace;
-        letter-spacing: 0.12em;
+      .btn-ghost:hover {
         color: var(--accent);
-        text-transform: uppercase;
-        border-bottom: 1px solid var(--border2);
+        border-color: var(--accent);
       }
-      th:first-child,
-      td:first-child {
-        text-align: left;
-        padding-left: 14px;
+
+      /* ── Main scroll area ────────────────────────────────── */
+      .main {
+        flex: 1 1 auto;
+        overflow: auto;
+        padding: 14px 18px;
       }
-      td {
-        padding: 7px 12px;
+      .grid {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 9px;
+        max-width: 1040px;
+        margin: 0 auto;
+      }
+      .grid-loading {
+        padding: 40px;
         text-align: center;
-        border-bottom: 1px solid var(--border);
-      }
-      tbody tr:hover {
-        background: var(--surface2);
-      }
-      .inv-cell {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-      }
-      .inv-num {
-        width: 28px;
-        height: 28px;
-        border-radius: 7px;
-        background: var(--surface3);
-        border: 1px solid var(--border2);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font:
-          600 10px "JetBrains Mono",
-          monospace;
         color: var(--text2);
       }
+
+      /* ── Inverter card (single-line strip) ───────────────── */
+      .inv-card {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        flex-wrap: wrap;
+        padding: 7px 11px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        transition: border-color 0.15s, box-shadow 0.15s;
+      }
+      .inv-card:hover {
+        border-color: var(--border2);
+      }
+      .inv-card.dirty {
+        border-color: var(--accent);
+        box-shadow: inset 3px 0 0 var(--accent);
+      }
+      .inv-id {
+        font: 700 11px Sora, sans-serif;
+        color: var(--text);
+        letter-spacing: 0.02em;
+        white-space: nowrap;
+        min-width: 50px;
+      }
+      .inv-id span {
+        font-family: "JetBrains Mono", monospace;
+      }
       .cfg-icon {
-        width: 22px;
-        height: 22px;
-        border-radius: 6px;
+        flex: 0 0 auto;
+        width: 26px;
+        height: 26px;
+        border-radius: 7px;
         display: flex;
         align-items: center;
         justify-content: center;
         cursor: pointer;
+        font-size: 13px;
+        line-height: 1;
         border: 1px solid transparent;
+        transition: filter 0.14s;
+      }
+      .cfg-icon:hover {
+        filter: brightness(1.12);
       }
       .ip-empty {
         background: var(--surface3);
-        color: #425366;
+        color: var(--text2);
+        border-color: var(--border2);
       }
       .ip-unreachable {
-        background: rgba(255, 83, 112, 0.12);
+        background: color-mix(in srgb, var(--warn) 13%, transparent);
         color: var(--warn);
-        border-color: rgba(255, 83, 112, 0.25);
+        border-color: color-mix(in srgb, var(--warn) 30%, transparent);
       }
       .ip-ok {
-        background: rgba(0, 230, 118, 0.12);
+        background: color-mix(in srgb, var(--ok) 14%, transparent);
         color: var(--ok);
-        border-color: rgba(0, 230, 118, 0.25);
+        border-color: color-mix(in srgb, var(--ok) 30%, transparent);
       }
       input[type="text"],
       input[type="number"] {
         background: var(--surface3);
         color: var(--text);
         border: 1px solid var(--border2);
-        border-radius: 6px;
-        padding: 6px 10px;
-        font:
-          12px "JetBrains Mono",
-          monospace;
+        border-radius: 7px;
+        padding: 6px 9px;
+        font: 12px "JetBrains Mono", monospace;
         text-align: center;
+        outline: none;
+        transition: border-color 0.15s, box-shadow 0.15s;
       }
-      input[type="text"] {
-        width: 150px;
+      input[type="text"]:focus,
+      input[type="number"]:focus {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px var(--accent-glow);
       }
-      input[type="number"] {
-        width: 90px;
+      .inv-card .f-ip {
+        flex: 1 1 110px;
+        min-width: 104px;
+        width: auto;
+        text-align: left;
       }
-      .units-wrap {
+      .mini {
         display: flex;
         align-items: center;
-        justify-content: center;
-        gap: 6px;
+        gap: 5px;
+        flex: 0 0 auto;
+      }
+      .mini > span {
+        font: 700 8px "JetBrains Mono", monospace;
+        letter-spacing: 0.1em;
+        color: var(--text2);
+      }
+      .inv-card .mini input {
+        width: 56px;
+        padding: 6px 6px;
+      }
+      .units {
+        display: flex;
+        align-items: center;
+        gap: 3px;
+        flex: 0 0 auto;
       }
       .unit-chip {
         display: inline-flex;
-        gap: 4px;
         align-items: center;
-        padding: 3px 8px;
-        border-radius: 5px;
+        gap: 3px;
+        padding: 3px 6px;
+        border-radius: 6px;
         background: var(--surface3);
         border: 1px solid var(--border2);
-        font:
-          600 10px "JetBrains Mono",
-          monospace;
+        font: 700 10px "JetBrains Mono", monospace;
         color: var(--text2);
+        cursor: pointer;
+        user-select: none;
+      }
+      .unit-chip:has(input:checked) {
+        color: var(--accent);
+        border-color: var(--accent);
+        background: var(--accent-glow);
       }
       .unit-chip input {
         width: 11px;
         height: 11px;
         accent-color: var(--accent);
+        cursor: pointer;
+        margin: 0;
       }
-      .sep-line {
-        width: 1px;
-        height: 16px;
-        background: var(--border2);
+      .save-btn {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 30px;
+        height: 30px;
+        border-radius: 7px;
+        border: 1px solid var(--border2);
+        background: var(--surface2);
+        color: var(--text2);
+        cursor: pointer;
+        transition: color 0.14s, border-color 0.14s, background 0.14s, transform 0.1s;
       }
-      .footer {
+      .save-btn:hover {
+        color: var(--accent);
+        border-color: var(--accent);
+        background: var(--accent-glow);
+      }
+      .save-btn:active {
+        transform: translateY(1px);
+      }
+
+      /* Reconnect-comms button — mirrors .save-btn, orange accent on hover. */
+      .recon-btn {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 30px;
+        height: 30px;
+        border-radius: 7px;
+        border: 1px solid var(--border2);
+        background: var(--surface2);
+        color: var(--text2);
+        cursor: pointer;
+        transition: color 0.14s, border-color 0.14s, background 0.14s, transform 0.1s;
+      }
+      .recon-btn:hover {
+        color: var(--orange, #fb923c);
+        border-color: var(--orange, #fb923c);
+        background: rgba(251, 146, 60, 0.12);
+      }
+      .recon-btn:active {
+        transform: translateY(1px);
+      }
+      .recon-btn:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+
+      /* ── Action bar ──────────────────────────────────────── */
+      .actionbar {
+        flex: 0 0 auto;
+        padding: 10px 18px;
+        background: var(--surface);
+        border-top: 1px solid var(--border);
+      }
+      .bar-inner {
         display: flex;
         gap: 12px;
         align-items: center;
-        justify-content: space-between;
-        margin-top: 16px;
+        max-width: 1040px;
+        margin: 0 auto;
       }
       .status-bar {
         flex: 1;
-        min-height: 36px;
-        padding: 9px 14px;
-        background: var(--surface);
+        min-height: 34px;
+        display: flex;
+        align-items: center;
+        padding: 7px 13px;
+        background: var(--surface2);
         border: 1px solid var(--border);
         border-radius: 8px;
-        font:
-          11px "JetBrains Mono",
-          monospace;
+        font: 11px "JetBrains Mono", monospace;
         color: var(--text2);
       }
       .status-bar.success {
         color: var(--ok);
+        border-color: color-mix(in srgb, var(--ok) 35%, transparent);
       }
       .status-bar.error {
         color: var(--warn);
+        border-color: color-mix(in srgb, var(--warn) 35%, transparent);
       }
+      .actionbar .btn-primary {
+        height: 36px;
+        padding: 0 20px;
+        font-size: 12.5px;
+      }
+
       /* ── Auth Gate ─────────────────────────────────────── */
       #auth-gate {
         position: fixed;
@@ -323,7 +440,7 @@
       }
       @keyframes gate-in {
         from { opacity: 0; }
-        to   { opacity: 1; }
+        to { opacity: 1; }
       }
       #auth-card {
         width: min(90vw, 344px);
@@ -340,9 +457,8 @@
       }
       @keyframes card-in {
         from { opacity: 0; transform: scale(0.92) translateY(10px); }
-        to   { opacity: 1; transform: scale(1)    translateY(0);     }
+        to { opacity: 1; transform: scale(1) translateY(0); }
       }
-      /* icon badge + title row */
       .auth-header {
         display: flex;
         align-items: center;
@@ -411,7 +527,7 @@
         cursor: pointer;
         transition: filter 0.15s, transform 0.1s;
       }
-      #auth-submit:hover  { filter: brightness(1.13); }
+      #auth-submit:hover { filter: brightness(1.13); }
       #auth-submit:active { transform: scale(0.975); filter: brightness(0.96); }
       #auth-error {
         margin-top: 10px;
@@ -425,272 +541,94 @@
         transition: opacity 0.18s;
       }
       #auth-error:not(:empty) { opacity: 1; }
-
-      /* Main-dashboard-like header shell */
-      .page {
-        max-width: none;
-        margin: 0;
-        padding: 0 20px 28px;
-      }
-      .header {
-        min-height: 78px;
-        margin: 0 -20px 16px;
-        padding: 0 16px;
-        border-bottom: 1px solid var(--border2);
-        background: linear-gradient(
-          180deg,
-          rgba(10, 18, 34, 0.97) 0%,
-          rgba(8, 15, 28, 0.97) 100%
-        );
-        box-shadow:
-          0 1px 0 var(--border2),
-          0 6px 20px rgba(0, 0, 0, 0.28);
-        display: grid;
-        grid-template-columns: auto 1fr auto;
-        gap: 12px;
-        align-items: center;
-      }
-      .header-left {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        min-width: 0;
-      }
-      #header-logo {
-        height: 34px;
-        width: auto;
-        object-fit: contain;
-        filter: none;
-      }
-      .header-center {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        min-width: 0;
-      }
-      .metric-pill {
-        min-width: 420px;
-        max-width: 100%;
-        border: 1px solid var(--border2);
-        border-radius: 9px;
-        padding: 8px 16px;
-        text-align: center;
-        background: linear-gradient(
-          135deg,
-          rgba(20, 36, 64, 0.9) 0%,
-          rgba(12, 22, 44, 0.9) 100%
-        );
-      }
-      .metric-label {
-        font:
-          700 0.56rem "JetBrains Mono",
-          monospace;
-        letter-spacing: 0.12em;
-        color: var(--text2);
-        text-transform: uppercase;
-      }
-      .metric-value {
-        margin-top: 2px;
-        font:
-          800 1.02rem "Sora",
-          sans-serif;
-        letter-spacing: 0.08em;
-        color: var(--accent);
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-      .header-right {
-        display: flex;
-        justify-content: flex-end;
-        align-items: center;
-        gap: 8px;
-        grid-column: auto;
-      }
-      .clock-wrap {
-        display: flex;
-        align-items: center;
-        gap: 7px;
-        height: 34px;
-        padding: 0 10px;
-        border: 1px solid var(--border2);
-        border-radius: 8px;
-        background: rgba(15, 30, 56, 0.58);
-      }
-      .ws-dot {
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-        background: var(--ok);
-        box-shadow: 0 0 8px var(--ok);
-      }
-      .ws-label {
-        font:
-          700 0.66rem "JetBrains Mono",
-          monospace;
-        color: var(--ok);
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-      }
-      #clock {
-        font:
-          700 0.76rem "JetBrains Mono",
-          monospace;
-        color: var(--text2);
-        min-width: 68px;
-        text-align: right;
-      }
-      .btn {
-        height: 34px;
-        padding: 0 13px;
-        border-radius: 8px;
-        font:
-          700 0.74rem "Sora",
-          sans-serif;
-      }
-      html:not(.dark) .header {
-        background: linear-gradient(
-          180deg,
-          rgba(20, 33, 56, 0.98) 0%,
-          rgba(12, 22, 40, 0.98) 100%
-        );
-        border-bottom-color: #38527c;
-        box-shadow:
-          0 1px 0 #38527c,
-          0 6px 20px rgba(0, 0, 0, 0.35);
-      }
-      html:not(.dark) .metric-pill {
-        border-color: #446089;
-        background: linear-gradient(
-          135deg,
-          rgba(30, 48, 78, 0.94) 0%,
-          rgba(18, 31, 56, 0.94) 100%
-        );
-      }
-      html:not(.dark) .metric-label {
-        color: #9db4d8;
-      }
-      html:not(.dark) .metric-value {
-        color: #72a9ff;
-      }
-      html:not(.dark) .clock-wrap {
-        background: rgba(13, 29, 54, 0.86);
-        border-color: #446089;
-      }
-      html:not(.dark) #clock {
-        color: #d7e8ff;
-      }
-      html:not(.dark) .header .reach-badge {
-        color: #d7e8ff;
-        border-color: #4b678f;
-        background: rgba(15, 31, 56, 0.45);
-      }
-      html:not(.dark) .header #scanIndicator {
-        color: #a9c7ff;
-      }
-      html:not(.dark) .header .btn-ghost {
-        color: #e7efff;
-        border-color: #4b678f;
-        background: rgba(15, 31, 56, 0.45);
-      }
-      html:not(.dark) .header .btn-ghost:hover {
-        color: #fff;
-        border-color: #79aaff;
-        background: rgba(33, 60, 102, 0.72);
-      }
     </style>
   </head>
   <body>
     <div id="auth-gate">
       <div id="auth-card">
         <div class="auth-header">
-          <!-- lock icon -->
           <div class="auth-icon">
             <svg viewBox="0 0 24 24">
-              <rect x="3" y="11" width="18" height="11" rx="2"/>
-              <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+              <rect x="3" y="11" width="18" height="11" rx="2" />
+              <path d="M7 11V7a5 5 0 0 1 10 0v4" />
             </svg>
           </div>
-          <div id="auth-title">IP Config Authorization</div>
+          <div id="auth-title">Network Configuration Access</div>
         </div>
         <div id="auth-sub">Enter the authorization key to continue.</div>
-        <input id="auth-input" type="password" autocomplete="off" placeholder="adsi••" />
-        <button id="auth-submit">Unlock</button>
+        <input id="auth-input" type="password" autocomplete="off" placeholder="Authorization key" />
+        <button id="auth-submit">Continue</button>
         <div id="auth-error" role="alert"></div>
       </div>
     </div>
-    <div class="page">
-      <div class="header">
-        <div class="header-left">
-          <img id="header-logo" src="/assets/adsi_logo.png" alt="Inverter Dashboard" />
-        </div>
-        <div class="header-center">
-          <div class="metric-pill">
-            <div class="metric-label">Configuration</div>
-            <div class="metric-value">INVERTER IP CONFIGURATION</div>
-          </div>
-        </div>
-        <div class="header-right">
-          <div class="clock-wrap">
-            <span class="ws-dot"></span>
-            <span class="ws-label">Live</span>
-            <div id="clock">--:--:--</div>
-          </div>
-          <div id="scanIndicator" class="scan-indicator">
-            <div class="scan-ring"></div>
-            <span>Scanning</span>
-          </div>
-          <div class="reach-badge" id="ipCounter">Reachable: — / 27</div>
-          <button class="btn btn-ghost" id="themeToggle">Light</button>
-          <button class="btn btn-ghost" onclick="scanAll()">Scan</button>
-          <button class="btn btn-ghost" id="toTopologyBtn">Topology</button>
+
+    <div class="header">
+      <div class="header-left">
+        <img id="header-logo" src="/assets/adsi_logo.png" alt="ADSI Inverter Dashboard" />
+        <div>
+          <div class="h-title">Network Configuration</div>
+          <div class="h-sub">Inverter Device Addressing</div>
         </div>
       </div>
-
-      <div class="table-card">
-        <table>
-          <thead>
-            <tr>
-              <th>Inverter</th>
-              <th>IP Address</th>
-              <th>Poll Interval (s)</th>
-              <th>Units</th>
-              <th>Action</th>
-            </tr>
-          </thead>
-          <tbody id="inverterTable">
-            <tr>
-              <td
-                colspan="5"
-                style="padding: 28px; text-align: center; color: var(--text2)"
-              >
-                Loading configuration...
-              </td>
-            </tr>
-          </tbody>
-        </table>
+      <div class="header-right">
+        <div id="scanIndicator" class="scan-indicator">
+          <div class="scan-ring"></div>
+          <span>Checking</span>
+        </div>
+        <div class="reach-badge" id="ipCounter">Online: — / 27</div>
+        <button class="btn btn-ghost" onclick="scanAll()">Check Status</button>
+        <button class="btn btn-ghost" id="toTopologyBtn">Topology</button>
+        <button class="btn btn-ghost" id="themeToggle">Light</button>
+        <div class="clock-wrap">
+          <span class="ws-dot"></span>
+          <div id="clock">--:--:--</div>
+        </div>
       </div>
+    </div>
 
-      <div class="footer">
+    <div
+      id="remoteBanner"
+      style="
+        display: none;
+        align-items: center;
+        gap: 8px;
+        flex: 0 0 auto;
+        padding: 8px 18px;
+        background: color-mix(in srgb, var(--accent) 12%, transparent);
+        border-bottom: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
+        color: var(--accent);
+        font: 600 11px 'JetBrains Mono', monospace;
+        letter-spacing: 0.02em;
+      "
+    >
+      <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></svg>
+      <span>Remote mode — changes are saved to the gateway and mirrored to this viewer. Device reachability is checked on the gateway LAN, not here.</span>
+    </div>
+
+    <div class="main">
+      <div class="grid" id="inverterGrid">
+        <div class="grid-loading">Loading device configuration…</div>
+      </div>
+    </div>
+
+    <div class="actionbar">
+      <div class="bar-inner">
         <div class="status-bar" id="statusBar">
-          <span id="statusText">Ready</span>
+          <span id="statusText">Ready for review</span>
         </div>
-        <button class="btn btn-primary" onclick="saveAll()">
-          Save All Changes
-        </button>
-      </div>
-      <div style="text-align:center;padding:6px 16px;font-size:11px;color:#7a9ac0;border-top:1px solid #1a2e4a;">
-        Inverter Dashboard v2.2 &nbsp;·&nbsp; Designed &amp; Developed by <strong>Engr. Clariden Montaño REE</strong> (Engr. M.) &nbsp;·&nbsp; © 2026 All rights reserved.
+        <button class="btn btn-primary" onclick="saveAll()">Save All Changes</button>
       </div>
     </div>
 
     <script>
       if (!window.electronAPI) {
         window.electronAPI = {
+          __stub: true, // running in a plain browser (web UI), not the Electron shell
           getConfig: async () => ({
             inverters: {},
             poll_interval: {},
             units: {},
+            losses: {},
           }),
           saveConfig: async () => ({ success: true }),
           openIP: () => {},
@@ -698,16 +636,23 @@
           onIPStatus: () => {},
         };
       }
-      const tbody = document.getElementById("inverterTable");
+      // True only inside the Electron shell (real preload), where openIP can
+      // spawn a native device-page window. In a plain browser the stub above
+      // is installed instead.
+      const IS_ELECTRON = !(window.electronAPI && window.electronAPI.__stub);
+      const grid = document.getElementById("inverterGrid");
       const statusBar = document.getElementById("statusBar");
       const statusText = document.getElementById("statusText");
       const themeToggle = document.getElementById("themeToggle");
       const THEME_KEY = "topology_theme";
       const DEFAULT_INTERVAL = 0.05;
+      const DEFAULT_LOSS_PCT = 2.5;
+      const INVERTER_COUNT = 27;
       const dirtyRows = new Set();
       let config = {};
       let ipState = {};
       let reachableCount = 0;
+      let remoteMode = false;
 
       function initTheme() {
         const saved = localStorage.getItem(THEME_KEY);
@@ -721,9 +666,7 @@
       }
       function toggleTheme() {
         setTheme(
-          document.documentElement.classList.contains("dark")
-            ? "light"
-            : "dark",
+          document.documentElement.classList.contains("dark") ? "light" : "dark",
         );
       }
 
@@ -733,6 +676,7 @@
       }
       function markDirty(n) {
         dirtyRows.add(n);
+        document.getElementById(`card-${n}`)?.classList.add("dirty");
       }
       function isValidIP(ip) {
         const parts = String(ip).split(".");
@@ -745,19 +689,16 @@
       }
       function updateCounter() {
         document.getElementById("ipCounter").textContent =
-          `Reachable: ${reachableCount} / 27`;
+          `Online: ${reachableCount} / ${INVERTER_COUNT}`;
       }
       function showScanIndicator(on) {
-        document
-          .getElementById("scanIndicator")
-          .classList.toggle("active", !!on);
+        document.getElementById("scanIndicator").classList.toggle("active", !!on);
       }
 
       function getUnits(num) {
         const selected = [];
         for (let u = 1; u <= 4; u++) {
-          if (document.getElementById(`u-${num}-${u}`).checked)
-            selected.push(u);
+          if (document.getElementById(`u-${num}-${u}`).checked) selected.push(u);
         }
         return selected;
       }
@@ -773,25 +714,79 @@
         markDirty(num);
       }
 
-      function rowHtml(num, ip, interval, units) {
+      function cardHtml(num, ip, interval, units, loss) {
         const checked = (n) => (units.includes(n) ? "checked" : "");
         const allChecked = units.length === 4 ? "checked" : "";
-        return `<tr>
-    <td><div class="inv-cell"><div class="inv-num">${String(num).padStart(2, "0")}</div><span>INV-${String(num).padStart(2, "0")}</span><div class="cfg-icon ip-empty" id="cfg-${num}" onclick="openInverter(${num})" title="Open inverter web interface">⚙</div></div></td>
-    <td><input id="ip-${num}" type="text" value="${ip}" oninput="markDirty(${num})"></td>
-    <td><input id="poll-${num}" type="number" step="0.01" min="0.01" value="${interval}" oninput="markDirty(${num})"></td>
-    <td><div class="units-wrap"><label class="unit-chip"><input type="checkbox" id="u-${num}-all" ${allChecked} onclick="toggleAll(${num})">All</label><div class="sep-line"></div><label class="unit-chip"><input type="checkbox" id="u-${num}-1" ${checked(1)} onclick="unitChanged(${num})">1</label><label class="unit-chip"><input type="checkbox" id="u-${num}-2" ${checked(2)} onclick="unitChanged(${num})">2</label><label class="unit-chip"><input type="checkbox" id="u-${num}-3" ${checked(3)} onclick="unitChanged(${num})">3</label><label class="unit-chip"><input type="checkbox" id="u-${num}-4" ${checked(4)} onclick="unitChanged(${num})">4</label></div></td>
-    <td><button class="btn btn-ghost" onclick="saveIP(${num})">Save</button></td>
-  </tr>`;
+        const nn = String(num).padStart(2, "0");
+        return `<div class="inv-card" id="card-${num}">
+    <div class="cfg-icon ip-empty" id="cfg-${num}" onclick="openInverter(${num})" title="Open device web page" role="button" aria-label="Open device web page for INV-${nn}">⚙</div>
+    <div class="inv-id">INV-<span>${nn}</span></div>
+    <input id="ip-${num}" class="f-ip" type="text" value="${ip}" placeholder="IP address" inputmode="numeric" oninput="markDirty(${num})" aria-label="INV-${nn} IP address">
+    <label class="mini" title="Polling interval (seconds)"><span>POLL</span><input id="poll-${num}" type="number" step="0.01" min="0.01" value="${interval}" oninput="markDirty(${num})"></label>
+    <div class="units" title="Enabled units"><label class="unit-chip"><input type="checkbox" id="u-${num}-all" ${allChecked} onclick="toggleAll(${num})">A</label><label class="unit-chip"><input type="checkbox" id="u-${num}-1" ${checked(1)} onclick="unitChanged(${num})">1</label><label class="unit-chip"><input type="checkbox" id="u-${num}-2" ${checked(2)} onclick="unitChanged(${num})">2</label><label class="unit-chip"><input type="checkbox" id="u-${num}-3" ${checked(3)} onclick="unitChanged(${num})">3</label><label class="unit-chip"><input type="checkbox" id="u-${num}-4" ${checked(4)} onclick="unitChanged(${num})">4</label></div>
+    <label class="mini" title="Transmission loss % (inverter to substation)"><span>LOSS</span><input id="loss-${num}" type="number" step="0.1" min="0" max="100" value="${loss}" oninput="markDirty(${num})"></label>
+    <button class="recon-btn" id="recon-${num}" onclick="reconnectInverter(${num})" title="Reconnect comms — force the gateway to drop and rebuild its Modbus connection to INV-${nn}. Use when its nodes stop polling but the IP still pings. Changes no IP or setting." aria-label="Reconnect comms for INV-${nn}">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
+    </button>
+    <button class="save-btn" onclick="saveIP(${num})" title="Save INV-${nn}" aria-label="Save INV-${nn}">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>
+    </button>
+  </div>`;
       }
 
       function openInverter(num) {
         const ip = document.getElementById(`ip-${num}`).value.trim();
         if (!ip) {
-          setStatus("No IP configured for this inverter", "error");
+          setStatus("No IP address is configured for this inverter.", "error");
           return;
         }
-        window.electronAPI.openIP(ip);
+        // The comm board's web page lives on the gateway LAN.
+        //  • Remote viewer: it can't reach the device directly, so route through
+        //    the gateway. We open our OWN /api/comm-proxy/<ip>/ (served by the
+        //    local app over loopback, which forwards to the gateway with the
+        //    remote token injected; the gateway then reverse-proxies the device).
+        //  • Gateway + Electron shell: spawn a native device-page window (also
+        //    runs a reachability check first).
+        //  • Gateway + plain browser: open the device page directly on the LAN.
+        if (remoteMode) {
+          window.open(`/api/comm-proxy/${encodeURIComponent(ip)}/`, "_blank", "noopener");
+          setStatus(`Opening INV-${String(num).padStart(2, "0")} web page via the gateway…`, "");
+          return;
+        }
+        if (IS_ELECTRON) {
+          window.electronAPI.openIP(ip);
+          return;
+        }
+        window.open(`http://${ip}/`, "_blank", "noopener");
+      }
+
+      // Force the gateway to drop and rebuild its Modbus connection to one
+      // inverter. Replaces the field workaround of changing the inverter's IP
+      // to recover a wedged session — it touches no IP and no setting. Works in
+      // both gateway and remote mode: /api/reconnect proxies to the gateway when
+      // this viewer is remote.
+      async function reconnectInverter(num) {
+        const nn = String(num).padStart(2, "0");
+        const btn = document.getElementById(`recon-${num}`);
+        if (btn) btn.disabled = true;
+        setStatus(`Reconnecting INV-${nn} comms…`, "");
+        try {
+          const r = await fetch(`/api/reconnect/inverter/${num}`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ trigger: "operator" }),
+          });
+          const body = await r.json().catch(() => ({}));
+          if (r.ok && body && body.ok) {
+            setStatus(`INV-${nn} comms reconnected — polling should resume shortly.`, "success");
+          } else {
+            setStatus(`INV-${nn} reconnect failed: ${(body && body.error) || `HTTP ${r.status}`}`, "error");
+          }
+        } catch (e) {
+          setStatus(`INV-${nn} reconnect error: ${e.message}`, "error");
+        } finally {
+          if (btn) btn.disabled = false;
+        }
       }
 
       async function load() {
@@ -799,36 +794,54 @@
         config =
           loaded && loaded.inverters
             ? loaded
-            : { inverters: {}, poll_interval: {}, units: {} };
+            : { inverters: {}, poll_interval: {}, units: {}, losses: {} };
         if (!config.poll_interval) config.poll_interval = {};
         if (!config.units) config.units = {};
-        tbody.innerHTML = "";
-        for (let n = 1; n <= 27; n++) {
+        if (!config.losses) config.losses = {};
+        grid.innerHTML = "";
+        for (let n = 1; n <= INVERTER_COUNT; n++) {
           const ip = config.inverters[n] || "";
           const interval = Number(config.poll_interval[n]) || DEFAULT_INTERVAL;
           const units = Array.isArray(config.units[n])
             ? config.units[n]
             : [1, 2, 3, 4];
-          tbody.insertAdjacentHTML(
-            "beforeend",
-            rowHtml(n, ip, interval, units),
-          );
+          const rawLoss = Number(config.losses[n]);
+          const loss =
+            Number.isFinite(rawLoss) && rawLoss >= 0 && rawLoss <= 100
+              ? rawLoss
+              : DEFAULT_LOSS_PCT;
+          grid.insertAdjacentHTML("beforeend", cardHtml(n, ip, interval, units, loss));
         }
-        setStatus("Loaded inverter configuration", "success");
+        dirtyRows.clear();
+        setStatus("Device configuration loaded.", "success");
         scanAll();
       }
 
       function collectRow(num) {
         const ip = document.getElementById(`ip-${num}`).value.trim();
-        const poll = Number(
-          document.getElementById(`poll-${num}`).value.trim(),
-        );
+        const poll = Number(document.getElementById(`poll-${num}`).value.trim());
         const units = getUnits(num);
+        const loss = Number(document.getElementById(`loss-${num}`).value.trim());
         if (!ip || !isValidIP(ip))
-          throw new Error(`Invalid IP at inverter ${num}`);
+          throw new Error(`Enter a valid IPv4 address for inverter ${num}.`);
         if (!Number.isFinite(poll) || poll < 0.01)
-          throw new Error(`Invalid poll interval at inverter ${num}`);
-        return { ip, poll, units };
+          throw new Error(`Enter a valid polling interval for inverter ${num}.`);
+        if (!Number.isFinite(loss) || loss < 0 || loss > 100)
+          throw new Error(`Enter a valid loss % (0–100) for inverter ${num}.`);
+        return { ip, poll, units, loss };
+      }
+
+      // Re-pull the persisted config from the server and rebuild the form so
+      // the operator sees the authoritative state immediately after a save —
+      // catches sanitization tweaks (e.g. blank IPs, clamped intervals) and
+      // wins races against another tab that may have saved concurrently.
+      async function refreshFromServer(statusOnSuccess) {
+        try {
+          await load();
+          if (statusOnSuccess) setStatus(statusOnSuccess, "success");
+        } catch (e) {
+          setStatus(`Saved, but reload failed: ${e.message}`, "error");
+        }
       }
 
       async function saveIP(num) {
@@ -837,11 +850,12 @@
           config.inverters[num] = row.ip;
           config.poll_interval[num] = row.poll;
           config.units[num] = row.units;
+          config.losses[num] = row.loss;
           const ret = await window.electronAPI.saveConfig(config);
           if (ret && ret.success === false)
-            throw new Error(ret.error || "Save failed");
+            throw new Error(ret.error || "Unable to save the configuration.");
           dirtyRows.delete(num);
-          setStatus(`Saved inverter ${num} (${row.ip})`, "success");
+          await refreshFromServer(`Inverter ${num} settings saved.`);
         } catch (e) {
           setStatus(`Save failed: ${e.message}`, "error");
         }
@@ -849,28 +863,42 @@
 
       async function saveAll() {
         try {
-          for (let n = 1; n <= 27; n++) {
+          for (let n = 1; n <= INVERTER_COUNT; n++) {
             const row = collectRow(n);
             config.inverters[n] = row.ip;
             config.poll_interval[n] = row.poll;
             config.units[n] = row.units;
+            config.losses[n] = row.loss;
           }
           const ret = await window.electronAPI.saveConfig(config);
           if (ret && ret.success === false)
-            throw new Error(ret.error || "Save failed");
+            throw new Error(ret.error || "Unable to save the configuration.");
           dirtyRows.clear();
-          setStatus("All changes saved successfully", "success");
+          await refreshFromServer("All inverter network settings were saved.");
         } catch (e) {
           setStatus(`Save failed: ${e.message}`, "error");
         }
       }
 
       function scanAll() {
+        if (remoteMode) {
+          // Reachability is probed from the machine running this window. In
+          // remote mode the inverters live on the gateway's LAN and are not
+          // reachable from here, so skip the scan instead of falsely flagging
+          // every device "unreachable". The gateway still polls them.
+          showScanIndicator(false);
+          for (let n = 1; n <= INVERTER_COUNT; n++) {
+            const icon = document.getElementById(`cfg-${n}`);
+            if (icon) icon.className = "cfg-icon ip-empty";
+          }
+          document.getElementById("ipCounter").textContent = "Gateway-managed";
+          return;
+        }
         showScanIndicator(true);
         ipState = {};
         reachableCount = 0;
         updateCounter();
-        for (let n = 1; n <= 27; n++) {
+        for (let n = 1; n <= INVERTER_COUNT; n++) {
           const ip = document.getElementById(`ip-${n}`)?.value.trim();
           const icon = document.getElementById(`cfg-${n}`);
           if (!icon) continue;
@@ -887,7 +915,7 @@
       window.electronAPI.onIPStatus(({ ip, ok }) => {
         ipState[ip] = ok;
         reachableCount = 0;
-        for (let n = 1; n <= 27; n++) {
+        for (let n = 1; n <= INVERTER_COUNT; n++) {
           const ipBox = document.getElementById(`ip-${n}`);
           const icon = document.getElementById(`cfg-${n}`);
           if (!ipBox || !icon) continue;
@@ -896,20 +924,28 @@
           else if (ipState[v] === true) {
             icon.className = "cfg-icon ip-ok";
             reachableCount++;
-          } else if (ipState[v] === false)
-            icon.className = "cfg-icon ip-unreachable";
+          } else if (ipState[v] === false) icon.className = "cfg-icon ip-unreachable";
         }
         updateCounter();
       });
+
       function getMinuteKeys() {
+        // ±1 minute in BOTH directions (prior + current + next) so this local
+        // gate matches the server's window. Current-minute-only used to falsely
+        // reject a valid key when the clock ticked over between the operator
+        // reading it and clicking Continue.
         const m = new Date().getMinutes();
-        return [`adsi${m}`, `adsi${String(m).padStart(2, "0")}`];
+        const prev = (m + 59) % 60;
+        const next = (m + 1) % 60;
+        return [
+          `adsi${m}`, `adsi${String(m).padStart(2, "0")}`,
+          `adsi${prev}`, `adsi${String(prev).padStart(2, "0")}`,
+          `adsi${next}`, `adsi${String(next).padStart(2, "0")}`,
+        ];
       }
       function verifyKey(v) {
         return getMinuteKeys().includes(
-          String(v || "")
-            .trim()
-            .toLowerCase(),
+          String(v || "").trim().toLowerCase(),
         );
       }
       const AUTH_SESSION_KEY = "adsi_auth_until";
@@ -918,9 +954,7 @@
       // the window open unattended for extended periods.
       const AUTH_SESSION_MS = 60 * 60 * 1000;
       function hasAuthSession() {
-        return (
-          Number(sessionStorage.getItem(AUTH_SESSION_KEY) || 0) > Date.now()
-        );
+        return Number(sessionStorage.getItem(AUTH_SESSION_KEY) || 0) > Date.now();
       }
       function setAuthSession() {
         sessionStorage.setItem(
@@ -940,7 +974,7 @@
         }
         const unlock = async () => {
           if (!verifyKey(input.value)) {
-            err.textContent = "Invalid key. Use adsi<current minute>.";
+            err.textContent = "Invalid authorization key. Please try again.";
             input.select();
             return;
           }
@@ -955,7 +989,32 @@
         });
         input.focus();
       }
-      initAuthGate();
+      function applyRemoteModeUi() {
+        if (!remoteMode) return;
+        const banner = document.getElementById("remoteBanner");
+        if (banner) banner.style.display = "flex";
+        const counter = document.getElementById("ipCounter");
+        if (counter) counter.textContent = "Gateway-managed";
+        // The local LAN reachability scan is meaningless from a remote viewer —
+        // hide its trigger and indicator; scanAll() is also guarded as a no-op.
+        document
+          .querySelectorAll('button.btn-ghost[onclick="scanAll()"]')
+          .forEach((b) => (b.style.display = "none"));
+        document.title =
+          "ADSI Inverter Dashboard Network Configuration (Remote → Gateway)";
+      }
+
+      // Resolve the operation mode BEFORE the auth gate / first load so the
+      // remote banner and scan suppression are in place when the grid renders.
+      (async () => {
+        try {
+          remoteMode = await isClientMode();
+        } catch (_) {
+          remoteMode = false;
+        }
+        applyRemoteModeUi();
+        initAuthGate();
+      })();
       initTheme();
       themeToggle.addEventListener("click", toggleTheme);
       async function isClientMode() {
@@ -964,8 +1023,7 @@
           if (!r.ok) return false;
           const s = await r.json();
           return (
-            String(s?.operationMode || "gateway").trim().toLowerCase() ===
-            "remote"
+            String(s?.operationMode || "gateway").trim().toLowerCase() === "remote"
           );
         } catch {
           return false;
@@ -973,7 +1031,7 @@
       }
       function alertClientModeUnavailable(feature) {
         alert(
-          `${feature} is unavailable in Client mode.\nSwitch Operation Mode to Gateway in Settings.`,
+          `${feature} view is available only in Gateway mode.\nChange Operation Mode in Settings to continue.`,
         );
       }
       document.getElementById("toTopologyBtn").addEventListener("click", async () => {
@@ -983,7 +1041,7 @@
         }
         if (
           dirtyRows.size > 0 &&
-          !confirm("Unsaved changes will be lost. Continue to topology?")
+          !confirm("Unsaved changes will be discarded. Continue to the topology view?")
         )
           return;
         if (window.electronAPI?.openTopologyWindow) {

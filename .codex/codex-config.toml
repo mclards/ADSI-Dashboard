@@ -1,0 +1,24 @@
+[features]
+multi_agent = true
+
+[model]
+default = "codex-1"
+reasoning_effort = "medium"
+
+[agents]
+# Codex reads subagents from .codex/agents/*.toml
+# Run sync-agents.ps1 to regenerate from .claude/agents/*.md
+directory = ".codex/agents"
+
+[skills]
+# Codex reads skills from .agents/skills/
+# sync-agents.ps1 also syncs .claude/skills → .agents/skills
+directory = ".agents/skills"
+
+[context]
+# Always load root AGENTS.md and SKILL.md
+always_include = [
+    "AGENTS.md",
+    "SKILL.md",
+    ".agents/skills/adsi-dashboard/SKILL.md"
+]

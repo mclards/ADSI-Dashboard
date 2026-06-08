@@ -11,6 +11,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // Navigation
   openTopologyWindow: () => ipcRenderer.send("open-topology-window"),
   openIpConfigWindow: () => ipcRenderer.send("open-ip-config-window"),
+  openCalibrator: (theme) => ipcRenderer.send("open-calibrator", theme),
+  createCalibratorShortcut: () => ipcRenderer.invoke("create-calibrator-shortcut"),
   openLogs: (folder) => ipcRenderer.send("open-logs-folder", folder),
 
   // File/folder operations
@@ -18,6 +20,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
   openFolder: (folder) => ipcRenderer.invoke("open-folder", folder),
   saveTextFile: (options) => ipcRenderer.invoke("save-text-file", options),
   openTextFile: (options) => ipcRenderer.invoke("open-text-file", options),
+  downloadUserGuidePdf: () => ipcRenderer.invoke("download-user-guide-pdf"),
+  downloadCredentialsPdf: () => ipcRenderer.invoke("download-credentials-pdf"),
+  saveAdsibak: () => ipcRenderer.invoke("save-adsibak"),
+  openAdsibak: () => ipcRenderer.invoke("open-adsibak"),
 
   // IP config
   getConfig: () => ipcRenderer.invoke("config-get"),
@@ -40,6 +46,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // License
   getLicenseStatus: () => ipcRenderer.invoke("license-get-status"),
   getLicenseAudit: () => ipcRenderer.invoke("license-get-audit"),
+  getLicenseFingerprint: () => ipcRenderer.invoke("license-get-fingerprint"),
   uploadLicense: () => ipcRenderer.invoke("license-upload"),
   onLicenseStatus: (cb) => {
     const handler = (_, payload) => cb(payload);
@@ -55,11 +62,26 @@ contextBridge.exposeInMainWorld("electronAPI", {
   checkForUpdates: () => ipcRenderer.invoke("app-update-check"),
   downloadUpdate: () => ipcRenderer.invoke("app-update-download"),
   installUpdate: () => ipcRenderer.invoke("app-update-install"),
+  setAutoDownload: (enabled) => ipcRenderer.invoke("app-update-set-auto-download", enabled),
+  setAutoInstallOvernight: (enabled) => ipcRenderer.invoke("app-update-set-auto-install-overnight", enabled),
+  restartApp: () => ipcRenderer.invoke("app-restart"),
   onUpdateStatus: (cb) => {
     const handler = (_, payload) => cb(payload);
     ipcRenderer.on("app-update-status", handler);
     return () => ipcRenderer.removeListener("app-update-status", handler);
   },
+  onUpdateReady: (cb) => {
+    const handler = (_, payload) => cb(payload);
+    ipcRenderer.on("app-update-ready", handler);
+    return () => ipcRenderer.removeListener("app-update-ready", handler);
+  },
+
+  // Startup readiness
+  reportStartupProgress: (payload) => ipcRenderer.send("dashboard-startup-progress", payload),
+  reportStartupReady: (payload) => ipcRenderer.send("dashboard-startup-ready", payload),
+  reportStartupFailure: (message) => ipcRenderer.send("dashboard-startup-failed", message),
+  reportRemoteConnectivityFailure: (message) => ipcRenderer.send("dashboard-remote-connectivity-failed", message),
+  switchOperationMode: (mode) => ipcRenderer.send("switch-operation-mode", mode),
 
   // Cloud Backup OAuth
   // Opens an OAuth window and returns { ok, callbackUrl } or { ok: false, error }

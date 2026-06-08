@@ -1,0 +1,47 @@
+{
+  "shell": "powershell",
+  "exclude": [
+    ".tmp",
+    "test-results",
+    "node_modules",
+    "release",
+    "dist",
+    "**/__pycache__",
+    "**/*.pyc",
+    "debug.log",
+    "server-run.log"
+  ],
+  "allow": [
+    "node --check **/*.js",
+    "node -e *",
+    "node server/tests/*.js",
+    "npm run *",
+    "python -m py_compile *",
+    "python -m unittest *",
+    "git status",
+    "git diff",
+    "git add *",
+    "git commit *",
+    "git log *",
+    "git push *",
+    "git tag *",
+    "npx playwright test *",
+    "pyinstaller --noconfirm *"
+  ],
+  "deny": [
+    "npm install *",
+    "npm uninstall *",
+    "yarn add *",
+    "pip install *",
+    "rm *",
+    "rm -rf *",
+    "rmdir *",
+    "Remove-Item *",
+    "curl *",
+    "wget *",
+    "ssh *",
+    "scp *",
+    "Invoke-WebRequest *",
+    "Invoke-RestMethod *"
+  ]
+}

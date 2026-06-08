@@ -1,0 +1,111 @@
+ADSI INVERTER DASHBOARD — SECURITY AUDIT VERIFICATION CHECKLIST
+Date: 2026-04-28
+Auditor: Claude Security Reviewer
+
+This file documents the verification steps taken and findings confirmation for the comprehensive
+security audit. Use this checklist to validate remediation efforts.
+
+═══════════════════════════════════════════════════════════════════════════════════════════════════
+
+CRITICAL FINDINGS VERIFICATION
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+[✓] SEC-C-001: Electron Security Vulnerabilities (17 CVEs)
+    Verified: npm ls electron → electron@29.4.6
+    Status: CONFIRMED — version 29.4.6 is within vulnerable range (<41.3.0)
+    Evidence: npm audit lists 9 high-severity electron-related CVEs
+    Action Required: Upgrade to electron@41.3.0+ immediately before production release
+
+[✓] SEC-C-002: Transitive Dependencies (tar, basic-ftp, @xmldom/xmldom, lodash)
+    Verified: npm audit --json
+    tar <=7.5.10: CONFIRMED (multiple CVEs: GHSA-34x7, GHSA-8qq5, GHSA-83g3, etc.)
+    basic-ftp <=5.2.2: CONFIRMED (CRLF injection: GHSA-6v7q, GHSA-chqc)
+    @xmldom/xmldom <=0.8.12: CONFIRMED (4 CVEs: DoS recursion, XML injection)
+    lodash <=4.17.23: CONFIRMED (prototype pollution: GHSA-f23m, code injection: GHSA-r5fr)
+    Action Required: npm audit fix --force to upgrade all packages
+
+[✓] SEC-C-003: Lodash Prototype Pollution
+    Verified: npm audit | grep lodash
+    Status: CONFIRMED — lodash <=4.17.23 has GHSA-f23m-r3pf-42rh vulnerability
+    Severity: HIGH — impacts all objects in Node process if exploited
+    Action Required: Upgrade lodash to 4.17.24+
+
+═══════════════════════════════════════════════════════════════════════════════════════════════════
+
+HIGH-SEVERITY FINDINGS VERIFICATION
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+[✓] SEC-H-001: Timing Attack in Auth Key Comparison
+    File: server/bulkControlAuth.js:116-117
+    Verified: grep -n "timingSafeEqual" server/bulkControlAuth.js → NO RESULTS
+    Code Pattern Found: "if (entry.bindings.ip !== callerBindings.ip)"
+    Status: CONFIRMED — uses !== instead of crypto.timingSafeEqual()
+    Risk: Microsecond-precision timing side-channel leaks valid IP/UA pairs
+    Action Required: Replace !== with crypto.timingSafeEqual() for all auth bindings
+
+[✓] SEC-H-002: 2-Minute Replay Window for sacupsMM
+    File: server/bulkControlAuth.js:35-38
+    Verified: Code shows acceptance of both current and previous minute keys
+    Pattern: getPlantWideAuthKeys() returns Set of 2 keys per rotation cycle
+    Status: CONFIRMED — enables 60+ second replay window if key is captured
+    Risk: Attacker with 60-second key capture window can issue bulk commands
+    Action Required: Reduce window to 1 minute or implement per-operation nonce
+
+[✓] SEC-H-003: Weak Topology Auth (adsiM / adsiMM)
+    File: server/index.js:12351-12357
+    Verified: Code accepts both single-digit (adsi5) and zero-padded (adsi05) formats
+    Also accepts current + previous minute: 4 valid keys per 60-second window
+    Status: CONFIRMED — doubles brute-force search space; 2-minute acceptance window
+    Risk: ~3.3% success rate per random guess; 50% success within 5 minutes of attempts
+    Action Required: Remove single-digit format; implement rate-limiting per IP
+
+[✓] SEC-H-004: Serial Number Tokens Not Bound to Client IP
+    File: server/serialNumber.js:76-87
+    Verified: mintSession() function does NOT receive req parameter
+    Code shows: No IP/UA binding stored in token metadata
+    Compare to: bulkControlAuth.js uses _bindingsFromReq() for IP+UA binding
+    Status: CONFIRMED — unlike bulk auth, serial tokens allow cross-network replay
+    Risk: Attacker with captured token can impersonate operator from any IP
+    Action Required: Bind tokens to IP+UA hash using same pattern as bulk auth
+
+[✓] SEC-H-005: Clock Sync Commands Not Rate-Limited
+    File: server/index.js:12812-12856
+    Verified: Endpoints POST /api/sync-clock/broadcast and variants
+    Code shows: Only _requireBulkAuth gate, no rate-limiting middleware
+    Scope: 27 inverters × 4 nodes ≈ 108 Modbus FC16 writes per broadcast
+    Status: CONFIRMED — no mechanism prevents rapid successive requests
+    Risk: DOS attack via bus saturation; legitimate polling fails with timeouts
+    Action Required: Implement max 1 broadcast per minute per operator IP
+
+═══════════════════════════════════════════════════════════════════════════════════════════════════
+
+REMEDIATION PRIORITIES & TIMELINE
+
+Priority 1 (CRITICAL — Blocking v2.10.1):
+  Effort: 4 hours
+  Items:
+    - Upgrade Electron to 41.3.0+
+    - Implement crypto.timingSafeEqual for auth comparisons
+    - Bind serial session tokens to client IP/UA
+
+Priority 2 (HIGH — Next minor release):
+  Effort: 8 hours
+  Items:
+    - Run npm audit fix --force for dependency vulnerabilities
+    - Reduce sacupsMM replay window to 1 minute or implement nonce
+    - Enforce strict topology auth key format with rate-limiting
+    - Add rate-limiting to clock-sync endpoints
+
+Priority 3 (MEDIUM — Next release cycle):
+  Effort: 6 hours
+  Items:
+    - Add IPC parameter validation
+    - Change OAuth partition to non-persistent
+    - Enforce password change on first login
+    - Document best-practice binding configuration
+
+Total Remediation Effort: 18 hours development + testing
+
+═══════════════════════════════════════════════════════════════════════════════════════════════════
+
+End of Verification Checklist

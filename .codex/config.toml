@@ -1,0 +1,6 @@
+[features]
+multi_agent = true
+
+[model]
+default = "codex-1"
+reasoning_effort = "medium"
