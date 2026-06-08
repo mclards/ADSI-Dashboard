@@ -32,9 +32,9 @@ Detailed reference material lives in `references/` — read those files when wor
 | Author | Engr. Clariden Montaño REE (Engr. M.) |
 | Package name | `inverter-dashboard` |
 | Updater app ID | `com.engr-m.inverter-dashboard` — do not rename |
-| Repo version baseline | `2.11.5` — source of truth: `package.json` |
+| Repo version baseline | `2.11.6` — source of truth: `package.json` |
 | Deployed server version | `2.2.32` (may legitimately lag) |
-| Latest published release | `v2.11.5` |
+| Latest published release | `v2.11.6` |
 | GitHub release channel | `mclards/ADSI-Dashboard` |
 | Default plant name | `ADSI Plant` |
 | Supported OS | **Windows 10 21H2+ / Windows 11 21H2+ (x64)** — Windows-only by design; see CLAUDE.md "Supported Platforms" |
