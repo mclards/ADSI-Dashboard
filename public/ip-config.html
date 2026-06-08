@@ -357,6 +357,34 @@
         transform: translateY(1px);
       }
 
+      /* Reconnect-comms button — mirrors .save-btn, orange accent on hover. */
+      .recon-btn {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 30px;
+        height: 30px;
+        border-radius: 7px;
+        border: 1px solid var(--border2);
+        background: var(--surface2);
+        color: var(--text2);
+        cursor: pointer;
+        transition: color 0.14s, border-color 0.14s, background 0.14s, transform 0.1s;
+      }
+      .recon-btn:hover {
+        color: var(--orange, #fb923c);
+        border-color: var(--orange, #fb923c);
+        background: rgba(251, 146, 60, 0.12);
+      }
+      .recon-btn:active {
+        transform: translateY(1px);
+      }
+      .recon-btn:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+
       /* ── Action bar ──────────────────────────────────────── */
       .actionbar {
         flex: 0 0 auto;
@@ -558,6 +586,25 @@
       </div>
     </div>
 
+    <div
+      id="remoteBanner"
+      style="
+        display: none;
+        align-items: center;
+        gap: 8px;
+        flex: 0 0 auto;
+        padding: 8px 18px;
+        background: color-mix(in srgb, var(--accent) 12%, transparent);
+        border-bottom: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
+        color: var(--accent);
+        font: 600 11px 'JetBrains Mono', monospace;
+        letter-spacing: 0.02em;
+      "
+    >
+      <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></svg>
+      <span>Remote mode — changes are saved to the gateway and mirrored to this viewer. Device reachability is checked on the gateway LAN, not here.</span>
+    </div>
+
     <div class="main">
       <div class="grid" id="inverterGrid">
         <div class="grid-loading">Loading device configuration…</div>
@@ -576,6 +623,7 @@
     <script>
       if (!window.electronAPI) {
         window.electronAPI = {
+          __stub: true, // running in a plain browser (web UI), not the Electron shell
           getConfig: async () => ({
             inverters: {},
             poll_interval: {},
@@ -588,6 +636,10 @@
           onIPStatus: () => {},
         };
       }
+      // True only inside the Electron shell (real preload), where openIP can
+      // spawn a native device-page window. In a plain browser the stub above
+      // is installed instead.
+      const IS_ELECTRON = !(window.electronAPI && window.electronAPI.__stub);
       const grid = document.getElementById("inverterGrid");
       const statusBar = document.getElementById("statusBar");
       const statusText = document.getElementById("statusText");
@@ -600,6 +652,7 @@
       let config = {};
       let ipState = {};
       let reachableCount = 0;
+      let remoteMode = false;
 
       function initTheme() {
         const saved = localStorage.getItem(THEME_KEY);
@@ -672,6 +725,9 @@
     <label class="mini" title="Polling interval (seconds)"><span>POLL</span><input id="poll-${num}" type="number" step="0.01" min="0.01" value="${interval}" oninput="markDirty(${num})"></label>
     <div class="units" title="Enabled units"><label class="unit-chip"><input type="checkbox" id="u-${num}-all" ${allChecked} onclick="toggleAll(${num})">A</label><label class="unit-chip"><input type="checkbox" id="u-${num}-1" ${checked(1)} onclick="unitChanged(${num})">1</label><label class="unit-chip"><input type="checkbox" id="u-${num}-2" ${checked(2)} onclick="unitChanged(${num})">2</label><label class="unit-chip"><input type="checkbox" id="u-${num}-3" ${checked(3)} onclick="unitChanged(${num})">3</label><label class="unit-chip"><input type="checkbox" id="u-${num}-4" ${checked(4)} onclick="unitChanged(${num})">4</label></div>
     <label class="mini" title="Transmission loss % (inverter to substation)"><span>LOSS</span><input id="loss-${num}" type="number" step="0.1" min="0" max="100" value="${loss}" oninput="markDirty(${num})"></label>
+    <button class="recon-btn" id="recon-${num}" onclick="reconnectInverter(${num})" title="Reconnect comms — force the gateway to drop and rebuild its Modbus connection to INV-${nn}. Use when its nodes stop polling but the IP still pings. Changes no IP or setting." aria-label="Reconnect comms for INV-${nn}">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
+    </button>
     <button class="save-btn" onclick="saveIP(${num})" title="Save INV-${nn}" aria-label="Save INV-${nn}">
       <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>
     </button>
@@ -684,7 +740,53 @@
           setStatus("No IP address is configured for this inverter.", "error");
           return;
         }
-        window.electronAPI.openIP(ip);
+        // The comm board's web page lives on the gateway LAN.
+        //  • Remote viewer: it can't reach the device directly, so route through
+        //    the gateway. We open our OWN /api/comm-proxy/<ip>/ (served by the
+        //    local app over loopback, which forwards to the gateway with the
+        //    remote token injected; the gateway then reverse-proxies the device).
+        //  • Gateway + Electron shell: spawn a native device-page window (also
+        //    runs a reachability check first).
+        //  • Gateway + plain browser: open the device page directly on the LAN.
+        if (remoteMode) {
+          window.open(`/api/comm-proxy/${encodeURIComponent(ip)}/`, "_blank", "noopener");
+          setStatus(`Opening INV-${String(num).padStart(2, "0")} web page via the gateway…`, "");
+          return;
+        }
+        if (IS_ELECTRON) {
+          window.electronAPI.openIP(ip);
+          return;
+        }
+        window.open(`http://${ip}/`, "_blank", "noopener");
+      }
+
+      // Force the gateway to drop and rebuild its Modbus connection to one
+      // inverter. Replaces the field workaround of changing the inverter's IP
+      // to recover a wedged session — it touches no IP and no setting. Works in
+      // both gateway and remote mode: /api/reconnect proxies to the gateway when
+      // this viewer is remote.
+      async function reconnectInverter(num) {
+        const nn = String(num).padStart(2, "0");
+        const btn = document.getElementById(`recon-${num}`);
+        if (btn) btn.disabled = true;
+        setStatus(`Reconnecting INV-${nn} comms…`, "");
+        try {
+          const r = await fetch(`/api/reconnect/inverter/${num}`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ trigger: "operator" }),
+          });
+          const body = await r.json().catch(() => ({}));
+          if (r.ok && body && body.ok) {
+            setStatus(`INV-${nn} comms reconnected — polling should resume shortly.`, "success");
+          } else {
+            setStatus(`INV-${nn} reconnect failed: ${(body && body.error) || `HTTP ${r.status}`}`, "error");
+          }
+        } catch (e) {
+          setStatus(`INV-${nn} reconnect error: ${e.message}`, "error");
+        } finally {
+          if (btn) btn.disabled = false;
+        }
       }
 
       async function load() {
@@ -779,6 +881,19 @@
       }
 
       function scanAll() {
+        if (remoteMode) {
+          // Reachability is probed from the machine running this window. In
+          // remote mode the inverters live on the gateway's LAN and are not
+          // reachable from here, so skip the scan instead of falsely flagging
+          // every device "unreachable". The gateway still polls them.
+          showScanIndicator(false);
+          for (let n = 1; n <= INVERTER_COUNT; n++) {
+            const icon = document.getElementById(`cfg-${n}`);
+            if (icon) icon.className = "cfg-icon ip-empty";
+          }
+          document.getElementById("ipCounter").textContent = "Gateway-managed";
+          return;
+        }
         showScanIndicator(true);
         ipState = {};
         reachableCount = 0;
@@ -874,7 +989,32 @@
         });
         input.focus();
       }
-      initAuthGate();
+      function applyRemoteModeUi() {
+        if (!remoteMode) return;
+        const banner = document.getElementById("remoteBanner");
+        if (banner) banner.style.display = "flex";
+        const counter = document.getElementById("ipCounter");
+        if (counter) counter.textContent = "Gateway-managed";
+        // The local LAN reachability scan is meaningless from a remote viewer —
+        // hide its trigger and indicator; scanAll() is also guarded as a no-op.
+        document
+          .querySelectorAll('button.btn-ghost[onclick="scanAll()"]')
+          .forEach((b) => (b.style.display = "none"));
+        document.title =
+          "ADSI Inverter Dashboard Network Configuration (Remote → Gateway)";
+      }
+
+      // Resolve the operation mode BEFORE the auth gate / first load so the
+      // remote banner and scan suppression are in place when the grid renders.
+      (async () => {
+        try {
+          remoteMode = await isClientMode();
+        } catch (_) {
+          remoteMode = false;
+        }
+        applyRemoteModeUi();
+        initAuthGate();
+      })();
       initTheme();
       themeToggle.addEventListener("click", toggleTheme);
       async function isClientMode() {

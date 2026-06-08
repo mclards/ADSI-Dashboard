@@ -275,6 +275,104 @@ DISABLE_UNIT_DEAD_BACKOFF = os.environ.get(
 # (ip, unit) -> {"fail": int, "throttled": bool, "next_probe": float monotonic}
 _unit_health = {}
 
+# ── Per-IP self-healing client rebuild (2026-06-08) ──────────────────────────
+# The per-IP ModbusTcpClient is cached for the whole process lifetime (see
+# `clients` + rebuild_global_maps). The only failure recovery elsewhere is
+# close()/connect() on that SAME object, to the SAME IP (safe_read /
+# drivers/modbus_tcp.py). When a client/socket reaches a state that close/connect
+# cannot clear (a pymodbus 2.5.3 sync-client wedge, an IP-keyed black-hole path
+# through the Mikrotik/Advantech chain, or an Ingeteam AAX0041 gateway that has
+# stopped servicing this TCP session), polling for that inverter stays dead even
+# though the IP still pings. Historically the ONLY fix was to change the
+# inverter's IP — which forces rebuild_global_maps to construct a brand-new
+# client object. This makes that recovery automatic: after IP_REBUILD_AFTER_S of
+# zero successful reads on an IP, the poll loop discards the wedged client and
+# builds a fresh one (rate-limited to IP_REBUILD_MIN_INTERVAL_S so a genuinely
+# powered-off inverter is harmless). Fail-open: DISABLE_IP_CLIENT_REBUILD=1
+# restores the legacy "close/connect same object only" behavior.
+IP_REBUILD_AFTER_S        = 30.0   # zero successful reads this long -> rebuild client
+IP_REBUILD_MIN_INTERVAL_S = 60.0   # never rebuild the same IP more often than this
+DISABLE_IP_CLIENT_REBUILD = os.environ.get(
+    "DISABLE_IP_CLIENT_REBUILD", ""
+).strip() in ("1", "true", "yes")
+# ip -> {"last_success": float monotonic, "last_rebuild": float monotonic}
+_ip_health = {}
+
+
+def should_rebuild_client(now, last_success, last_rebuild,
+                          disabled, write_pending, fw_active):
+    """Pure decision: should this IP's Modbus client be rebuilt now?
+
+    Rebuild only when the inverter has produced NO successful read for at least
+    IP_REBUILD_AFTER_S, AND we have not already rebuilt within
+    IP_REBUILD_MIN_INTERVAL_S. Never rebuild mid-write or while a firmware flash
+    owns the bus (the swap would tear a socket out from under that operation).
+    Kept side-effect-free so it can be unit-tested without Modbus/hardware.
+    """
+    if disabled or write_pending or fw_active:
+        return False
+    if (now - last_success) < IP_REBUILD_AFTER_S:
+        return False
+    if (now - last_rebuild) < IP_REBUILD_MIN_INTERVAL_S:
+        return False
+    return True
+
+
+def _swap_ip_client(ip, new_client):
+    """Close the old per-IP client and install `new_client`, holding the per-IP
+    lock so we never tear a socket out from under an in-flight write/read frame.
+    MUST run in a worker thread (via run_in_executor): `thread_locks[ip]` is a
+    blocking threading.Lock that a write worker can hold for ~2 s, so acquiring
+    it on the asyncio event loop would stall every inverter's polling. The
+    existing read/write paths only ever take this lock inside executor threads;
+    this mirrors that rule.
+
+    `setdefault` (atomic under the GIL) guarantees we always operate under the
+    canonical lock: even if rebuild_global_maps is concurrently bringing this IP
+    up, both paths converge on the same Lock object, so the swap is never
+    unsynchronized.
+    """
+    lock = thread_locks.setdefault(ip, threading.Lock())
+    with lock:
+        old = clients.get(ip)
+        try:
+            if old:
+                old.close()
+        except Exception:
+            pass
+        clients[ip] = new_client
+
+
+async def rebuild_ip_client(ip, reason):
+    """Discard a wedged per-IP Modbus client and install a fresh one.
+
+    Both blocking steps run in the executor: create_client (a blocking
+    connect()) and _swap_ip_client (which acquires the per-IP threading.Lock).
+    Neither may run on the event-loop thread. `clients[ip] = new` is a single
+    atomic dict rebind under the GIL (same guarantee rebuild_global_maps relies
+    on). Returns True on success.
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        new = await loop.run_in_executor(executor, create_client, ip, 502, _modbus_timeout)
+    except Exception as exc:
+        print(f"[POLL] {ip} client rebuild FAILED ({reason}): {type(exc).__name__}: {exc}")
+        return False
+
+    try:
+        await loop.run_in_executor(executor, _swap_ip_client, ip, new)
+    except Exception as exc:
+        print(f"[POLL] {ip} client swap FAILED ({reason}): {type(exc).__name__}: {exc}")
+        return False
+
+    h = _ip_health.setdefault(ip, {"last_success": time.monotonic(), "last_rebuild": 0.0})
+    h["last_rebuild"] = time.monotonic()
+    # Fresh socket -> let every node on this inverter re-probe at full cadence.
+    for _u in (1, 2, 3, 4):
+        _unit_health.pop((ip, _u), None)
+    print(f"[POLL] {ip} client rebuilt ({reason})")
+    return True
+
 # Phase 8 code-review fix (2026-04-15): module-scope initializers for the
 # one-time-log guards used by T3.17 (PAC clamp) so a race between concurrent
 # first-time writers cannot lose an entry.  Previously the guards used
@@ -1870,6 +1968,32 @@ async def poll_inverter(ip):
                 # Do not wipe last good frame on transient all-unit read misses.
                 if out:
                     shared[ip] = list(out)
+
+                # ── Per-IP self-healing client rebuild ──
+                # Track whether THIS inverter produced any successful read this
+                # cycle. After IP_REBUILD_AFTER_S of nothing-but-misses, the
+                # cached client/socket is likely wedged in a way close()/connect()
+                # can't clear — rebuild it from scratch (what changing the IP used
+                # to do manually). Rate-limited + skipped during writes/flash.
+                now_mono = time.monotonic()
+                h_ip = _ip_health.setdefault(
+                    ip, {"last_success": now_mono, "last_rebuild": 0.0}
+                )
+                if out:
+                    h_ip["last_success"] = now_mono
+                elif should_rebuild_client(
+                    now_mono,
+                    h_ip["last_success"],
+                    h_ip["last_rebuild"],
+                    DISABLE_IP_CLIENT_REBUILD,
+                    is_write_pending(ip),
+                    firmware_flash_active(ip),
+                ):
+                    await rebuild_ip_client(
+                        ip,
+                        "no successful reads in %.0fs" % (now_mono - h_ip["last_success"]),
+                    )
+
                 await asyncio.sleep(interval)
             except asyncio.CancelledError:
                 # Cooperative cancel from supervisor; propagate.
@@ -1997,6 +2121,7 @@ async def rebuild_global_maps(cfg=None):
                 evt.clear()
             intervals.pop(ip, None)
             shared.pop(ip, None)   # remove stale live-data so dropped inverters don't linger in /data
+            _ip_health.pop(ip, None)  # drop self-healing rebuild state for removed IP
             for _u in (1, 2, 3, 4):
                 _unit_health.pop((ip, _u), None)  # drop dead-node backoff state for removed IP
 
@@ -2752,8 +2877,15 @@ async def ipconfig_watcher():
                 old_timeout = _modbus_timeout
                 _apply_poll_config(poll_cfg)
                 if _modbus_timeout != old_timeout:
-                    print(f"[WATCH] modbusTimeout changed to {_modbus_timeout}s — rebuilding clients")
-                    await rebuild_global_maps()
+                    # Fix B (2026-06-08): rebuild_global_maps() only builds a
+                    # client for an IP NOT already in `clients`, so calling it
+                    # here never recreated existing clients — the new timeout
+                    # silently never applied. Explicitly rebuild each existing
+                    # inverter's client (fresh object carries the new timeout),
+                    # which also gives operators a no-IP-change recovery lever.
+                    print(f"[WATCH] modbusTimeout changed to {_modbus_timeout}s — rebuilding {len(inverters)} client(s)")
+                    for _ip in list(inverters):
+                        await rebuild_ip_client(_ip, "modbusTimeout change")
                 elif last_poll_sig != "{}":
                     print(f"[WATCH] poll config updated: {poll_cfg}")
         except Exception:
@@ -3351,6 +3483,32 @@ async def api_sync_clock_all(request: Request):
         "accepted":   accepted,
         "results":    flat_results,
     }
+
+
+# ─── 2026-06-08 — Manual comms reconnect (force fresh Modbus client) ────────
+
+@app.post("/reconnect/{inverter}")
+async def api_reconnect_inverter(inverter: int, request: Request):
+    """Force a fresh per-IP Modbus client for one inverter (operator action).
+
+    Equivalent to what changing the inverter's IP used to do by accident — it
+    discards a wedged cached client/socket and builds a brand-new one, without
+    touching the inverter's IP or any inverter state. Bulk-auth gated (the Node
+    proxy injects the rolling adsiMM key); no Modbus write is performed.
+    """
+    auth = _extract_auth_header(request)
+    if not _check_bulk_auth(auth):
+        raise HTTPException(401, "unauthorized")
+
+    inv_int = int(inverter)
+    if inv_int < 1 or inv_int > 27:
+        raise HTTPException(400, "inverter number out of range (1-27)")
+    ip = ip_map.get(str(inv_int))
+    if not ip:
+        raise HTTPException(400, f"no IP configured for inverter {inverter}")
+
+    ok = await rebuild_ip_client(ip, "operator reconnect")
+    return {"inverter": inv_int, "ip": ip, "ok": bool(ok)}
 
 
 # ─── v2.10.0 Slice B — Stop Reasons (vendor FC 0x71 SCOPE peek) ────────────

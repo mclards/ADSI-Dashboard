@@ -5182,9 +5182,13 @@ async function openTopologyWindowGuarded(ownerWin) {
   return true;
 }
 
-async function openIpConfigWindowGuarded(ownerWin) {
-  const allowed = await ensureGatewayModeForWindow("IP Configuration", ownerWin);
-  if (!allowed) return false;
+async function openIpConfigWindowGuarded(_ownerWin) {
+  // IP Configuration is editable in BOTH gateway and remote (client) mode.
+  // In remote mode the save proxies to the gateway (authoritative) and is then
+  // mirrored back into the local store — see _applyIpConfigPostRemote in
+  // server/index.js. The page itself shows a remote-mode banner and skips the
+  // local LAN reachability scan, so the operator always knows the change lands
+  // on the gateway. (Topology / Calibrator remain gateway-only.)
   openIpConfigWindow();
   return true;
 }
@@ -5955,7 +5959,11 @@ ipcMain.handle("open-folder", async (_, folder) => {
 });
 ipcMain.handle("config-get", async () => {
   try {
-    const cfg = await requestServerJson("GET", "/api/ip-config");
+    // 22 s timeout: in remote mode this GET is proxied to the gateway, whose
+    // proxy ceiling for /api/ip-config is 20 s (PROXY_TIMEOUT_RULES). Keep the
+    // IPC timeout strictly larger so a slow/loaded gateway surfaces as the
+    // gateway's own response rather than an IPC abort over a slow link.
+    const cfg = await requestServerJson("GET", "/api/ip-config", undefined, 22000);
     // Keep legacy file in sync for backend compatibility.
     try {
       saveIpConfigFile(cfg);
@@ -5973,11 +5981,39 @@ ipcMain.handle("config-save", async (_, newConfig) => {
     const safe = sanitizeConfig(newConfig);
     let saved = safe;
     let dbSynced = false;
+    let syncError = "";
     try {
-      saved = sanitizeConfig(await requestServerJson("POST", "/api/ip-config", safe, 5000));
+      // 25 s (was 5 s): in remote mode the local server forwards this save to
+      // the gateway and waits on the round-trip (gateway proxy ceiling 20 s)
+      // before responding. The IPC timeout must out-live that proxy hop so a
+      // slow/loaded gateway cannot abort here and report a false "DB sync
+      // unavailable" while the gateway save actually succeeded.
+      saved = sanitizeConfig(await requestServerJson("POST", "/api/ip-config", safe, 25000));
       dbSynced = true;
     } catch (err) {
-      console.warn("[config] DB save failed, keeping legacy file:", err.message);
+      syncError = String(err?.message || err || "").trim();
+      console.warn("[config] DB save failed, keeping legacy file:", syncError);
+    }
+
+    // In REMOTE mode the gateway is the only authoritative store — the local
+    // file is never used for polling. A failed forward therefore means the edit
+    // did NOT take effect, so it must be reported as a hard failure instead of a
+    // soft "saved locally" (which would mislead the operator into believing the
+    // gateway adopted the change). In gateway mode the legacy degraded path is
+    // preserved: the local file IS the backend's config fallback.
+    if (!dbSynced) {
+      let mode = "gateway";
+      try {
+        mode = (await tryGetCurrentOperationMode()) || "gateway";
+      } catch (_) {}
+      if (mode === "remote") {
+        return {
+          success: false,
+          error: syncError
+            ? `Gateway did not accept the change: ${syncError}`
+            : "Gateway did not accept the change. Verify the gateway is online.",
+        };
+      }
     }
 
     // Always mirror to legacy file for backend compatibility.

@@ -1554,8 +1554,10 @@
 <section id="s20">
   <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="3" y="6" width="16" height="10" rx="2" stroke="#fb923c" stroke-width="1.8"/><circle cx="7" cy="11" r="1.5" fill="#fb923c"/><path d="M11 9h5M11 13h4" stroke="#fb923c" stroke-width="1.5" stroke-linecap="round"/></svg></div><h2>IP Configuration</h2></div>
   <p>Open via <b>Settings &rarr; IP Configuration</b> or <kbd>Ctrl</kbd>+<kbd>I</kbd>. Auth code required, 1-hour session.</p>
+  <p>Available in <b>both Gateway and Remote mode</b>. On a Remote viewer a banner notes that edits save to the gateway (authoritative) and mirror back locally, so addressing can be updated without remoting into the gateway PC. The local reachability scan and <b>Check Status</b> counter are suppressed in Remote mode (those inverters sit on the gateway LAN); the gateway keeps polling them.</p>
   <table><thead><tr><th>Column</th><th>Description</th></tr></thead><tbody><tr><td>Inverter</td><td>Label</td></tr><tr><td>IP Address</td><td>Modbus TCP target</td></tr><tr><td>Polling Interval</td><td>Refresh rate (ms)</td></tr><tr><td>Enabled Units</td><td>Active nodes to poll</td></tr><tr><td>Loss %</td><td>Cable/connection loss (used by forecast engine)</td></tr></tbody></table>
   <p>Additional: <b>Check Status</b> (test config), <b>Open Topology</b> (separate auth, 10-min session), <b>Theme toggle</b>.</p>
+  <p>Per-row actions: the <b>gear</b> icon opens the inverter comm board's own web page (on the gateway it opens directly; from a Remote viewer it is routed through the gateway automatically). The circular <b>Reconnect</b> button (next to Save) forces the gateway to drop and rebuild its Modbus connection to that inverter &mdash; use it when an inverter's nodes stop polling but the IP still pings. It changes no IP or setting and works from a Remote viewer too. The gateway also rebuilds a stalled connection on its own after ~30&nbsp;s, so this is usually only needed for an immediate nudge.</p>
   <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
@@ -1581,7 +1583,10 @@
     <tr><td>Cap "Cannot POST"</td><td>Old gateway or wrong URL</td><td>Update gateway, verify URL</td></tr>
     <tr><td>Cap limits too close</td><td>Step &gt; deadband</td><td>Increase Upper/Lower gap</td></tr>
     <tr><td>Cloud restore unavailable</td><td>Provider not ready</td><td>Refresh list, verify auth</td></tr>
-    <tr><td>IP Config blocked</td><td>Remote mode</td><td>Use gateway workstation</td></tr>
+    <tr><td>Topology blocked</td><td>Remote mode (IP Config now works remotely; Topology stays Gateway-only)</td><td>Use gateway workstation for Topology</td></tr>
+    <tr><td>IP Config change not applied</td><td>Gateway unreachable or rejected the save</td><td>Verify gateway URL/token online; the save banner shows the gateway error</td></tr>
+    <tr><td>Inverter nodes stop polling but the IP still pings</td><td>The gateway's Modbus session to that inverter has wedged; a ping can't detect it</td><td>Wait for auto-recovery (~30 s), or click <b>Reconnect</b> on that inverter's row in IP Configuration</td></tr>
+    <tr><td>"Open device web page" does nothing from a remote viewer</td><td>The comm board is on the gateway LAN, not reachable from the remote PC</td><td>Use the gear icon in IP Configuration &mdash; it routes the device page through the gateway</td></tr>
     <tr><td>Silent alarms</td><td>Muted or no audio</td><td>Re-enable sound, check audio</td></tr>
     <tr><td>Export fails</td><td>Path/date/format issue</td><td>Verify folder, filters, mode</td></tr>
     <tr><td>High WAPE</td><td>Stale Solcast or retraining needed</td><td>Check Performance Monitor</td></tr>

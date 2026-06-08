@@ -1647,6 +1647,7 @@
 <section id="s20">
   <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="3" y="6" width="16" height="10" rx="2" stroke="#fb923c" stroke-width="1.8"/><circle cx="7" cy="11" r="1.5" fill="#fb923c"/><path d="M11 9h5M11 13h4" stroke="#fb923c" stroke-width="1.5" stroke-linecap="round"/></svg></div><h2>IP Configuration</h2></div>
   <p>Open via <b>Settings &rarr; IP Configuration</b> or <kbd>Ctrl</kbd>+<kbd>I</kbd>. Auth code required, 1-hour session.</p>
+  <p>Available in <b>both Gateway and Remote mode</b>. On a Remote viewer a banner notes that edits save to the gateway (authoritative) and mirror back locally, so addressing can be updated without remoting into the gateway PC. The local reachability scan and <b>Check Status</b> counter are suppressed in Remote mode (those inverters sit on the gateway LAN); the gateway keeps polling them.</p>
   <table><thead><tr><th>Column</th><th>Description</th></tr></thead><tbody><tr><td>Inverter</td><td>Label</td></tr><tr><td>IP Address</td><td>Modbus TCP target</td></tr><tr><td>Polling Interval</td><td>Refresh rate (ms)</td></tr><tr><td>Enabled Units</td><td>Active nodes to poll</td></tr><tr><td>Loss %</td><td>Cable/connection loss (used by forecast engine)</td></tr></tbody></table>
   <p>Additional: <b>Check Status</b> (test config), <b>Open Topology</b> (separate auth, 10-min session), <b>Theme toggle</b>.</p>
   <a href="#toc" class="back-top">&uarr; Back to Contents</a>
@@ -1674,14 +1675,22 @@
     <tr><td>Cap "Cannot POST"</td><td>Old gateway or wrong URL</td><td>Update gateway, verify URL</td></tr>
     <tr><td>Cap limits too close</td><td>Step &gt; deadband</td><td>Increase Upper/Lower gap</td></tr>
     <tr><td>Cloud restore unavailable</td><td>Provider not ready</td><td>Refresh list, verify auth</td></tr>
-    <tr><td>IP Config blocked</td><td>Remote mode</td><td>Use gateway workstation</td></tr>
+    <tr><td>Topology blocked</td><td>Remote mode (IP Config now works remotely; Topology stays Gateway-only)</td><td>Use gateway workstation for Topology</td></tr>
+    <tr><td>IP Config change not applied</td><td>Gateway unreachable or rejected the save</td><td>Verify gateway URL/token online; the save banner shows the gateway error</td></tr>
     <tr><td>Silent alarms</td><td>Muted or no audio</td><td>Re-enable sound, check audio</td></tr>
     <tr><td>Export fails</td><td>Path/date/format issue</td><td>Verify folder, filters, mode</td></tr>
     <tr><td>High WAPE</td><td>Stale Solcast or retraining needed</td><td>Check Performance Monitor</td></tr>
     <tr><td>Camera &ldquo;Stream failed&rdquo;</td><td>go2rtc not running or wrong IP</td><td>Open Camera Settings, verify IP/port, Start service</td></tr>
     <tr><td>go2rtc won&rsquo;t start</td><td>Port 1984/8555 in use</td><td>Stop conflicting process or change ports</td></tr>
     <tr><td>Camera service hidden</td><td>Remote mode active</td><td>Switch to Gateway mode</td></tr>
+    <tr><td>Inverter nodes stop polling but the IP still pings</td><td>The gateway's Modbus session to that inverter has wedged (stale socket / comm-board TCP queue), which a ping cannot detect</td><td>Wait for auto-recovery, or click the <b>Reconnect</b> button on that inverter's row in <b>IP Configuration</b></td></tr>
+    <tr><td>"Open device web page" does nothing from a remote viewer</td><td>The comm board lives on the gateway LAN and is not reachable from the remote PC</td><td>Use the gear icon in <b>IP Configuration</b> &mdash; it now routes the device page through the gateway automatically</td></tr>
   </tbody></table>
+  <h3>Inverter polling stalls while the IP still pings (v2.11.x)</h3>
+  <p>An inverter can keep answering <code>ping</code> while its Modbus polling fails &mdash; ping only proves the comm board's network chip is alive, not that the Modbus session behind it is healthy. On the Ingeteam <b>AAX0041</b> Ethernet&rarr;RS-485 comm board, the board accepts the TCP connection and queues requests, so a stale or wedged session can leave the dashboard's per-inverter connection stuck even though the IP is reachable. Historically the only field fix was to change the inverter's IP, which forced the gateway to build a brand-new connection.</p>
+  <div class="info-card tip"><div class="info-card-label">Automatic recovery</div>The gateway now watches each inverter's connection. After ~30&nbsp;seconds with no successful read, it automatically discards the wedged Modbus client and builds a fresh one (rate-limited to once per minute per inverter) &mdash; no operator action and no IP change needed. This makes the old &ldquo;change the IP&rdquo; workaround unnecessary in normal operation.</div>
+  <div class="info-card"><div class="info-card-label">Manual Reconnect</div>To force it immediately, open <b>IP Configuration</b> and click the circular <b>Reconnect</b> button on that inverter's row (next to Save). This drops and rebuilds only that inverter's gateway socket &mdash; it changes no inverter setting and no IP. It works from a remote viewer too (the request is routed to the gateway). If the inverter recovers after a manual reconnect but never on its own, the fault is likely upstream of the gateway (a duplicate IP, or a stale ARP / connection-tracking entry on the network switch/router) rather than the comm board itself.</div>
+  <div class="info-card"><div class="info-card-label">Open device web page (gateway &amp; remote)</div>The gear icon on each <b>IP Configuration</b> row opens the comm board's own web page. On the gateway it opens directly on the plant LAN; from a <b>remote viewer</b> it is routed through the gateway automatically (the device is not reachable from the remote PC). The remote route is byte-for-byte, so the device's HTML, styles, scripts and images all render. Tailscale note: the inverter's LAN IP is <i>not</i> reachable directly over Tailscale unless a subnet router is configured &mdash; the gateway proxy is what makes the page work remotely without one.</div>
   <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 

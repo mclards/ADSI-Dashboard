@@ -5694,6 +5694,15 @@ const PROXY_TIMEOUT_RULES = [
   ["/api/chat/",           10000],  // 10 s  — chat messaging
   ["/api/backup/",         60000],  // 60 s  — cloud backup operations
   ["/api/substation-meter/", 20000],  // 20 s  — substation meter reads/writes
+  // Remote-mode IP-config read/save is proxied to the gateway. The write is a
+  // tiny DB upsert, but the gateway shares its CPU with live polling + the
+  // Python engine, so a save can stall well past the 5 s default under load.
+  // A 502 here would leave the operator's edit mirrored locally while the
+  // GATEWAY never adopted it — the exact failure this feature must avoid — so
+  // give it the same generous ceiling as substation-meter. The Electron
+  // config-get/config-save IPC timeouts are set strictly LARGER (22 s / 25 s)
+  // so a slow gateway surfaces as the gateway's own error, never an IPC abort.
+  ["/api/ip-config",       20000],  // 20 s  — remote IP-config read/save proxy
   // Serial Number ops walk the whole topology over Modbus TCP (FC11).
   // /api/serial/fleet/scan reads ~91 nodes at concurrency 3 with 2x retry,
   // and POST /api/serial/:inv/:slave triggers a fleet-wide uniqueness scan
@@ -13647,6 +13656,244 @@ app.post(
   },
 );
 
+// ─── 2026-06-08 — Manual comms reconnect (force fresh per-IP Modbus client) ──
+// Operator lever that replaces the field workaround of changing an inverter's
+// IP to recover a wedged Modbus session. It rebuilds the gateway's cached
+// ModbusTcpClient for that inverter — no inverter state is touched. Auth-free
+// at the operator prompt (same "2-type model" as per-inverter clock sync: a
+// socket rebuild is harmless); the proxy injects the rolling adsiMM key so
+// Python's _check_bulk_auth still passes. Remote mode forwards to the gateway.
+// Light per-origin-IP rate limit (10 s) since each rebuild opens a TCP socket.
+const _reconnectLastTs = new Map(); // origin ip -> last ts (ms)
+const RECONNECT_MIN_SPACING_MS = 10_000;
+const _rateLimitReconnect = (req, res, next) => {
+  const ip = String(req.ip || req.connection?.remoteAddress || "").trim();
+  if (!ip) return next();
+  const now = Date.now();
+  const last = _reconnectLastTs.get(ip) || 0;
+  if (now - last < RECONNECT_MIN_SPACING_MS) {
+    const retryAfterS = Math.ceil((RECONNECT_MIN_SPACING_MS - (now - last)) / 1000);
+    res.setHeader("Retry-After", String(retryAfterS));
+    return res.status(429).json({ ok: false, error: `reconnect rate-limited; retry in ${retryAfterS}s` });
+  }
+  _reconnectLastTs.set(ip, now);
+  if (_reconnectLastTs.size > 256) {
+    const cutoff = now - 5 * 60_000;
+    for (const [k, v] of _reconnectLastTs) {
+      if (v < cutoff) _reconnectLastTs.delete(k);
+    }
+  }
+  return next();
+};
+
+app.post(
+  "/api/reconnect/inverter/:inverter",
+  express.json(),
+  _proxyClockSyncInRemote, // generic: forwards to gateway w/ operator auth in remote mode
+  _rateLimitReconnect,
+  async (req, res) => {
+    const inv = Number(req.params.inverter);
+    if (!inv) return res.status(400).json({ ok: false, error: "inverter required" });
+    const headers = { "content-type": "application/json" };
+    if (req.get("authorization")) headers["authorization"] = req.get("authorization");
+    if (req.get("x-bulk-auth")) headers["x-bulk-auth"] = req.get("x-bulk-auth");
+    if (!headers["authorization"] && !headers["x-bulk-auth"]) {
+      headers["x-bulk-auth"] = _currentAdsiKey();
+    }
+    try {
+      const r = await fetch(`${INVERTER_ENGINE_BASE_URL}/reconnect/${inv}`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({}),
+      });
+      const body = await r.json().catch(() => ({ ok: false, error: "bad upstream JSON" }));
+      try {
+        db.prepare(
+          `INSERT INTO audit_log (ts, operator, inverter, node, action, scope, result, ip, reason)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          Date.now(), "OPERATOR", inv, 0, "comms-reconnect", "inverter",
+          body?.ok ? "ok" : "fail", String(body?.ip || ""), "manual client rebuild",
+        );
+      } catch (_) { /* audit row best-effort */ }
+      res.status(r.status || 200).json(body);
+    } catch (err) {
+      res.status(502).json({ ok: false, error: `engine unreachable: ${err.message}` });
+    }
+  },
+);
+
+// ─── 2026-06-08 — Comm-board web-page reverse proxy ─────────────────────────
+// The Ingeteam comm board's web UI lives on the gateway's plant LAN. A remote
+// viewer can't reach the device directly, so the IP Config page's "Open device
+// web page" routes through here:
+//   • Remote viewer  → its OWN /api/comm-proxy/<ip>/ (the browser hits the
+//                      local app at http://localhost:3500, so the request is
+//                      loopback and is exempted by remoteApiTokenGate without a
+//                      token) → _commProxyForwardToGateway forwards to the
+//                      gateway WITH the remote token injected → the gateway runs
+//                      the branch below.
+//   • Gateway        → reverse-proxies straight to http://<ip>/<tail>.
+// SSRF guard: only IPs present in the current ipconfig are proxied. The route
+// sits behind remoteApiTokenGate (app.use("/api", ...)): external callers to the
+// gateway still need the token (the remote viewer's forward supplies it);
+// loopback callers (gateway-local browser, remote-viewer-local browser) are
+// exempt by isLoopbackRequest() in that gate.
+function _isConfiguredInverterIp(ip) {
+  try {
+    const cfg = loadIpConfigFromDb();
+    const map = cfg?.inverters || {};
+    for (const k of Object.keys(map)) {
+      if (String(map[k] || "").trim() === ip) return true;
+    }
+  } catch (_) { /* fall through to reject */ }
+  return false;
+}
+
+function _rewriteCommHtml(html, baseUrl) {
+  // Make the device's relative + root-absolute asset URLs resolve through the
+  // proxy. <base> handles relative URLs; the regex rewrites root-absolute ones
+  // (src/href/action="/...") which <base> does not affect. Protocol-relative
+  // ("//host") URLs are left untouched.
+  let out = String(html).replace(
+    /((?:src|href|action)\s*=\s*["'])\/(?!\/)/gi,
+    `$1${baseUrl}/`,
+  );
+  if (/<head[^>]*>/i.test(out)) {
+    out = out.replace(/<head([^>]*)>/i, `<head$1><base href="${baseUrl}/">`);
+  } else {
+    out = `<base href="${baseUrl}/">` + out;
+  }
+  return out;
+}
+
+// Collect a raw request body for non-GET without a body parser. Note: the
+// global express.json() (mounted earlier) only consumes `application/json`; if
+// it already did, req.body holds the parsed object and we re-serialize it.
+// Device config forms are form-encoded, so the stream is intact here.
+async function _collectCommProxyBody(req) {
+  const method = String(req.method || "GET").toUpperCase();
+  if (["GET", "HEAD"].includes(method)) return undefined;
+  if (req.body && typeof req.body === "object" && Object.keys(req.body).length) {
+    return Buffer.from(JSON.stringify(req.body));
+  }
+  return await new Promise((resolve) => {
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => resolve(chunks.length ? Buffer.concat(chunks) : undefined));
+    req.on("error", () => resolve(undefined));
+  });
+}
+
+// Binary-safe remote hop (Option A): the remote viewer's local app forwards the
+// request to the gateway WITH the remote token injected, then streams the
+// gateway's bytes back verbatim (arrayBuffer — NOT text, so images/fonts/CSS
+// survive). The gateway side does the device fetch + HTML rewrite, so here we
+// pass status, content-type and Location through untouched.
+async function _commProxyForwardToGateway(req, res) {
+  const base = getRemoteGatewayBaseUrl();
+  if (!base) {
+    return res.status(503).json({ ok: false, error: "Remote gateway URL is not configured." });
+  }
+  if (isUnsafeRemoteLoop(base)) {
+    return res.status(400).json({ ok: false, error: "Remote gateway URL cannot be localhost in remote mode." });
+  }
+  const target = `${base}${req.originalUrl}`;
+  const method = String(req.method || "GET").toUpperCase();
+  const headers = { ...buildRemoteProxyHeaders() };
+  for (const h of ["accept", "accept-language", "content-type", "user-agent"]) {
+    const v = req.get(h);
+    if (v) headers[h] = v;
+  }
+  const body = await _collectCommProxyBody(req);
+  const ctrl = new AbortController();
+  // Must comfortably exceed the gateway's own device-fetch ceiling (8 s) plus
+  // proxy + relay slack, so a slow-but-working device surfaces a real gateway
+  // response rather than this hop aborting first.
+  const timer = setTimeout(() => ctrl.abort(), 20000);
+  try {
+    const upstream = await fetch(
+      target,
+      buildRemoteFetchOptions(target, { method, headers, body, redirect: "manual", signal: ctrl.signal }),
+    );
+    res.status(upstream.status);
+    const loc = upstream.headers.get("location");
+    if (loc) res.set("location", loc); // gateway already rewrote to /api/comm-proxy/<ip>/…
+    const ct = String(upstream.headers.get("content-type") || "");
+    if (ct) res.set("content-type", ct);
+    return res.send(Buffer.from(await upstream.arrayBuffer()));
+  } catch (err) {
+    const msg = err?.name === "AbortError" ? "gateway timeout" : err.message;
+    return res.status(502).json({ ok: false, error: `comm-proxy via gateway failed: ${msg}` });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+app.use("/api/comm-proxy/:ip", async (req, res) => {
+  // Remote viewer: forward to the gateway (binary-safe), which re-enters this
+  // handler in gateway mode and does the real device fetch + rewrite.
+  if (isRemoteMode()) return _commProxyForwardToGateway(req, res);
+
+  const ip = String(req.params.ip || "").trim();
+  const OCTET = "(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)";
+  const isValidIpv4 = new RegExp(`^${OCTET}(?:\\.${OCTET}){3}$`).test(ip);
+  if (!isValidIpv4 || !_isConfiguredInverterIp(ip)) {
+    return res.status(403).json({ ok: false, error: "IP is not a configured inverter." });
+  }
+
+  const method = String(req.method || "GET").toUpperCase();
+  const tail = req.url && req.url !== "" ? (req.url.startsWith("/") ? req.url : `/${req.url}`) : "/";
+  const target = `http://${ip}${tail}`;
+  const baseUrl = `/api/comm-proxy/${ip}`;
+
+  // Forward a minimal, safe header set (never the gateway's host/cookies/token).
+  const fwdHeaders = {};
+  for (const h of ["accept", "accept-language", "content-type", "user-agent"]) {
+    const v = req.get(h);
+    if (v) fwdHeaders[h] = v;
+  }
+  const body = await _collectCommProxyBody(req);
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 8000);
+  try {
+    const upstream = await fetch(target, {
+      method,
+      headers: fwdHeaders,
+      body,
+      redirect: "manual",
+      signal: ctrl.signal,
+    });
+    res.status(upstream.status);
+
+    let location = upstream.headers.get("location");
+    if (location) {
+      if (/^https?:\/\//i.test(location)) {
+        location = location.replace(/^https?:\/\/[^/]+/i, baseUrl);
+      } else if (location.startsWith("/")) {
+        location = `${baseUrl}${location}`;
+      }
+      res.set("location", location);
+    }
+
+    const ct = String(upstream.headers.get("content-type") || "");
+    if (/text\/html/i.test(ct)) {
+      const html = await upstream.text();
+      if (ct) res.set("content-type", ct);
+      return res.send(_rewriteCommHtml(html, baseUrl));
+    }
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    if (ct) res.set("content-type", ct);
+    return res.send(buf);
+  } catch (err) {
+    const msg = err?.name === "AbortError" ? "device timeout" : err.message;
+    return res.status(502).json({ ok: false, error: `comm board unreachable: ${msg}` });
+  } finally {
+    clearTimeout(timer);
+  }
+});
+
 // v2.9.0 — the inverter-clock admin surface now lives in Settings →
 // "Inverter Clocks" section. The /admin/inverter-clock route is kept as a
 // compatibility redirect so any bookmarked link lands on the right place.
@@ -19562,9 +19809,106 @@ function _applyIpConfigPost(req, res) {
   }
 }
 
+// Remote-mode IP-config save ("save to both"). The gateway is the authoritative
+// store, so the edit is forwarded there FIRST; only on a confirmed gateway save
+// is the gateway's sanitized config mirrored back into THIS remote viewer's
+// local DB + legacy files so both sides stay byte-for-byte identical. The local
+// poller is intentionally never touched (there is none in remote mode), but a
+// configChanged broadcast refreshes the remote dashboard's inverter cards
+// immediately. Operator-auth headers (e.g. x-topology-key for a serial-bearing
+// save) are forwarded transparently so the gateway re-validates exactly as if
+// the request had arrived locally; the remote-bridge token still wins on
+// Authorization so it is never clobbered.
+async function _applyIpConfigPostRemote(req, res) {
+  // Reject obviously malformed payloads before spending a gateway round-trip.
+  // A real save always carries the object-map config shape; the legacy serial
+  // block (req.body.serial) is also a valid object payload.
+  if (!req.body || typeof req.body !== "object" || Array.isArray(req.body)) {
+    return res
+      .status(400)
+      .json({ ok: false, error: "IP configuration payload must be a JSON object." });
+  }
+  const base = getRemoteGatewayBaseUrl();
+  if (!base) {
+    return res
+      .status(503)
+      .json({ ok: false, error: "Remote gateway URL is not configured." });
+  }
+  if (isUnsafeRemoteLoop(base)) {
+    return res
+      .status(400)
+      .json({ ok: false, error: "Remote gateway URL cannot be localhost in remote mode." });
+  }
+  const target = `${base}/api/ip-config`;
+  const headers = { "Content-Type": "application/json", ...buildRemoteProxyHeaders() };
+  for (const [name, value] of Object.entries(_collectOperatorAuthHeaders(req))) {
+    if (name === "authorization" && headers.Authorization) continue;
+    headers[name] = value;
+  }
+  let gatewayCfg;
+  try {
+    const upstream = await fetch(
+      target,
+      buildRemoteFetchOptions(target, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(req.body || {}),
+        timeout: resolveProxyTimeout(target),
+      }),
+    );
+    const text = await upstream.text();
+    if (!upstream.ok) {
+      let msg = `Gateway rejected the IP configuration save (HTTP ${upstream.status}).`;
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed?.error) msg = String(parsed.error);
+      } catch (_) {}
+      return res.status(upstream.status).json({ ok: false, error: msg });
+    }
+    gatewayCfg = text && text.trim() ? JSON.parse(text) : {};
+  } catch (err) {
+    return res
+      .status(502)
+      .json({ ok: false, error: `Gateway IP configuration save failed: ${err.message}` });
+  }
+  // Defensive: only mirror a response that actually looks like an IP-config
+  // object-map. An old / misconfigured gateway that answers 200 with some other
+  // JSON shape must NOT cause sanitizeIpConfig() to write a defaults-only config
+  // and silently wipe this viewer's local copy. In that case the gateway still
+  // owns the truth, so report success but leave the local mirror untouched.
+  const gatewayCfgUsable =
+    gatewayCfg &&
+    typeof gatewayCfg === "object" &&
+    !Array.isArray(gatewayCfg) &&
+    gatewayCfg.inverters &&
+    typeof gatewayCfg.inverters === "object";
+  if (!gatewayCfgUsable) {
+    return res.json({
+      ...(gatewayCfg && typeof gatewayCfg === "object" ? gatewayCfg : {}),
+      ok: true,
+      localMirrorWarning:
+        "Gateway returned an unexpected configuration shape; local mirror skipped.",
+    });
+  }
+  // Gateway accepted the save — mirror its authoritative config locally so the
+  // remote viewer's own store matches what the gateway will poll with.
+  try {
+    const cfg = saveIpConfigToDb(gatewayCfg);
+    mirrorIpConfigToLegacyFiles(cfg);
+    pastDailyReportCache.clear();
+    pastReportSummaryCache.clear();
+    broadcastUpdate({ type: "configChanged" });
+    return res.json(cfg);
+  } catch (err) {
+    // The gateway already persisted the change; surface success but flag that
+    // the local mirror could not be written so it is not silently swallowed.
+    return res.json({ ...gatewayCfg, ok: true, localMirrorWarning: err.message });
+  }
+}
+
 app.post("/api/ip-config", (req, res) => {
   if (isRemoteMode()) {
-    return proxyToRemote(req, res);
+    return _applyIpConfigPostRemote(req, res);
   }
   // RS485 bridge hardening (scoped): a `serial` block redirects inverter
   // polling to a local bridge listener — a privileged change. Gate ONLY

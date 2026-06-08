@@ -2145,6 +2145,8 @@ the old → new firmware codes from the post-flash re-read).
 
 The `IP Configuration` window manages per-inverter network and operational settings. Open it from **Settings > IP Configuration** or `Ctrl+I`. Access requires an auth gate key (`adsiM` or `adsiMM`, where M is the current minute). The session lasts 1 hour.
 
+The window is available in **both Gateway and Remote mode**. When opened on a Remote viewer, a banner indicates that edits are saved to the gateway (the authoritative source) and mirrored back to the local viewer, so an operator working away from the plant can update inverter addressing without remoting into the gateway PC. The local device-reachability scan (gear-icon status, the **Check Status** button, and the "Online x / 27" counter) is suppressed in Remote mode because those inverters live on the gateway's LAN and are not reachable from the viewer; the gateway continues to poll them normally.
+
 ### Configuration Table
 
 Each of the 27 inverters has one row with the following columns:
@@ -2436,12 +2438,51 @@ is safe.
 | Plant-cap band warning says the limits are too close | Whole-inverter step size is larger than the configured deadband or close to it | Increase the gap between `Lower Limit` and `Upper Limit`, or review exempted inverters and node counts |
 | Whole-inverter `Start` / `Stop` still feels slow on one workstation | The workstation or gateway is still running an older build without batched inverter writes, or the backend link itself is slow | Update both gateway and remote builds to the same release first, then review Python service health and network latency |
 | Cloud restore is unavailable or incomplete | Provider or backup state is not ready | Refresh cloud list and verify provider authorization |
-| IP Configuration or Topology cannot be opened | Current mode is `Remote` or access is restricted | Use the gateway workstation |
+| Topology cannot be opened | Current mode is `Remote` or access is restricted | Use the gateway workstation (Topology is Gateway-only; IP Configuration now works in Remote mode) |
+| IP Configuration changes do not take effect | Remote viewer cannot reach the gateway, or the gateway rejected the save | Confirm the gateway URL/token in Settings and that the gateway is online; the save banner reports the gateway error if one occurred |
 | Alarm sound is silent | Sound is muted or system audio is unavailable | Re-enable alarm sound and check workstation audio |
 | Export fails | Path, date, format, or dataset issue | Verify export folder, input filters, and current mode |
 | Dashboard shows **"Dashboard files are damaged"** (v2.8.10+) | Packaged files torn by sudden shutdown (power loss, forced reboot) | Click **Reinstall Now** to run the locally stashed installer. See section 8.11 for full recovery procedure |
 | Red **"Database auto-restored"** banner at top of dashboard (v2.8.10+) | `adsi.db` was corrupt at startup; app swapped in a 2-hour backup | Normal. Up to ~2 h of readings re-fill automatically from live polling. Dismiss when ready |
 | PC boots to **"Intel UNDI PXE"** network-boot screen | BIOS could not find a local OS (boot sector / bootloader damage after hard shutdown) | Power off, wait 10 s, power on, F12 → **Windows Boot Manager**. Run `chkdsk C: /f /r` and `sfc /scannow` after Windows recovers. See section 8.11 |
+| An inverter's nodes stop polling but its IP still pings | The gateway's Modbus session to that inverter has wedged (stale socket or comm-board TCP queue). A `ping` only proves the comm board's network chip is alive, not that the Modbus session is healthy | The gateway auto-rebuilds the connection after ~30 s of failed reads. To force it now, open **IP Configuration** and click the **Reconnect** button on that inverter's row (no IP change). See section 10.1 |
+| "Open device web page" does nothing from a remote viewer | The comm board is on the gateway LAN, not reachable from the remote PC | Use the gear icon in **IP Configuration** — it routes the device page through the gateway automatically. See section 10.1 |
+
+### 10.1 Inverter polling stalls while the IP still pings (v2.11.x)
+
+An Ingeteam **AAX0041** Ethernet→RS-485 comm board keeps answering `ping` and even
+accepts the TCP connection while its Modbus polling has stalled — so a reachable
+IP does not prove the inverter is being read. When the gateway's per-inverter
+Modbus session wedges, polling for that inverter can stay dead even though the IP
+responds. The old field workaround was to change the inverter's IP, which forced
+the gateway to build a fresh connection.
+
+- **Automatic recovery:** the gateway watches each inverter's connection and,
+  after roughly 30 seconds with no successful read, discards the wedged Modbus
+  client and builds a new one (at most once per minute per inverter). No operator
+  action and no IP change are required.
+- **Manual Reconnect:** open **IP Configuration** and click the circular
+  **Reconnect** button on that inverter's row (next to Save). This rebuilds only
+  that inverter's gateway socket — it changes no inverter setting and no IP. It
+  works from a remote viewer too: the request is routed to the gateway.
+- **If only a manual reconnect ever helps** (auto-recovery does not), the fault is
+  most likely upstream of the gateway — a duplicate IP, or a stale ARP /
+  connection-tracking entry on the network switch/router — rather than the comm
+  board itself.
+
+#### Open device web page (gateway and remote)
+
+The gear icon on each **IP Configuration** row opens the comm board's own web
+page. On the gateway it opens directly on the plant LAN. From a **remote viewer**
+the device is not reachable directly, so the page is routed through the gateway
+automatically. The remote route is byte-for-byte, so HTML, styles, scripts and
+images all render.
+
+> **Tailscale note:** an inverter's LAN IP (e.g. `192.168.1.132`) is *not*
+> reachable directly over Tailscale unless a subnet router is configured on the
+> gateway (`tailscale up --advertise-routes=192.168.1.0/24`, then approved in the
+> admin console). The gateway proxy above is what makes "Open device web page"
+> work remotely **without** that change.
 
 ---
 

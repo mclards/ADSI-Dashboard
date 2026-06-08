@@ -4487,20 +4487,10 @@ function syncDayAheadGeneratorAvailability() {
   }
 }
 
-function notifyClientModeUnavailable(featureLabel) {
-  const safeFeature = String(featureLabel || "This feature");
-  showToast(
-    `${safeFeature} is available only in Gateway mode. Change Operation Mode in Settings to continue.`,
-    "warning",
-    4200,
-  );
-}
-
 function openIpConfigSettings() {
-  if (isClientModeActive()) {
-    notifyClientModeUnavailable("IP Configuration");
-    return;
-  }
+  // Editable in both gateway and remote mode. In remote mode the save proxies
+  // to the gateway (source of truth) and is mirrored into the local store — see
+  // _applyIpConfigPostRemote (server) and the remote banner in ip-config.html.
   if (window.electronAPI?.openIpConfigWindow) {
     window.electronAPI.openIpConfigWindow();
     return;
