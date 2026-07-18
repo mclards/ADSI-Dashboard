@@ -8508,6 +8508,24 @@ select.cam-field-input { appearance: auto; }
   }
 }
 
+.srn-empty {
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--text2);
+  font-size: 13.5px;
+  line-height: 1.5;
+  background: color-mix(in srgb, var(--surface2) 40%, transparent);
+  border: 1px dashed color-mix(in srgb, var(--border) 60%, transparent);
+  border-radius: 8px;
+  margin: 12px 0;
+}
+
+.fcal-scan-progress-label {
+  margin-bottom: 12px;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
 /* Cross-tab polish (non-inverter pages) */
 #page-analytics .page-toolbar,
 #page-alarms .page-toolbar,
@@ -13388,6 +13406,10 @@ body.mode-transition-active {
   border: 1px solid var(--border, rgba(127, 127, 127, 0.4));
   border-left: 4px solid var(--accent, #4a90e2);
   margin: 12px 0;
+}
+
+.cb-remote-notice[hidden] {
+  display: none !important;
 }
 
 .cb-remote-notice-icon {
@@ -20797,15 +20819,15 @@ body.mode-transition-active {
 /* Every calibration group is rendered as its own <table>, so we lock column
  * widths with table-layout:fixed + explicit per-column widths so the five
  * group tables visually line up like one continuous grid. */
-#page-field-calibration #fieldCalibrationSection .fcal-table {
+.fcal-table {
   width: 100%;
   border-collapse: collapse;
   font-size: 12.5px;
   table-layout: fixed;
 }
 
-#page-field-calibration #fieldCalibrationSection .fcal-table th,
-#page-field-calibration #fieldCalibrationSection .fcal-table td {
+.fcal-table th,
+.fcal-table td {
   padding: 7px 12px;
   border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
   text-align: left;
@@ -20814,21 +20836,21 @@ body.mode-transition-active {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-#page-field-calibration #fieldCalibrationSection .fcal-table tbody tr:last-child td {
+.fcal-table tbody tr:last-child td {
   border-bottom: 0;
 }
-#page-field-calibration #fieldCalibrationSection .fcal-table th:first-child,
-#page-field-calibration #fieldCalibrationSection .fcal-table td:first-child {
+.fcal-table th:first-child,
+.fcal-table td:first-child {
   padding-left: 16px;
 }
 /* Match .fcal-settings-table: the Calibration tab also scrolls inside its
    .card-tab-panel, so the rightmost column needs the same scrollbar gap. */
-#page-field-calibration #fieldCalibrationSection .fcal-table th:last-child,
-#page-field-calibration #fieldCalibrationSection .fcal-table td:last-child {
+.fcal-table th:last-child,
+.fcal-table td:last-child {
   padding-right: 28px;
 }
 
-#page-field-calibration #fieldCalibrationSection .fcal-table th {
+.fcal-table th {
   font-size: 10.5px;
   font-weight: var(--fw-semibold, 600);
   text-transform: uppercase;
@@ -21003,6 +21025,17 @@ body.mode-transition-active {
   font-size: 12px;
 }
 
+/* Fleet Calibration Anomalies toggling - hide all parameter log elements */
+#page-energy.fleet-mode #paramBlank,
+#page-energy.fleet-mode #paramTabs,
+#page-energy.fleet-mode #paramPanels,
+#page-energy.fleet-mode .tl-left,
+#page-energy.fleet-mode .param-adv-toggle,
+#page-energy.fleet-mode #paramSolarBadge,
+#page-energy.fleet-mode #paramRowCount {
+  display: none !important;
+}
+
 /* Fleet header bar inside the panel — compact card system. */
 #fcalPanelFleet .fcal-fleet-header {
   display: flex;
@@ -21010,20 +21043,22 @@ body.mode-transition-active {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 9px 14px;
-  background: color-mix(in srgb, var(--panel2) 40%, transparent);
-  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-  border-radius: 10px;
-  margin-bottom: 8px;
+  padding: 14px 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 16px;
 }
 
 #fcalPanelFleet .fcal-fleet-header-title {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 12.5px;
-  font-weight: var(--fw-semibold, 600);
+  font-family: 'Inter', 'Roboto', sans-serif;
+  font-size: 1.1rem;
+  font-weight: 600;
   color: var(--text);
+  letter-spacing: 0.2px;
 }
 
 #fcalPanelFleet .fcal-fleet-header-controls {
@@ -23246,4 +23281,197 @@ table.fcal-settings-table .fcal-set-readonly {
    tabs uniformly. */
 #fieldCalibrationSection[data-fcal-view]:not([data-fcal-view="calibration"]) #fcalPanelSingle {
   display: none;
+}
+
+/* --- Modern Card Grid for IGBT Asset Health --- */
+.igbt-fleet-grid-wrapper {
+  padding: 16px;
+  background: var(--bg-level2);
+  border-radius: 4px; /* Flatter radius */
+  border: 1px solid var(--border); /* Flat border instead of shadow */
+  overflow-y: auto;
+  max-height: calc(100vh - 200px);
+}
+
+.igbt-inverter-group {
+  margin-bottom: 24px;
+}
+
+.igbt-inverter-title {
+  font-family: 'Inter', 'Roboto', sans-serif;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text-main);
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 4px;
+}
+
+.igbt-fleet-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.igbt-card {
+  background: var(--surface); /* Solid flat color */
+  border: 1px solid var(--border); /* Flat border */
+  border-radius: 6px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: border-color 0.15s ease, background-color 0.15s ease; /* Fast, cheap transitions */
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+}
+
+.igbt-card:hover {
+  background: var(--bg-hover);
+  border-color: var(--text-muted);
+}
+
+.igbt-card.selected {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+/* Remove decorative before-bar */
+.igbt-card::before {
+  display: none;
+}
+
+.igbt-card.tier-healthy { color: var(--green); }
+.igbt-card.tier-watch { color: var(--orange); }
+.igbt-card.tier-aging { color: color-mix(in srgb, var(--orange) 60%, var(--red)); }
+.igbt-card.tier-eol { color: var(--red); }
+.igbt-card.tier-offline { color: var(--text-muted); }
+
+.igbt-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+  margin-bottom: 4px;
+}
+
+.igbt-card-title {
+  font-family: 'Inter', 'Roboto', sans-serif;
+  font-weight: 600;
+  font-size: 1.1rem;
+  color: var(--text);
+  letter-spacing: 0.2px;
+}
+
+.igbt-card-body {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0 4px 0;
+}
+
+.igbt-card-score-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.igbt-card-score-val {
+  font-family: 'Inter', 'Roboto', sans-serif;
+  font-size: 2rem;
+  font-weight: 700;
+  line-height: 1;
+  color: currentColor; /* Inherit tier color */
+  letter-spacing: -0.5px;
+}
+
+.igbt-card-score-lbl {
+  font-family: 'Inter', 'Roboto', sans-serif;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  letter-spacing: 0.5px;
+  margin-top: 6px;
+}
+
+.igbt-card-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.igbt-card-stats .stat-row {
+  font-family: 'Inter', 'Roboto', sans-serif;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.igbt-card-stats .stat-row b {
+  color: var(--text);
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.igbt-card-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 4px;
+}
+
+/* ── Card-grid state indicators (parallel to .pe-fleet-table tr.pe-row-* rules) ── */
+/* Offline — node has no 5-min sample in the last 10 min. */
+.igbt-card.pe-row-offline {
+  opacity: 0.55;
+  background: repeating-linear-gradient(
+    -45deg,
+    transparent 0,
+    transparent 6px,
+    color-mix(in srgb, var(--text2) 6%, transparent) 6px,
+    color-mix(in srgb, var(--text2) 6%, transparent) 12px
+  );
+}
+.igbt-card.pe-row-offline:hover {
+  opacity: 0.85;
+}
+
+/* Critical alarm pattern — recurring 0x0240 / 0x0210 (Slice κ.3). */
+.igbt-card.pe-row-critical-pattern {
+  border-left: 4px solid var(--red);
+  background: color-mix(in srgb, var(--red) 6%, var(--surface));
+}
+.igbt-card.pe-row-critical-pattern:hover {
+  background: color-mix(in srgb, var(--red) 12%, var(--surface));
+}
+
+/* Watch alarm pattern — lower severity precursor. */
+.igbt-card.pe-row-watch-pattern {
+  border-left: 4px solid var(--orange);
+}
+
+/* Empty-state placeholder when no nodes match the tier filter. */
+.igbt-empty-state {
+  padding: 48px 24px;
+  text-align: center;
+  color: var(--text2);
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+.igbt-empty-title {
+  font-weight: 600;
+  font-size: 1.05rem;
+  margin-bottom: 8px;
+  color: var(--text);
+}
+.igbt-empty-copy {
+  max-width: 340px;
+  margin: 0 auto;
 }

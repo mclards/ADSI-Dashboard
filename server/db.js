@@ -1494,6 +1494,25 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_igbt_thermal_date    ON igbt_thermal_baseline (date_local);
   CREATE INDEX IF NOT EXISTS idx_igbt_thermal_inv_date ON igbt_thermal_baseline (inverter_ip, slave, date_local);
 
+  -- v2.11.x Phase 2 — Asset Health Trend Snapshots.
+  -- One row per (timestamp_ms, inverter, slave).
+  -- Caches computed scores and payload data to serve time-series UI charts.
+  CREATE TABLE IF NOT EXISTS igbt_health_snapshot (
+    timestamp_ms   INTEGER NOT NULL,
+    inverter       INTEGER NOT NULL,
+    slave          INTEGER NOT NULL,
+    score          REAL,
+    tier           TEXT,
+    thermal_trips  INTEGER,
+    frama_total    INTEGER,
+    pi_ana_trips   INTEGER,
+    temp_pe_now_c  REAL,
+    imbalance_pct  REAL,
+    alarm_bits     INTEGER,
+    PRIMARY KEY (timestamp_ms, inverter, slave)
+  ) WITHOUT ROWID;
+  CREATE INDEX IF NOT EXISTS idx_igbt_health_snap_node ON igbt_health_snapshot (inverter, slave, timestamp_ms DESC);
+
   -- v2.11.0 Plant Controller — NGCP PGC 2016 compliance test storage.
   -- One row per test run (started → completed/aborted/failed).
   -- Plan: plans/2026-05-10-modbus-registers-official-revamp.md §4 Slice θ.1
@@ -4545,10 +4564,22 @@ function applyReadingToSummaryState(state, row) {
   if (!(ts > 0)) return;
   const pac = Math.max(0, Number(row?.pac || 0));
   const kwh = Number(row?.kwh || 0);
-  /* Availability rule: only manual-stop alarm (0x1000 = 4096) counts as
-     unavailable.  Other fault/warning alarms are disregarded — the node is
-     still considered "available" if it is communicating (online=1).
-     A non-manual-stop alarm with pac=0 still counts as available. */
+  /* ── Node-level online definition ───────────────────────────────────────
+     A node is "online" (contributing to the uptime interval) when it is
+     communicating AND at least one of:
+       • PAC > 0 (actively generating), or
+       • A non-manual-stop fault alarm is active (faulted but trying to run).
+
+     Manual-stop (alarm 0x1000): node is online ONLY if PAC > 0.
+     If PAC = 0 with 0x1000, the node is offline and its interval closes.
+
+     INVERTER-LEVEL behaviour (buildDailyReportRowsForDate):
+     The availability penalty for 0x1000 only materialises when ALL configured
+     nodes are simultaneously offline — i.e., the union of all node intervals
+     has a gap. If only SOME nodes are manually stopped but others continue
+     generating, their intervals cover the gap → no inverter-level penalty.
+     This implements the rule: "penalise 0x1000 only when all nodes have
+     PAC = 0 AND all nodes carry the 0x1000 alarm bit."                     */
   const alarmVal = Number(row?.alarm || 0);
   const isManualStop = (alarmVal & 0x1000) !== 0;
   const hasFaultAlarm = alarmVal > 0 && !isManualStop;

@@ -162,6 +162,7 @@ class CloudBackupService {
    */
   constructor(deps) {
     this.dataDir = deps.dataDir;
+    this.archiveDir = deps.archiveDir || path.join(getNewRoot(), "archive");
     this.db = deps.db;
     this.getSetting = deps.getSetting;
     this.setSetting = deps.setSetting;
@@ -2338,6 +2339,8 @@ class CloudBackupService {
       throw new Error("A backup/restore operation is already in progress");
     }
 
+    fs.mkdirSync(path.dirname(destPath), { recursive: true });
+
     this._setProgress({
       status: "creating",
       pct: 2,
@@ -2360,7 +2363,7 @@ class CloudBackupService {
       const root = getNewRoot();
 
       // Archive databases
-      const archiveDir = path.join(root, "archive");
+      const archiveDir = this.archiveDir;
       if (fs.existsSync(archiveDir)) {
         this._setProgress({ pct: 50, message: "Backing up archive databases…" });
         const archiveDest = path.join(dir, "archive");
@@ -2368,13 +2371,26 @@ class CloudBackupService {
         await this._recordFilesFromDir(archiveDest, "archive", manifest.checksums, manifest.files);
       }
 
-      // License files
-      const licenseDir = resolvedLicenseDir();
-      if (licenseDir && fs.existsSync(licenseDir)) {
-        this._setProgress({ pct: 58, message: "Backing up license files…" });
-        const licenseDest = path.join(dir, "license");
-        copyDirRecursive(licenseDir, licenseDest);
-        await this._recordFilesFromDir(licenseDest, "license", manifest.checksums, manifest.files);
+      // Lifecycle directory
+      const lifecycleDir = path.join(root, "lifecycle");
+      if (fs.existsSync(lifecycleDir)) {
+        this._setProgress({ pct: 55, message: "Backing up lifecycle state…" });
+        const lifecycleDest = path.join(dir, "lifecycle");
+        copyDirRecursive(lifecycleDir, lifecycleDest);
+        await this._recordFilesFromDir(lifecycleDest, "lifecycle", manifest.checksums, manifest.files);
+      }
+
+      // Root JSON files
+      this._setProgress({ pct: 58, message: "Backing up root configuration files…" });
+      for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+        if (entry.isFile() && (entry.name.endsWith(".json") || entry.name.endsWith(".jsonl"))) {
+          if (entry.name === "ipconfig.json" || entry.name === "settings.json" || entry.name === "manifest.json") continue;
+          const srcPath = path.join(root, entry.name);
+          const destPath = path.join(dir, entry.name);
+          fs.copyFileSync(srcPath, destPath);
+          manifest.checksums[entry.name] = sha256File(destPath);
+          manifest.files.push({ name: entry.name, size: fs.statSync(destPath).size });
+        }
       }
 
       // Auth tokens
@@ -2387,7 +2403,7 @@ class CloudBackupService {
       }
 
       // Update manifest with full scope
-      manifest.scope = ["database", "config", "logs", "archive", "license", "auth"];
+      manifest.scope = ["database", "config", "logs", "archive", "auth", "lifecycle", "root_json"];
       manifest.tag = "portable-full";
       manifest.totalSize = manifest.files.reduce((s, f) => s + f.size, 0);
       const manifestPath = path.join(dir, "manifest.json");
@@ -2654,21 +2670,34 @@ class CloudBackupService {
     if (allow("archive")) {
       const srcArchive = path.join(dir, "archive");
       if (fs.existsSync(srcArchive)) {
-        const destArchive = path.join(root, "archive");
+        const destArchive = this.archiveDir;
         fs.mkdirSync(destArchive, { recursive: true });
         copyDirRecursive(srcArchive, destArchive);
         console.log("[CloudBackup] Archive databases restored.");
       }
     }
 
-    // Restore license files
-    if (allow("license")) {
-      const srcLicense = path.join(dir, "license");
-      if (fs.existsSync(srcLicense)) {
-        const destLicense = resolvedLicenseDir();
-        fs.mkdirSync(destLicense, { recursive: true });
-        copyDirRecursive(srcLicense, destLicense);
-        console.log("[CloudBackup] License files restored.");
+    // Restore lifecycle state
+    if (allow("lifecycle")) {
+      const srcLifecycle = path.join(dir, "lifecycle");
+      if (fs.existsSync(srcLifecycle)) {
+        const destLifecycle = path.join(root, "lifecycle");
+        fs.mkdirSync(destLifecycle, { recursive: true });
+        copyDirRecursive(srcLifecycle, destLifecycle);
+        console.log("[CloudBackup] Lifecycle state restored.");
+      }
+    }
+
+    // Restore root JSONs
+    if (allow("root_json")) {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (entry.isFile() && (entry.name.endsWith(".json") || entry.name.endsWith(".jsonl"))) {
+          if (entry.name === "ipconfig.json" || entry.name === "settings.json" || entry.name === "manifest.json") continue;
+          const srcPath = path.join(dir, entry.name);
+          const destPath = path.join(root, entry.name);
+          fs.copyFileSync(srcPath, destPath);
+          console.log(`[CloudBackup] Restored root state file: ${entry.name}`);
+        }
       }
     }
 

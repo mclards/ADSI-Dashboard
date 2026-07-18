@@ -2,12 +2,25 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Repo/package version baseline:** 2.10.7
+- **Repo/package version baseline:** 2.11.7
 - **Operator-noted deployed server-side app version:** 2.2.32
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
 - **Version source-of-truth rule:** `package.json` is the repo version source of truth; hardcoded footer/about strings may lag and must not be trusted blindly.
+
+## v2.11.7 Changes — IGBT Asset Health card-grid redesign + snapshot writer + fixes (2026-07-18)
+- **IGBT fleet view overhauled from table to card grid:** Retired the dense `<table id="igbtFleetTable">` and replaced it with a modern responsive CSS Grid layout (`#igbtFleetGrid`). Cards use `backdrop-filter`, tier-coloured borders, hover-lift micro-animations, and pill-shaped health-tier badges (Healthy/Watch/Aging/EOL).
+- **Contactor fleet similarly converted to card grid:** `<table id="contactorFleetTable">` → `#contactorFleetGrid`; matching `.igbt-card` styling; `attachContactorGridClickListeners` wiring.
+- **`igbt_health_snapshot` cron writer added (critical gap fix):** Table was defined and the `/api/igbt/node/:inverter/:slave/history` history endpoint existed, but no writer was ever registered. Added `_captureIgbtHealthSnapshots()` (every 5 min, 3-min boot offset) and `_pruneIgbtHealthSnapshots()` (90-day TTL, every 6 h). History trend chart in the drilldown panel now receives live data.
+- **Historical trend chart in drilldown:** `renderIgbtHistoryChart()` plots health score (area fill) and temperature over a Chart.js canvas injected per-click inside the detail panel.
+- **Critical pattern visual indicator on IGBT cards (gap fix):** `renderIgbtFleetGrid` was missing `pe-row-critical-pattern` / `pe-row-watch-pattern` `classList.add()` calls. CSS rules for those states also needed card-targeted selectors (old rules scoped only to `.pe-fleet-table tbody tr`).
+- **Availability rule hardened (db.js):** `applyReadingToSummaryState` now marks a node online only when `online=1 AND (pac > 0 OR non-manual-stop fault alarm active)`. Manual-stop (0x1000) with PAC=0 closes the uptime interval. Inverter-level penalty only materialises when ALL nodes are simultaneously offline. Single point of change.
+- **`ipConfig` write-through in `/api/settings` POST:** Posting `ipConfig` field now runs `sanitizeIpConfig → mirrorIpConfigToLegacyFiles → backfillAuditIpsFromConfig → applyRuntimeMode` inline, exactly as the dedicated IP-config PUT path. Triggers mode re-apply correctly.
+- **CloudBackup scope: lifecycle + root_json replace license:** Backup/restore now includes `lifecycle/` state directory and root `.json`/`.jsonl` files (excluding `ipconfig.json`, `settings.json`, `manifest.json`). Removed the hardware-bound `license` scope. `archiveDir` injected as `this.archiveDir` instead of hardcoded path. `mkdirSync` guard added before archive creation.
+- **`computeIgbtFleetSummary` extracted as reusable helper:** Fleet endpoint and the new snapshot cron both call this function, eliminating code duplication.
+- **No Python service changes:** EXEs not rebuilt; existing `dist/*.exe` remain valid.
+- **Files changed:** `server/index.js`, `server/db.js`, `server/cloudBackup.js`, `public/index.html`, `public/js/app.js`, `public/css/style.css`, `package.json`, `package-lock.json`.
 
 ## v2.8.4 Changes - Control Logic State Tracking (2026-04-13)
 - **Status dot reflects Modbus `on_off` register alone:** Node button cmd class now strictly follows `Number(d?.on_off) === 1` (ON) vs 0 (OFF); no reachability/staleness masking.

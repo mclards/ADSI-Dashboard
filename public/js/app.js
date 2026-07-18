@@ -1,4 +1,4 @@
-﻿"use strict";
+"use strict";
 /* ═══════════════════════════════════════════════════════════════════════
    Dashboard V2 — Main Application
    WebSocket-driven, real-time inverter monitoring & control
@@ -4607,9 +4607,7 @@ function initNavDrag() {
   // A plain click still navigates; a quick move before the hold completes is
   // treated as a normal click/scroll, never a drag. The About card stays pinned
   // at the bottom (we only ever reorder among `.nav-btn`s, before #aboutSection).
-  const HOLD_MS = 240;
-  const MOVE_CANCEL_PX = 8;
-  let holdTimer = null;
+  // at the bottom (we only ever reorder among `.nav-btn`s, before #aboutSection).
   let armedBtn = null;        // armed (draggable) but not yet dragging
   let dragBtn = null;         // currently dragging
   let originalOrder = null;
@@ -4621,7 +4619,6 @@ function initNavDrag() {
   const aboutSection = () => nav.querySelector("#aboutSection");
 
   function disarm() {
-    if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
     if (armedBtn) {
       armedBtn.classList.remove("nav-armed");
       if (armedBtn !== dragBtn) armedBtn.draggable = false;
@@ -4629,42 +4626,45 @@ function initNavDrag() {
     }
   }
 
-  // Vertical list → simple midpoint test. null/About → append after the buttons.
+  // Vertical list → physical hover test on Y-axis only. null/About → append after buttons.
   function getInsertBeforeRef(y) {
-    for (const b of buttons()) {
+    const rects = buttons().map((b) => [b, b.getBoundingClientRect()]);
+    let target = null, tr = null;
+    for (const [b, r] of rects) {
       if (b === dragBtn) continue;
-      const r = b.getBoundingClientRect();
-      if (y < r.top + r.height / 2) return b;
+      // Use Y bounding box only. A vertical list doesn't care about X-drift.
+      if (y >= r.top && y <= r.bottom) {
+        target = b; tr = r; break;
+      }
     }
-    return aboutSection();
+    if (!target) return dragBtn; // not over a button's Y span → no change
+
+    const after = y > tr.top + tr.height / 2;
+    if (!after) return target;
+    let ref = target.nextElementSibling;
+    while (ref && ref === dragBtn) ref = ref.nextElementSibling;
+    return ref && ref.classList.contains("nav-btn") ? ref : aboutSection();
   }
 
-  // ── Press-and-hold arming ──────────────────────────────────────────
+  // ── Shift-Click to Arm ──────────────────────────────────────────
   nav.addEventListener("pointerdown", (e) => {
     if (e.button !== 0) return;
     const btn = e.target.closest(".nav-btn");
     if (!btn) return;
+    // Require Shift key to enter reorder mode
+    if (!e.shiftKey) return;
+
     downX = e.clientX; downY = e.clientY;
     disarm();
-    suppressClickPage = null; // each press starts clean — never inherit a stale suppression
-    holdTimer = setTimeout(() => {
-      holdTimer = null;
-      armedBtn = btn;
-      btn.draggable = true;
-      btn.classList.add("nav-armed");
-    }, HOLD_MS);
+    suppressClickPage = null; 
+
+    // Arm instantly when Shift is held
+    armedBtn = btn;
+    btn.draggable = true;
+    btn.classList.add("nav-armed");
   });
 
-  document.addEventListener("pointermove", (e) => {
-    if (!holdTimer) return;
-    if (Math.hypot(e.clientX - downX, e.clientY - downY) > MOVE_CANCEL_PX) {
-      clearTimeout(holdTimer);
-      holdTimer = null;
-    }
-  }, { passive: true });
-
   document.addEventListener("pointerup", () => {
-    if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
     // Armed but released without dragging → cancel, and swallow the trailing
     // click so a long-press alone never navigates.
     if (armedBtn && !dragBtn) {
@@ -4679,9 +4679,10 @@ function initNavDrag() {
   // next window blur. Clear everything so the next interaction starts fresh.
   document.addEventListener("pointercancel", () => {
     disarm();
-    dragBtn = null;
-    dropped = false;
-    originalOrder = null;
+    if (!dragBtn) {
+      dropped = false;
+      originalOrder = null;
+    }
   }, { passive: true });
 
   nav.addEventListener("click", (e) => {
@@ -4708,7 +4709,7 @@ function initNavDrag() {
     requestAnimationFrame(() => btn.classList.add("nav-dragging"));
   });
 
-  nav.addEventListener("dragover", (e) => {
+  document.addEventListener("dragover", (e) => {
     if (!dragBtn) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = "move";
@@ -4718,7 +4719,8 @@ function initNavDrag() {
     flipReorder(buttons(), () => nav.insertBefore(dragBtn, ref));
   });
 
-  nav.addEventListener("drop", (e) => {
+  document.addEventListener("drop", (e) => {
+    if (!dragBtn) return;
     e.preventDefault();
     dropped = true;
   });
@@ -7112,6 +7114,9 @@ function pickSettingsConfigFields(src) {
     }
     if (Object.keys(poll).length) out.inverterPollConfig = poll;
   }
+  if (hasOwn(src, "ipConfig") && src.ipConfig && typeof src.ipConfig === "object") {
+    out.ipConfig = JSON.parse(JSON.stringify(src.ipConfig));
+  }
 
   return out;
 }
@@ -7285,6 +7290,7 @@ async function disconnectCloudProvidersForConfigChange() {
 
 async function refreshAfterSettingsConfigApply(prevMode, reason) {
   await loadSettings();
+  await loadIpConfig();
   await cbLoadSettings();
   try {
     await handleOperationModeTransition(
@@ -27412,8 +27418,8 @@ function initIgbtHealthPage() {
   // Replaces the two per-render bindings that raced on dataset.bound.
   attachPeDrilldownCloseListener();
   // Render empty-state immediately so the table isn't a blank rectangle while loading
-  renderIgbtFleetTable([]);
-  renderContactorFleetTable([]);
+  renderIgbtFleetGrid([]);
+  renderContactorFleetGrid([]);
   // Load and render the fleet data for the default tab
   loadAndRenderActivePeTab().catch((err) => {
     console.error("[pe-health] Failed to load page:", err);
@@ -27472,9 +27478,9 @@ function setActivePeTab(which) {
 function closeAssetDrilldownPanel() {
   const panel = $("igbtDetailPanel");
   if (panel) panel.hidden = true;
-  ["igbtFleetTable", "contactorFleetTable"].forEach((id) => {
-    const tbl = $(id);
-    if (tbl) tbl.querySelectorAll("tbody tr.selected").forEach((r) => r.classList.remove("selected"));
+  ["igbtFleetGrid", "contactorFleetGrid"].forEach((id) => {
+    const container = $(id);
+    if (container) container.querySelectorAll(".igbt-card.selected").forEach((r) => r.classList.remove("selected"));
   });
 }
 
@@ -27517,11 +27523,11 @@ async function loadAndRenderIgbtHealthPage() {
       computedAtEl.textContent = dt.toLocaleString();
     }
 
-    // Render fleet table
-    renderIgbtFleetTable(data.nodes || []);
+    // Render fleet grid
+    renderIgbtFleetGrid(data.nodes || []);
 
     // Attach row click listeners
-    attachFleetTableClickListeners();
+    attachFleetGridClickListeners();
 
     hideToast();
   } catch (err) {
@@ -27530,24 +27536,20 @@ async function loadAndRenderIgbtHealthPage() {
   }
 }
 
-function renderIgbtFleetTable(nodes) {
-  const tbody = $("igbtFleetTableBody");
-  const table = $("igbtFleetTable");
-  if (!tbody || !table) return;
-  const wrapper = table.parentElement;
+function renderIgbtFleetGrid(nodes) {
+  const container = $("igbtFleetGrid");
+  if (!container) return;
+  const wrapper = container.parentElement;
 
-  tbody.innerHTML = "";
-  // Remove any prior standalone empty state from the wrapper
+  container.innerHTML = "";
+  container.className = ""; // Remove igbt-fleet-grid class from parent
   if (wrapper) {
     const oldEmpty = wrapper.querySelector(":scope > .igbt-empty-state");
     if (oldEmpty) oldEmpty.remove();
   }
 
   if (!nodes || nodes.length === 0) {
-    // Hide the table entirely so the long empty-state text can't push the
-    // table width past the wrapper viewport (which would knock the message
-    // off-centre and require horizontal scrolling).
-    table.style.display = "none";
+    container.style.display = "none";
     if (wrapper) {
       const empty = document.createElement("div");
       empty.className = "igbt-empty-state";
@@ -27555,11 +27557,7 @@ function renderIgbtFleetTable(nodes) {
         <span class="mdi mdi-clipboard-pulse-outline" aria-hidden="true"></span>
         <div class="igbt-empty-title">No nodes to score</div>
         <div class="igbt-empty-copy">
-          The fleet endpoint returned zero nodes — usually that means no inverters
-          have an IP set in <strong>Settings → IP Configuration</strong>, or every
-          configured slot was filtered out. Health scores are computed for every
-          configured node regardless of stop-reason history (a fresh node simply
-          scores 0 / Healthy until an event is recorded).
+          The fleet endpoint returned zero nodes.
         </div>
       `;
       wrapper.appendChild(empty);
@@ -27567,97 +27565,137 @@ function renderIgbtFleetTable(nodes) {
     return;
   }
 
-  // Restore table visibility when we have data.
-  table.style.display = "";
+  container.style.display = "block";
 
+  // Group nodes by inverter
+  const groupedNodes = {};
   nodes.forEach((node) => {
-    const tr = document.createElement("tr");
-    const tier = node.tier || "offline";
-    tr.className = `tier-${tier}`;
-    tr.dataset.inverter = node.inverter;
-    tr.dataset.slave = node.slave;
-    tr.dataset.tier = tier;
-
-    // Format values
-    const scoreDisplay = node.health_score != null ? node.health_score.toFixed(1) : "—";
-    const tempDisplay = node.temp_pe_now_c != null ? node.temp_pe_now_c.toFixed(1) : "—";
-    const imbalanceDisplay = node.imbalance_pct != null ? node.imbalance_pct.toFixed(2) : "—";
-    const lastEventDisplay = node.last_event_ms ? new Date(node.last_event_ms).toLocaleString() : "—";
-    const tierLabel = tier.charAt(0).toUpperCase() + tier.slice(1);
-    const branchSummary = `${node.frama_branch1 || 0}/${node.frama_branch2 || 0}/${node.frama_branch3 || 0}`;
-    const branchHasFault = (node.frama_branch1 || 0) + (node.frama_branch2 || 0) + (node.frama_branch3 || 0) > 0;
-    const alarmCell = renderAlarmBitsFleetCell(
-      node.current_alarm_bits || 0,
-      node.live_alarm_bits || 0,
-      { inverter: node.inverter, slave: node.slave },
-    );
-    if (node.is_online_now === false) tr.classList.add("pe-row-offline");
-    // v2.11.x Slice κ.3 — red-border row for nodes with a recurring forensic
-    // precursor (0x0240 or 0x0210 ≥2 episodes in 48 h).
-    if (node.has_critical_pattern === true || node.worst_pattern_severity === "critical") {
-      tr.classList.add("pe-row-critical-pattern");
-    } else if (node.worst_pattern_severity === "watch") {
-      tr.classList.add("pe-row-watch-pattern");
-    }
-
-    tr.innerHTML = `
-      <td>${node.inverter}</td>
-      <td class="text-mono">${node.ip || "—"}</td>
-      <td>${node.slave}</td>
-      <td class="score-cell tier-${tier}">${scoreDisplay}</td>
-      <td><span class="tier-pill tier-${tier}">${tierLabel}</span></td>
-      <td class="${_peCountCellClass(node.frama_total, 1, 5)}">${node.frama_total || 0}</td>
-      <td class="text-mono ${branchHasFault ? "pe-count-watch" : ""}">${branchSummary}</td>
-      <td class="${_peCountCellClass(node.thermal_trips, 1, 5)}">${node.thermal_trips || 0}</td>
-      <td class="${_peCountCellClass(node.pi_ana_trips, 1, 3)}">${node.pi_ana_trips || 0}</td>
-      <td class="phase-num">${tempDisplay}</td>
-      <td class="phase-num ${_peSpreadCellClass(node.imbalance_pct, 5, 10)}">${imbalanceDisplay}</td>
-      <td class="pe-fleet-alarm-cell">${alarmCell}</td>
-      <td class="text-muted">${lastEventDisplay}</td>
-    `;
-
-    tbody.appendChild(tr);
+    if (!groupedNodes[node.inverter]) groupedNodes[node.inverter] = [];
+    groupedNodes[node.inverter].push(node);
   });
 
-  // Apply tier filter after rendering
+  Object.keys(groupedNodes).sort((a, b) => parseInt(a) - parseInt(b)).forEach(inv => {
+    const groupDiv = document.createElement("div");
+    groupDiv.className = "igbt-inverter-group";
+    
+    const titleDiv = document.createElement("div");
+    titleDiv.className = "igbt-inverter-title";
+    titleDiv.innerHTML = `<span class="mdi mdi-solar-power"></span> Inverter ${inv}`;
+    groupDiv.appendChild(titleDiv);
+
+    const grid = document.createElement("div");
+    grid.className = "igbt-fleet-grid";
+
+    const nodeMap = {};
+    groupedNodes[inv].forEach(n => nodeMap[n.slave] = n);
+
+    for (let slave = 1; slave <= 4; slave++) {
+      const node = nodeMap[slave];
+      const card = document.createElement("div");
+      
+      if (!node) {
+        // Render greyed-out placeholder
+        card.className = "igbt-card tier-offline pe-row-offline";
+        card.style.opacity = "0.5";
+        card.innerHTML = `
+          <div class="igbt-card-header">
+            <div class="igbt-card-title">Node ${slave}</div>
+            <div class="tier-pill tier-offline">N/A</div>
+          </div>
+          <div class="igbt-card-body">
+            <div class="igbt-card-score-wrap tier-offline">
+              <div class="igbt-card-score-val">—</div>
+              <div class="igbt-card-score-lbl">Health Score</div>
+            </div>
+            <div class="igbt-card-stats" style="visibility: hidden;">
+              <div class="stat-row">Placeholder</div>
+              <div class="stat-row">Placeholder</div>
+              <div class="stat-row">Placeholder</div>
+            </div>
+          </div>
+          <div class="igbt-card-footer">
+            <div class="text-muted" style="font-size: 0.8rem;">Node unavailable</div>
+          </div>
+        `;
+        grid.appendChild(card);
+        continue;
+      }
+
+      const tier = node.tier || "offline";
+      card.className = `igbt-card tier-${tier}`;
+      card.dataset.inverter = node.inverter;
+      card.dataset.slave = node.slave;
+      card.dataset.tier = tier;
+
+      const scoreDisplay = node.health_score != null ? node.health_score.toFixed(1) : "—";
+      const tempDisplay = node.temp_pe_now_c != null ? node.temp_pe_now_c.toFixed(1) : "—";
+      const tierLabel = tier.charAt(0).toUpperCase() + tier.slice(1);
+      const alarmCell = renderAlarmBitsFleetCell(
+        node.current_alarm_bits || 0,
+        node.live_alarm_bits || 0,
+        { inverter: node.inverter, slave: node.slave },
+      );
+      
+      if (node.is_online_now === false) card.classList.add("pe-row-offline");
+      if (node.has_critical_pattern === true || node.worst_pattern_severity === "critical") {
+        card.classList.add("pe-row-critical-pattern");
+      } else if (node.worst_pattern_severity === "watch") {
+        card.classList.add("pe-row-watch-pattern");
+      }
+
+      card.innerHTML = `
+        <div class="igbt-card-header">
+          <div class="igbt-card-title">Node ${node.slave}</div>
+          <div class="tier-pill tier-${tier}">${tierLabel}</div>
+        </div>
+        <div class="igbt-card-body">
+          <div class="igbt-card-score-wrap tier-${tier}">
+            <div class="igbt-card-score-val">${scoreDisplay}</div>
+            <div class="igbt-card-score-lbl">Health Score</div>
+          </div>
+          <div class="igbt-card-stats">
+            <div class="stat-row"><span class="mdi mdi-flash"></span> FRAMA: <b>${node.frama_total || 0}</b></div>
+            <div class="stat-row"><span class="mdi mdi-thermometer-alert"></span> Therm Trips: <b>${node.thermal_trips || 0}</b></div>
+            <div class="stat-row"><span class="mdi mdi-thermometer"></span> Temp: <b>${tempDisplay}°C</b></div>
+          </div>
+        </div>
+        <div class="igbt-card-footer">
+          ${alarmCell}
+        </div>
+      `;
+
+      grid.appendChild(card);
+    }
+
+    groupDiv.appendChild(grid);
+    container.appendChild(groupDiv);
+  });
+
   applyTierFilter();
 }
 
-// Severity tint helpers for fleet table count + spread cells.
-// Watch threshold ≤ value < act threshold → amber; ≥ act → red.
 function _peCountCellClass(value, watchAt, actAt) {
   const n = Number(value || 0);
   if (n >= actAt)   return "pe-count-act";
   if (n >= watchAt) return "pe-count-watch";
   return "";
 }
-function _peSpreadCellClass(value, watchAt, actAt) {
-  const n = Number(value);
-  if (!Number.isFinite(n) || n <= 0) return "";
-  if (n >= actAt)   return "pe-count-act";
-  if (n >= watchAt) return "pe-count-watch";
-  return "";
-}
 
-function attachFleetTableClickListeners() {
-  const table = $("igbtFleetTable");
-  if (!table) return;
+function attachFleetGridClickListeners() {
+  const grid = $("igbtFleetGrid");
+  if (!grid) return;
 
-  table.querySelectorAll("tbody tr").forEach((tr) => {
-    tr.addEventListener("click", async (ev) => {
-      // Clicking an alarm-bit chip should ONLY open the alarm modal (the
-      // global .cell-alarm delegate). Don't also fire the drilldown.
+  grid.querySelectorAll(".igbt-card").forEach((card) => {
+    card.addEventListener("click", async (ev) => {
       if (ev.target?.closest?.(".cell-alarm.clickable")) return;
-      const inverter = tr.dataset.inverter;
-      const slave = tr.dataset.slave;
+      const inverter = card.dataset.inverter;
+      const slave = card.dataset.slave;
 
       if (!inverter || !slave) return;
 
-      // Mark as selected
-      table.querySelectorAll("tbody tr").forEach((r) => r.classList.remove("selected"));
-      tr.classList.add("selected");
+      grid.querySelectorAll(".igbt-card").forEach((r) => r.classList.remove("selected"));
+      card.classList.add("selected");
 
-      // Fetch and render drilldown
       await renderDrilldownPanel(inverter, slave);
     });
   });
@@ -27727,8 +27765,12 @@ async function renderDrilldownPanel(inverter, slave) {
     showToast("Loading node details...", 0);
 
     const days = getIgbtWindowDays();
-    const response = await fetch(`/api/igbt/node/${inverter}/${slave}?days=${days}`);
+    const [response, histResponse] = await Promise.all([
+      fetch(`/api/igbt/node/${inverter}/${slave}?days=${days}`),
+      fetch(`/api/igbt/node/${inverter}/${slave}/history?days=${days}`)
+    ]);
     const data = await response.json();
+    const histData = await histResponse.json();
 
     if (!data.ok) {
       throw new Error(data.error || "Failed to fetch node data");
@@ -27767,6 +27809,14 @@ async function renderDrilldownPanel(inverter, slave) {
               ${(node.health_score || 0).toFixed(1)}
               <span class="tier-badge ${node.tier}">${node.tier || "Offline"}</span>
             </div>
+          </div>
+        </div>
+
+        <!-- Health Trend Chart -->
+        <div class="igbt-detail-section">
+          <div class="igbt-detail-section-title">Historical Trend</div>
+          <div style="height: 180px; width: 100%; position: relative;">
+            <canvas id="igbtHistoryChart"></canvas>
           </div>
         </div>
 
@@ -27903,11 +27953,127 @@ async function renderDrilldownPanel(inverter, slave) {
     panel.style.display = "";
     panel.removeAttribute("hidden");
 
+    if (histData.ok && histData.data) {
+      renderIgbtHistoryChart(histData.data);
+    }
+
     hideToast();
   } catch (err) {
     console.error("[igbt] renderDrilldownPanel failed:", err);
     showToast("Error: " + (err?.message || "Unknown error"), 5000);
   }
+}
+
+let _igbtHistoryChart = null;
+
+function renderIgbtHistoryChart(historyData) {
+  const canvas = document.getElementById("igbtHistoryChart");
+  if (!canvas) return;
+
+  if (_igbtHistoryChart) {
+    _igbtHistoryChart.destroy();
+  }
+
+  if (!historyData || historyData.length === 0) {
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.font = "14px Inter";
+    ctx.fillStyle = "#888";
+    ctx.textAlign = "center";
+    ctx.fillText("No historical data available", canvas.width / 2, canvas.height / 2);
+    return;
+  }
+
+  const labels = historyData.map(d => {
+    const date = new Date(d.timestamp_ms);
+    return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  });
+
+  const scores = historyData.map(d => d.score);
+  const temps = historyData.map(d => d.temp_pe_now_c);
+
+  const ctx = canvas.getContext("2d");
+  
+  // Custom glowing gradient
+  const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+  gradient.addColorStop(0, 'rgba(0, 150, 255, 0.4)');
+  gradient.addColorStop(1, 'rgba(0, 150, 255, 0)');
+
+  _igbtHistoryChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: labels,
+      datasets: [
+        {
+          label: 'Health Score',
+          data: scores,
+          borderColor: 'rgba(0, 150, 255, 1)',
+          backgroundColor: gradient,
+          borderWidth: 2,
+          pointRadius: 1,
+          pointHoverRadius: 4,
+          fill: true,
+          tension: 0.4,
+          yAxisID: 'y'
+        },
+        {
+          label: 'Temp (°C)',
+          data: temps,
+          borderColor: 'rgba(255, 99, 132, 1)',
+          backgroundColor: 'transparent',
+          borderWidth: 1.5,
+          pointRadius: 0,
+          pointHoverRadius: 3,
+          borderDash: [5, 5],
+          tension: 0.4,
+          yAxisID: 'y1'
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: {
+          display: true,
+          position: 'top',
+          labels: { color: '#ccc', font: { family: 'Inter', size: 11 } }
+        },
+        tooltip: {
+          backgroundColor: 'rgba(0,0,0,0.8)',
+          titleFont: { family: 'Inter', size: 12 },
+          bodyFont: { family: 'Inter', size: 12 },
+          padding: 10,
+          cornerRadius: 4
+        }
+      },
+      scales: {
+        x: {
+          grid: { color: 'rgba(255,255,255,0.05)' },
+          ticks: { color: '#888', maxTicksLimit: 7 }
+        },
+        y: {
+          type: 'linear',
+          display: true,
+          position: 'left',
+          title: { display: true, text: 'Score', color: '#888' },
+          grid: { color: 'rgba(255,255,255,0.05)' },
+          ticks: { color: '#ccc' },
+          suggestedMin: 0,
+          suggestedMax: 100
+        },
+        y1: {
+          type: 'linear',
+          display: true,
+          position: 'right',
+          title: { display: true, text: 'Temp', color: '#888' },
+          grid: { drawOnChartArea: false },
+          ticks: { color: '#ccc' }
+        }
+      }
+    }
+  });
 }
 
 // ── v2.11.x Slice κ — AC Contactor (K1) Health Page ──────────────────────────
@@ -27927,8 +28093,8 @@ async function loadAndRenderContactorPage() {
     if (computedAtEl && data.generated_at_ms) {
       computedAtEl.textContent = new Date(data.generated_at_ms).toLocaleString();
     }
-    renderContactorFleetTable(data.nodes || []);
-    attachContactorTableClickListeners();
+    renderContactorFleetGrid(data.nodes || []);
+    attachContactorGridClickListeners();
     hideToast();
   } catch (err) {
     console.error("[contactor] loadAndRenderContactorPage failed:", err);
@@ -27936,20 +28102,20 @@ async function loadAndRenderContactorPage() {
   }
 }
 
-function renderContactorFleetTable(nodes) {
-  const tbody = $("contactorFleetTableBody");
-  const table = $("contactorFleetTable");
-  if (!tbody || !table) return;
-  const wrapper = table.parentElement;
+function renderContactorFleetGrid(nodes) {
+  const container = $("contactorFleetGrid");
+  if (!container) return;
+  const wrapper = container.parentElement;
 
-  tbody.innerHTML = "";
+  container.innerHTML = "";
+  container.className = ""; // Remove igbt-fleet-grid class from parent
   if (wrapper) {
     const oldEmpty = wrapper.querySelector(":scope > .igbt-empty-state");
     if (oldEmpty) oldEmpty.remove();
   }
 
   if (!nodes || nodes.length === 0) {
-    table.style.display = "none";
+    container.style.display = "none";
     if (wrapper) {
       const empty = document.createElement("div");
       empty.className = "igbt-empty-state";
@@ -27965,79 +28131,131 @@ function renderContactorFleetTable(nodes) {
     }
     return;
   }
-  table.style.display = "";
 
+  container.style.display = "block";
+
+  // Group nodes by inverter
+  const groupedNodes = {};
   nodes.forEach((node) => {
-    const tr = document.createElement("tr");
-    const tier = node.tier || "offline";
-    tr.className = `tier-${tier}`;
-    tr.dataset.inverter = node.inverter;
-    tr.dataset.slave = node.slave;
-    tr.dataset.tier = tier;
+    if (!groupedNodes[node.inverter]) groupedNodes[node.inverter] = [];
+    groupedNodes[node.inverter].push(node);
+  });
 
-    const scoreDisplay = node.health_score != null ? node.health_score.toFixed(1) : "—";
-    const vacDisplay = node.vac_imbalance_pct != null ? node.vac_imbalance_pct.toFixed(2) : "—";
-    const iacDisplay = node.iac_imbalance_pct != null ? node.iac_imbalance_pct.toFixed(2) : "—";
-    const lastEventDisplay = node.last_event_ms ? new Date(node.last_event_ms).toLocaleString() : "—";
-    const tierLabel = tier.charAt(0).toUpperCase() + tier.slice(1);
-    const alarmCell = renderAlarmBitsFleetCell(
-      node.current_alarm_bits || 0,
-      node.live_alarm_bits || 0,
-      { inverter: node.inverter, slave: node.slave },
-    );
-    if (node.is_online_now === false) tr.classList.add("pe-row-offline");
-    // v2.11.x Slice κ.3 — red-border row for nodes with a recurring forensic
-    // precursor (0x0240 or 0x0210 ≥2 episodes in 48 h).
-    if (node.has_critical_pattern === true || node.worst_pattern_severity === "critical") {
-      tr.classList.add("pe-row-critical-pattern");
-    } else if (node.worst_pattern_severity === "watch") {
-      tr.classList.add("pe-row-watch-pattern");
+  Object.keys(groupedNodes).sort((a, b) => parseInt(a) - parseInt(b)).forEach(inv => {
+    const groupDiv = document.createElement("div");
+    groupDiv.className = "igbt-inverter-group";
+    
+    const titleDiv = document.createElement("div");
+    titleDiv.className = "igbt-inverter-title";
+    titleDiv.innerHTML = `<span class="mdi mdi-solar-power"></span> Inverter ${inv}`;
+    groupDiv.appendChild(titleDiv);
+
+    const grid = document.createElement("div");
+    grid.className = "igbt-fleet-grid";
+
+    const nodeMap = {};
+    groupedNodes[inv].forEach(n => nodeMap[n.slave] = n);
+
+    for (let slave = 1; slave <= 4; slave++) {
+      const node = nodeMap[slave];
+      const card = document.createElement("div");
+
+      if (!node) {
+        // Render greyed-out placeholder
+        card.className = "igbt-card tier-offline pe-row-offline";
+        card.style.opacity = "0.5";
+        card.innerHTML = `
+          <div class="igbt-card-header">
+            <div class="igbt-card-title">Node ${slave}</div>
+            <div class="tier-pill tier-offline">N/A</div>
+          </div>
+          <div class="igbt-card-body">
+            <div class="igbt-card-score-wrap tier-offline">
+              <div class="igbt-card-score-val">—</div>
+              <div class="igbt-card-score-lbl">Health Score</div>
+            </div>
+            <div class="igbt-card-stats" style="visibility: hidden;">
+              <div class="stat-row">Placeholder</div>
+              <div class="stat-row">Placeholder</div>
+              <div class="stat-row">Placeholder</div>
+            </div>
+          </div>
+          <div class="igbt-card-footer">
+            <div class="text-muted" style="font-size: 0.8rem;">Node unavailable</div>
+          </div>
+        `;
+        grid.appendChild(card);
+        continue;
+      }
+
+      const tier = node.tier || "offline";
+      card.className = `igbt-card tier-${tier}`;
+      card.dataset.inverter = node.inverter;
+      card.dataset.slave = node.slave;
+      card.dataset.tier = tier;
+
+      const scoreDisplay = node.health_score != null ? node.health_score.toFixed(1) : "—";
+      const vacDisplay = node.vac_imbalance_pct != null ? node.vac_imbalance_pct.toFixed(2) : "—";
+      const cyclesDisplay = (node.conex_lifetime != null && Number.isFinite(node.conex_lifetime))
+        ? Number(node.conex_lifetime).toLocaleString()
+        : "—";
+      const tierLabel = tier.charAt(0).toUpperCase() + tier.slice(1);
+      const alarmCell = renderAlarmBitsFleetCell(
+        node.current_alarm_bits || 0,
+        node.live_alarm_bits || 0,
+        { inverter: node.inverter, slave: node.slave },
+      );
+      
+      if (node.is_online_now === false) card.classList.add("pe-row-offline");
+      if (node.has_critical_pattern === true || node.worst_pattern_severity === "critical") {
+        card.classList.add("pe-row-critical-pattern");
+      } else if (node.worst_pattern_severity === "watch") {
+        card.classList.add("pe-row-watch-pattern");
+      }
+
+      card.innerHTML = `
+        <div class="igbt-card-header">
+          <div class="igbt-card-title">Node ${node.slave}</div>
+          <div class="tier-pill tier-${tier}">${tierLabel}</div>
+        </div>
+        <div class="igbt-card-body">
+          <div class="igbt-card-score-wrap tier-${tier}">
+            <div class="igbt-card-score-val">${scoreDisplay}</div>
+            <div class="igbt-card-score-lbl">Health Score</div>
+          </div>
+          <div class="igbt-card-stats">
+            <div class="stat-row"><span class="mdi mdi-alert-circle-outline"></span> Stops: <b>${node.stop_count || 0}</b></div>
+            <div class="stat-row"><span class="mdi mdi-sine-wave"></span> Vac Spd: <b>${vacDisplay}%</b></div>
+            <div class="stat-row"><span class="mdi mdi-sync"></span> Cycles: <b>${cyclesDisplay}</b></div>
+          </div>
+        </div>
+        <div class="igbt-card-footer">
+          ${alarmCell}
+        </div>
+      `;
+
+      grid.appendChild(card);
     }
 
-    // K1 wear cells. Lifetime cycle count rendered with thousands separator;
-    // rate-per-day tinted at the same thresholds the scoring formula uses
-    // (>3/day → watch, >20/day → act). "—" when not yet sampled.
-    const cyclesDisplay = (node.conex_lifetime != null && Number.isFinite(node.conex_lifetime))
-      ? Number(node.conex_lifetime).toLocaleString()
-      : "—";
-    const rateDisplay = (node.cycle_rate_per_day != null && Number.isFinite(node.cycle_rate_per_day))
-      ? node.cycle_rate_per_day.toFixed(2)
-      : "—";
-
-    tr.innerHTML = `
-      <td>${node.inverter}</td>
-      <td class="text-mono">${node.ip || "—"}</td>
-      <td>${node.slave}</td>
-      <td class="score-cell tier-${tier}">${scoreDisplay}</td>
-      <td><span class="tier-pill tier-${tier}">${tierLabel}</span></td>
-      <td class="${_peCountCellClass(node.stop_count, 1, 3)}">${node.stop_count || 0}</td>
-      <td class="${_peCountCellClass(node.alarm_episode_count, 1, 3)}">${node.alarm_episode_count || 0}</td>
-      <td class="${_peCountCellClass(node.chatter_count, 1, 2)}">${node.chatter_count || 0}</td>
-      <td class="phase-num ${_peSpreadCellClass(node.vac_imbalance_pct, 1, 2)}">${vacDisplay}</td>
-      <td class="phase-num ${_peSpreadCellClass(node.iac_imbalance_pct, 5, 10)}">${iacDisplay}</td>
-      <td class="phase-num">${cyclesDisplay}</td>
-      <td class="phase-num ${_peSpreadCellClass(node.cycle_rate_per_day, 3, 20)}">${rateDisplay}</td>
-      <td class="pe-fleet-alarm-cell">${alarmCell}</td>
-      <td class="text-muted">${lastEventDisplay}</td>
-    `;
-    tbody.appendChild(tr);
+    groupDiv.appendChild(grid);
+    container.appendChild(groupDiv);
   });
 
   applyTierFilter();
 }
 
-function attachContactorTableClickListeners() {
-  const table = $("contactorFleetTable");
-  if (!table) return;
-  table.querySelectorAll("tbody tr").forEach((tr) => {
-    tr.addEventListener("click", async (ev) => {
+function attachContactorGridClickListeners() {
+  const container = $("contactorFleetGrid");
+  if (!container) return;
+  container.querySelectorAll(".igbt-card").forEach((card) => {
+    card.addEventListener("click", async (ev) => {
       // Clicking an alarm-bit chip should ONLY open the alarm modal.
       if (ev.target?.closest?.(".cell-alarm.clickable")) return;
-      const inverter = tr.dataset.inverter;
-      const slave = tr.dataset.slave;
+      const inverter = card.dataset.inverter;
+      const slave = card.dataset.slave;
       if (!inverter || !slave) return;
-      table.querySelectorAll("tbody tr").forEach((r) => r.classList.remove("selected"));
-      tr.classList.add("selected");
+      container.querySelectorAll(".igbt-card").forEach((c) => c.classList.remove("selected"));
+      card.classList.add("selected");
       await renderContactorDrilldown(inverter, slave);
     });
   });
@@ -28749,15 +28967,15 @@ function applyTierFilter() {
   });
 
   // Apply filter to whichever tab body is currently visible.
-  const tbody = _peActiveTab === "contactor"
-    ? $("contactorFleetTableBody")
-    : $("igbtFleetTableBody");
-  if (!tbody) return;
+  const container = _peActiveTab === "contactor"
+    ? $("contactorFleetGrid")
+    : $("igbtFleetGrid");
+  if (!container) return;
 
-  tbody.querySelectorAll("tr").forEach((tr) => {
-    const tier = tr.dataset.tier || "offline";
+  container.querySelectorAll(".igbt-card").forEach((card) => {
+    const tier = card.dataset.tier || "offline";
     const shouldShow = selectAll || selectedTiers.size === 0 || selectedTiers.has(tier);
-    tr.classList.toggle("hidden", !shouldShow);
+    card.classList.toggle("hidden", !shouldShow);
   });
 }
 

@@ -444,6 +444,7 @@ const REPORT_UNIT_KW_MAX = SOLCAST_UNIT_KW_MAX;
 const REPORT_MAX_NODES_PER_INVERTER = 4;
 const AVAIL_MAX_GAP_S = 120; // max interval treated as online (6Ã— OFFLINE_MS=20s)
 const AVAIL_OFFLINE_TOLERANCE_S = 60; // bridge offline gaps ≤ 60s (comms blips / Modbus timeouts)
+const AVAIL_PAC_ZERO_GRACE_S = 300; // bridge PAC=0 gaps ≤ 5 min — short transients not penalised
 // Raised 50k → 500k so wide-range analytics queries (e.g. 1-month all-inverter
 // at 5-min granularity ≈ 233k rows) stop being silently truncated. Wider than
 // 500k now returns 400 — see /api/analytics/energy and /api/energy/5min.
@@ -937,6 +938,7 @@ const _backupHealth = new BackupHealthRegistry({
 
 _cloudBackup = new CloudBackupService({
   dataDir:     DATA_DIR,
+  archiveDir:  ARCHIVE_DIR,
   db,
   getSetting,
   setSetting,
@@ -8730,6 +8732,7 @@ function buildSettingsSnapshot() {
     crashGapRatio: Number(
       getSetting("crashGapRatio", defaults.crashGapRatio),
     ),
+    ipConfig: loadIpConfigFromDb(),
   };
 }
 
@@ -11761,6 +11764,9 @@ function normalizePersistedDailyReportRow(row, day, ipCfg = null) {
     ? Number(safeRow?.rated_kw || 0)
     : getReportRatedKwForNodeCount(expectedNodes);
   const uptimeS = Math.max(0, Number(safeRow?.uptime_s || 0));
+  // Legacy fallback window — only used for very old persisted rows that predate
+  // the natural-generation-window model (v2.11.7+). Modern rows always carry
+  // computed availability_pct / performance_pct so the ternary branch is skipped.
   const windowS = getReportSolarWindowSeconds(reportDay, reportDay === localDateStr());
   const availabilityPct = Number(safeRow?.availability_pct);
   const performancePct = Number(safeRow?.performance_pct);
@@ -12194,31 +12200,54 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
       if (regTotal > 0) kwhTotal = regTotal;
     }
 
-    /* ── Per-inverter dynamic availability window ───────────────────────
-       Window start = first non-zero PAC interval start (>= solar 5 AM)
-       Window end   = last interval end (last zero-PAC transition, <= solar 6 PM / now)
-       Falls back to the fixed solar window if no intervals exist.          */
-    const clippedIntervals = reportWindow.startTs > 0 && reportWindow.endTs > reportWindow.startTs
+    /* ── Natural generation window availability (v2.11.7+) ──────────────────
+       Window = first PAC>0 timestamp → last PAC>0 timestamp for this inverter,
+       clipped to the configured solar window [REPORT_SOLAR_START_H, REPORT_SOLAR_END_H].
+       - Natural warm-up / cool-down at the edges are NOT penalised.
+       - Gaps INSIDE the window where inverter total PAC = 0 ARE penalised,
+         UNLESS the gap is < AVAIL_PAC_ZERO_GRACE_S (5 min) — short transients
+         (cloud shadows, brief Modbus blips that span a whole poll cycle) are
+         bridged and ignored.
+       - Manual-stop (alarm 0x1000) already excluded from isOnline in db.js,
+         so those gaps are already captured as holes in solarClipped intervals.
+       - If the inverter never generates (genWindowS = 0) → availability = 0 %.  */
+    const solarClipped = reportWindow.startTs > 0 && reportWindow.endTs > reportWindow.startTs
       ? clipIntervalsToWindowMs(allIntervals, reportWindow.startTs, reportWindow.endTs)
       : allIntervals.slice();
-    let dynWindowStartMs = Infinity;
-    let dynWindowEndMs = 0;
-    for (const [s, e] of clippedIntervals) {
-      if (s < dynWindowStartMs) dynWindowStartMs = s;
-      if (e > dynWindowEndMs) dynWindowEndMs = e;
-    }
-    const dynWindowS = dynWindowEndMs > dynWindowStartMs
-      ? (dynWindowEndMs - dynWindowStartMs) / 1000
-      : 0;
-    const availWindowS = dynWindowS > 0 ? dynWindowS : expectedSolarWindowS;
 
+    // Bridge gaps shorter than the 5-minute grace period so fleeting cloud
+    // shadows / brief comms blips don't count as downtime penalties.
+    const graceBridged = bridgeShortOfflineGaps(solarClipped, AVAIL_PAC_ZERO_GRACE_S);
+
+    let genWindowStartMs = Infinity;
+    let genWindowEndMs   = 0;
+    for (const [s, e] of graceBridged) {
+      if (s < genWindowStartMs) genWindowStartMs = s;
+      if (e > genWindowEndMs)   genWindowEndMs   = e;
+    }
+    const genWindowS = genWindowEndMs > genWindowStartMs
+      ? (genWindowEndMs - genWindowStartMs) / 1000
+      : 0;
+
+    // Uptime re-computed inside the narrower natural-generation window only,
+    // using the grace-bridged intervals so sub-5-min gaps count as online.
+    const availUptimeS = genWindowS > 0
+      ? computeOnlineSecondsFromIntervals(graceBridged, {
+          startTs: genWindowStartMs, endTs: genWindowEndMs,
+        })
+      : 0;
+
+    const availabilityPct = genWindowS > 0 ? (availUptimeS / genWindowS) * 100 : 0;
+
+    // Performance uses generation-window uptime so the denominator reflects
+    // actual capacity-hours during the inverter's own generation period.
+    const genUptimeH      = availUptimeS / 3600;
+    const perfDenomKwh    = ratedKw * genUptimeH;
+    const performancePct  = perfDenomKwh > 0 ? (kwhTotal / perfDenomKwh) * 100 : 0;
+
+    const availWindowS        = genWindowS;  // alias kept for expectedNodeUptimeS
     const expectedNodeUptimeS = availWindowS * activeNodeCount;
-    const availabilityPct =
-      availWindowS > 0 ? (uptimeS / availWindowS) * 100 : 0;
-    const uptimeH = uptimeS / 3600;
-    const perfDenomKwh = ratedKw * uptimeH;
-    const performancePct =
-      perfDenomKwh > 0 ? (kwhTotal / perfDenomKwh) * 100 : 0;
+
 
     // v2.9.1 — derive per-source hardware totals from baseline + counter_state
     // (NULL when ANY contributing unit lacks a clean eod_clean anchor for the
@@ -14068,153 +14097,128 @@ function escapeCsvCell(v) {
     : s;
 }
 
+function computeIgbtFleetSummary(windowDays) {
+  const now = Date.now();
+  const cutoffMs = now - windowDays * 24 * 60 * 60 * 1000;
+  const ipConfig = loadIpConfigFromDb();
+  const configuredNodes = getConfiguredNodeSet(ipConfig);
+
+  const nodes = [];
+  const tierCounts = { healthy: 0, watch: 0, aging: 0, eol: 0, offline: 0 };
+  let totalImbalance = 0;
+  let imbalanceCount = 0;
+
+  for (const { inverter: inv, ip, slave } of enumerateConfiguredNodes(ipConfig)) {
+    const thermalCount = stopReasonAggregator.countMotivesCombined(db, ip, slave, cutoffMs, [7, 21]);
+    const framaCount = stopReasonAggregator.countMotivesCombined(db, ip, slave, cutoffMs, [13, 29, 30]);
+    const piAnaCount = stopReasonAggregator.countMotivesCombined(db, ip, slave, cutoffMs, [26]);
+
+    const oneHourAgo = now - 60 * 60 * 1000;
+    const paramRows = db.prepare(`
+      SELECT vac1_v, vac2_v, vac3_v, iac1_a, iac2_a, iac3_a,
+             temp_c, ts_ms, inv_alarms
+        FROM inverter_5min_param
+        WHERE inverter_ip = ? AND slave = ? AND ts_ms > ?
+        ORDER BY ts_ms DESC
+    `).all(ip, slave, oneHourAgo);
+
+    const imbalancePct = igbtHealth.medianImbalance(paramRows);
+    const tempC = paramRows?.[0]?.temp_c || null;
+    const currentAlarmBits = Number(paramRows?.[0]?.inv_alarms || 0) | 0;
+
+    const yoyBlock = computeYoyThermalBlock(ip, slave);
+
+    const scoreResult = igbtHealth.computeHealthScore({
+      thermal_count: thermalCount,
+      frama_count: framaCount,
+      pi_ana_count: piAnaCount,
+      imbalance_pct: imbalancePct,
+      yoy_drift_c: yoyBlock.yoy_drift_c,
+    });
+
+    const lastEvent = stopReasonAggregator.findLastStopEvent(db, ip, slave);
+
+    const node = {
+      inverter: inv,
+      ip,
+      slave,
+      health_score: scoreResult.score,
+      tier: scoreResult.tier,
+      frama_total: framaCount,
+      frama_branch1: stopReasonAggregator.countMotivesCombined(db, ip, slave, cutoffMs, [29]),
+      frama_branch2: stopReasonAggregator.countMotivesCombined(db, ip, slave, cutoffMs, [30]),
+      frama_branch3: stopReasonAggregator.countMotivesCombined(db, ip, slave, cutoffMs, [13]),
+      thermal_trips: thermalCount,
+      pi_ana_trips: piAnaCount,
+      temp_pe_now_c: tempC,
+      imbalance_pct: imbalancePct,
+      last_event_ms: lastEvent?.read_at_ms || null,
+      last_event_motive_name: lastEvent ? getMotiveLabel(lastEvent.motive_code) : null,
+      current_alarm_bits: currentAlarmBits,
+      live_alarm_bits: getLiveAlarmBitmap(inv, slave),
+      last_param_ts_ms: paramRows?.[0]?.ts_ms || null,
+      is_online_now: paramRows?.[0]?.ts_ms != null && (now - paramRows[0].ts_ms) < 10 * 60 * 1000,
+      yoy_drift_c: yoyBlock.yoy_drift_c,
+      baseline_ready: !!yoyBlock.progress?.ready,
+      baseline_progress_ratio: Number((yoyBlock.progress?.ratio || 0).toFixed(3)),
+      baseline_computed_days: yoyBlock.progress?.computed_days || 0,
+      scoring_phase: scoreResult.weights_used?.phase || "phase1",
+    };
+
+    const critPatterns = loadCriticalPatterns(inv, slave, now);
+    node.critical_patterns = critPatterns.map((p) => ({
+      key: p.key,
+      hex: p.hex,
+      label: p.label,
+      severity: p.severity,
+      count_in_window: p.count_in_window,
+      last_seen_ts: p.last_seen_ts,
+      recurring: p.recurring,
+    }));
+    node.worst_pattern_severity = criticalAlarmPatterns.worstSeverity(critPatterns);
+    node.has_critical_pattern = criticalAlarmPatterns.hasAnyCriticalPattern(critPatterns);
+
+    nodes.push(node);
+
+    if (scoreResult.tier) {
+      tierCounts[scoreResult.tier]++;
+    } else {
+      tierCounts.offline++;
+    }
+
+    if (typeof imbalancePct === "number") {
+      totalImbalance += imbalancePct;
+      imbalanceCount++;
+    }
+  }
+
+  return {
+    nodes,
+    summary: {
+      total_nodes: nodes.length,
+      healthy_count: tierCounts.healthy,
+      watch_count: tierCounts.watch,
+      aging_count: tierCounts.aging,
+      eol_count: tierCounts.eol,
+      offline_count: tierCounts.offline,
+      avg_imbalance_pct: imbalanceCount > 0 ? totalImbalance / imbalanceCount : 0,
+    }
+  };
+}
+
 // GET /api/igbt/fleet — Fetch fleet-wide health summary for 108 nodes
 app.get("/api/igbt/fleet", (req, res) => {
   if (isRemoteMode()) return proxyToRemote(req, res);
 
   try {
-    const now = Date.now();
     const windowDays = parseWindowDays(req);
-    const cutoffMs = now - windowDays * 24 * 60 * 60 * 1000;
-    const ipConfig = loadIpConfigFromDb();
-    const configuredNodes = getConfiguredNodeSet(ipConfig);
-
-    const nodes = [];
-    const tierCounts = { healthy: 0, watch: 0, aging: 0, eol: 0, offline: 0 };
-    let totalImbalance = 0;
-    let imbalanceCount = 0;
-
-    // Enumerate all configured nodes (object-map ipconfig walk)
-    for (const { inverter: inv, ip, slave } of enumerateConfiguredNodes(ipConfig)) {
-      // Stop-reason counts (rolling window). v2.11.0-beta.6: counts UNION
-      // both `inverter_stop_reasons_std` (operator refresh / std fanout) AND
-      // `inverter_stop_reasons` (Slice F auto-capture on alarm transition)
-      // so the fleet table reflects every captured event regardless of
-      // which path filled it in — see server/stopReasonAggregator.js for
-      // the dedup-bucket rationale.
-      const thermalCount = stopReasonAggregator.countMotivesCombined(
-        db, ip, slave, cutoffMs, [7, 21],
-      );
-      const framaCount = stopReasonAggregator.countMotivesCombined(
-        db, ip, slave, cutoffMs, [13, 29, 30],
-      );
-      const piAnaCount = stopReasonAggregator.countMotivesCombined(
-        db, ip, slave, cutoffMs, [26],
-      );
-
-      // Query last hour 5-min parameters for imbalance + per-phase snapshot
-      // + currently-raised alarm bits (inv_alarms bitwise-OR across slot).
-      const oneHourAgo = now - 60 * 60 * 1000;
-      const paramRows = db.prepare(`
-        SELECT vac1_v, vac2_v, vac3_v, iac1_a, iac2_a, iac3_a,
-               temp_c, ts_ms, inv_alarms
-          FROM inverter_5min_param
-          WHERE inverter_ip = ? AND slave = ? AND ts_ms > ?
-          ORDER BY ts_ms DESC
-      `).all(ip, slave, oneHourAgo);
-
-      const imbalancePct = igbtHealth.medianImbalance(paramRows);
-      const tempC = paramRows?.[0]?.temp_c || null;
-      const currentAlarmBits = Number(paramRows?.[0]?.inv_alarms || 0) | 0;
-
-      // Phase 2.1 — fetch YoY thermal drift block (drift is null until
-      // we have ≥1 'computed' row in both 90-day windows).
-      const yoyBlock = computeYoyThermalBlock(ip, slave);
-
-      // Compute health score (Phase 1 weights when yoy_drift_c null,
-      // Phase 2 weights when present — see igbtHealth.computeHealthScore).
-      const scoreResult = igbtHealth.computeHealthScore({
-        thermal_count: thermalCount,
-        frama_count: framaCount,
-        pi_ana_count: piAnaCount,
-        imbalance_pct: imbalancePct,
-        yoy_drift_c: yoyBlock.yoy_drift_c,
-      });
-
-      // Last stop event — combined across both tables.
-      const lastEvent = stopReasonAggregator.findLastStopEvent(db, ip, slave);
-
-      const node = {
-        inverter: inv,
-        ip,
-        slave,
-        health_score: scoreResult.score,
-        tier: scoreResult.tier,
-        frama_total: framaCount,
-        frama_branch1: stopReasonAggregator.countMotivesCombined(db, ip, slave, cutoffMs, [29]),
-        frama_branch2: stopReasonAggregator.countMotivesCombined(db, ip, slave, cutoffMs, [30]),
-        frama_branch3: stopReasonAggregator.countMotivesCombined(db, ip, slave, cutoffMs, [13]),
-        thermal_trips: thermalCount,
-        pi_ana_trips: piAnaCount,
-        temp_pe_now_c: tempC,
-        imbalance_pct: imbalancePct,
-        last_event_ms: lastEvent?.read_at_ms || null,
-        last_event_motive_name: lastEvent ? getMotiveLabel(lastEvent.motive_code) : null,
-        // v2.11.x Slice κ — two alarm masks for the UI to choose from:
-        //   • current_alarm_bits — OR-mask of the latest 5-min inv_alarms.
-        //     Reflects "anything raised in the last 5 min". May include bits
-        //     that have since cleared.
-        //   • live_alarm_bits — OR-mask of every uncleared `alarms` row for
-        //     (inverter, unit). Authoritative current state from the alarms
-        //     episode table.
-        current_alarm_bits: currentAlarmBits,
-        live_alarm_bits:    getLiveAlarmBitmap(inv, slave),
-        // Freshness — surfaces "offline" rows without a second query.
-        last_param_ts_ms: paramRows?.[0]?.ts_ms || null,
-        is_online_now: paramRows?.[0]?.ts_ms != null
-          && (now - paramRows[0].ts_ms) < 10 * 60 * 1000,
-        // v2.11.0 Phase 2.1 — YoY thermal drift (null until baseline ready)
-        yoy_drift_c: yoyBlock.yoy_drift_c,
-        baseline_ready: !!yoyBlock.progress?.ready,
-        baseline_progress_ratio: Number((yoyBlock.progress?.ratio || 0).toFixed(3)),
-        baseline_computed_days: yoyBlock.progress?.computed_days || 0,
-        scoring_phase: scoreResult.weights_used?.phase || "phase1",
-      };
-
-      // v2.11.x Slice κ.3 — Critical alarm-pattern precursors (forensic).
-      const critPatterns = loadCriticalPatterns(inv, slave, now);
-      node.critical_patterns = critPatterns.map((p) => ({
-        key: p.key,
-        hex: p.hex,
-        label: p.label,
-        severity: p.severity,
-        count_in_window: p.count_in_window,
-        last_seen_ts: p.last_seen_ts,
-        recurring: p.recurring,
-      }));
-      node.worst_pattern_severity = criticalAlarmPatterns.worstSeverity(critPatterns);
-      node.has_critical_pattern = criticalAlarmPatterns.hasAnyCriticalPattern(critPatterns);
-
-      nodes.push(node);
-
-      // Count tiers
-      if (scoreResult.tier) {
-        tierCounts[scoreResult.tier]++;
-      } else {
-        tierCounts.offline++;
-      }
-
-      // Track average imbalance
-      if (typeof imbalancePct === "number") {
-        totalImbalance += imbalancePct;
-        imbalanceCount++;
-      }
-    }
+    const data = computeIgbtFleetSummary(windowDays);
 
     res.json({
       ok: true,
-      generated_at_ms: now,
+      generated_at_ms: Date.now(),
       rolling_window_days: windowDays,
-      nodes,
-      summary: {
-        total_nodes: nodes.length,
-        healthy_count: tierCounts.healthy,
-        watch_count: tierCounts.watch,
-        aging_count: tierCounts.aging,
-        eol_count: tierCounts.eol,
-        offline_count: tierCounts.offline,
-        avg_imbalance_pct: imbalanceCount > 0 ? totalImbalance / imbalanceCount : 0,
-      },
+      ...data,
     });
   } catch (err) {
     console.error("[IGBT] /api/igbt/fleet error:", err.message);
@@ -14555,6 +14559,30 @@ app.get("/api/igbt/fleet.csv", (req, res) => {
     res.send(csv);
   } catch (err) {
     console.error("[IGBT] /api/igbt/fleet.csv error:", err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// GET /api/igbt/node/:inverter/:slave/history — Fetch historical snapshots for trend charts
+app.get("/api/igbt/node/:inverter/:slave/history", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
+
+  try {
+    const inv = parseInt(req.params.inverter, 10);
+    const slave = parseInt(req.params.slave, 10);
+    const limitDays = Math.max(1, Math.min(365, parseInt(req.query.days || "30", 10)));
+    const cutoffMs = Date.now() - limitDays * 24 * 60 * 60 * 1000;
+
+    const rows = db.prepare(`
+      SELECT timestamp_ms, score, tier, temp_pe_now_c, imbalance_pct
+      FROM igbt_health_snapshot
+      WHERE inverter = ? AND slave = ? AND timestamp_ms >= ?
+      ORDER BY timestamp_ms ASC
+    `).all(inv, slave, cutoffMs);
+
+    res.json({ ok: true, data: rows });
+  } catch (err) {
+    console.error("[IGBT] /api/igbt/node/history error:", err.message);
     res.status(500).json({ ok: false, error: err.message });
   }
 });
@@ -20356,8 +20384,21 @@ app.post("/api/settings", (req, res) => {
     eodPacCleanThresholdW,
     solarWindowStartHour,
     crashGapRatio,
+    ipConfig,
   } =
     req.body || {};
+
+  if (ipConfig !== undefined) {
+    const safeIpConfig = sanitizeIpConfig(ipConfig);
+    updates.ipConfigJson = JSON.stringify(safeIpConfig);
+    mirrorIpConfigToLegacyFiles(safeIpConfig);
+    try { backfillAuditIpsFromConfig(); } catch (_) {}
+    try { pastDailyReportCache.clear(); } catch (_) {}
+    try { pastReportSummaryCache.clear(); } catch (_) {}
+    if (typeof poller !== "undefined" && !isRemoteMode()) {
+      try { poller.setIpConfigSnapshot(safeIpConfig); } catch (_) {}
+    }
+  }
 
   if (operationMode !== undefined) {
     updates.operationMode = sanitizeOperationMode(operationMode, "gateway");
@@ -20838,7 +20879,8 @@ app.post("/api/settings", (req, res) => {
   if (
     modeAfter !== modeBefore ||
     remoteGatewayAfter !== remoteGatewayBefore ||
-    remoteTokenAfter !== remoteTokenBefore
+    remoteTokenAfter !== remoteTokenBefore ||
+    ipConfig !== undefined
   ) {
     applyRuntimeMode();
     todayEnergyCache.ts = 0; // force immediate refresh; replicated DB data is now available
@@ -25108,6 +25150,73 @@ async function _prunDailyParamRetention() {
 }
 setTimeout(_prunDailyParamRetention, 6 * 60 * 1000).unref();            // first run after 6 min (offset from stopReasons)
 setInterval(_prunDailyParamRetention, 6 * 60 * 60 * 1000).unref();      // every 6 h thereafter
+
+// ─── v2.11.x Phase 2 — IGBT health snapshot writer ───────────────────────────
+// Captures computed scores and telemetry every 5 min (gateway-only) so the
+// trend chart in the Asset Health drilldown panel has time-series data to plot.
+// Schema: igbt_health_snapshot (timestamp_ms, inverter, slave, score, tier,
+//   thermal_trips, frama_total, pi_ana_trips, temp_pe_now_c, imbalance_pct,
+//   alarm_bits) — PRIMARY KEY (timestamp_ms, inverter, slave).
+// Retention: rows older than 90 days are pruned every 6 h.
+const _igbtSnapshotInsert = db.prepare(`
+  INSERT OR REPLACE INTO igbt_health_snapshot
+    (timestamp_ms, inverter, slave, score, tier,
+     thermal_trips, frama_total, pi_ana_trips, temp_pe_now_c, imbalance_pct, alarm_bits)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`);
+const _igbtSnapshotDeleteOld = db.prepare(`
+  DELETE FROM igbt_health_snapshot WHERE timestamp_ms < ?
+`);
+
+function _captureIgbtHealthSnapshots() {
+  if (isRemoteMode()) return;            // gateway-only
+  try {
+    const tsMs = Date.now();
+    // Use a fixed 90-day window for the score inputs — mirrors what the
+    // fleet API does when windowDays is at default.
+    const data = computeIgbtFleetSummary(90);
+    const insertMany = db.transaction((nodes) => {
+      for (const node of nodes) {
+        _igbtSnapshotInsert.run(
+          tsMs,
+          node.inverter,
+          node.slave,
+          node.health_score != null ? node.health_score : null,
+          node.tier || null,
+          node.thermal_trips ?? null,
+          node.frama_total ?? null,
+          node.pi_ana_trips ?? null,
+          node.temp_pe_now_c != null ? node.temp_pe_now_c : null,
+          node.imbalance_pct != null ? node.imbalance_pct : null,
+          node.current_alarm_bits ?? null,
+        );
+      }
+    });
+    insertMany(data.nodes || []);
+  } catch (err) {
+    console.warn("[igbt-snapshot] capture failed:", err?.message || err);
+  }
+}
+
+function _pruneIgbtHealthSnapshots() {
+  if (isRemoteMode()) return;
+  try {
+    const cutoff = Date.now() - 90 * 24 * 60 * 60 * 1000;
+    const info = _igbtSnapshotDeleteOld.run(cutoff);
+    if (info.changes > 0) {
+      console.log(`[igbt-snapshot] pruned ${info.changes} rows older than 90 d`);
+    }
+  } catch (err) {
+    console.warn("[igbt-snapshot] prune failed:", err?.message || err);
+  }
+}
+
+// First capture 3 min after boot (let poller stabilise), then every 5 min.
+setTimeout(_captureIgbtHealthSnapshots, 3 * 60 * 1000).unref();
+setInterval(_captureIgbtHealthSnapshots, 5 * 60 * 1000).unref();
+// Prune once at boot (10 min offset) then every 6 h.
+setTimeout(_pruneIgbtHealthSnapshots, 10 * 60 * 1000).unref();
+setInterval(_pruneIgbtHealthSnapshots, 6 * 60 * 60 * 1000).unref();
 
 // ─── v2.11.x Slice κ.3 — Critical Alarm Pattern auto-block enforcer ──────────
 // Operator rule (2026-05-11): "2-day recurring 0x0240 or 0x0210 episode count
