@@ -16452,6 +16452,16 @@ function showToast(html, severity = "fault", ttlMs = 8000) {
   );
 }
 
+function hideToast() {
+  const toast = $("alarmToast");
+  if (!toast) return;
+  const items = toast.querySelectorAll(".toast-item");
+  items.forEach(item => item.remove());
+  if (typeof _renderToastSummary === "function") {
+    _renderToastSummary();
+  }
+}
+
 async function refreshAlarmBadge() {
   try {
     const rows = await api("/api/alarms/active");

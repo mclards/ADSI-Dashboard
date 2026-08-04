@@ -20321,7 +20321,52 @@ app.post("/api/substation-meter/:date/recalculate", (req, res) => {
   res.status(202).json({ ok: true, message: `QA recalculation for ${dateStr} scheduled (5s debounce).` });
 });
 
-app.post("/api/settings", (req, res) => {
+
+// --- REMOTE MODE PROXY SUPPORT ---
+async function _applySettingsPostRemote(req, res, targetUrl, token, modeBefore) {
+  try {
+    const payload = req.body;
+    // Strip local-only config before proxying to gateway
+    if (payload.remoteGatewayUrl !== undefined) delete payload.remoteGatewayUrl;
+    if (payload.remoteApiToken !== undefined) delete payload.remoteApiToken;
+    if (payload.cameraConfig !== undefined) delete payload.cameraConfig;
+    if (payload.operationMode === 'gateway') delete payload.operationMode;
+    
+    // Attempt remote save
+    const { default: fetch } = await import('node-fetch');
+    const response = await fetch(`${targetUrl}/api/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-auth-token': token },
+      body: JSON.stringify(payload)
+    });
+    
+    if (response.ok) {
+      // Allow local update of things like operationMode and token if they exist in original request
+      // But we intercept the rest. Actually, let's just let the normal save proceed locally too, 
+      // so local DB matches remote gateway, but we swallow the fact it was done locally.
+      return { remoteSuccess: true, response: await response.json() };
+    } else {
+      return { remoteSuccess: false, status: response.status, text: await response.text() };
+    }
+  } catch (err) {
+    return { remoteSuccess: false, error: err.message };
+  }
+}
+
+
+app.post("/api/settings", async (req, res) => {
+  const currentMode = readOperationMode();
+  if (currentMode === 'remote' && req.body.operationMode !== 'gateway') {
+    const targetUrl = getRemoteGatewayBaseUrl();
+    const token = getRemoteApiToken();
+    if (targetUrl && token) {
+      const remoteRes = await _applySettingsPostRemote(req, res, targetUrl, token, currentMode);
+      if (!remoteRes.remoteSuccess) {
+         return res.status(500).json({ ok: false, error: 'Remote save failed', details: remoteRes });
+      }
+    }
+  }
+
   const updates = {};
   let exportDirCreated = false;
   let exportDirResolved = "";

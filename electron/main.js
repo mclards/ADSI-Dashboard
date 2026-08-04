@@ -418,7 +418,7 @@ const SERVER_HTTP = new URL(SERVER_URL);
 const SERVER_HOST = SERVER_HTTP.hostname || "127.0.0.1";
 const SERVER_PORT = Number(SERVER_HTTP.port || 80);
 const TOPOLOGY_URL = `${SERVER_URL}/topology.html`;
-const IP_CONFIG_URL = `${SERVER_URL}/ip-config.html`;
+const GLOBAL_CONFIG_URL = `${SERVER_URL}/global-config.html`;
 const POLL_INTERVAL = 600;
 const POLL_TIMEOUT = 120000;
 const INITIAL_LOAD_RETRY_DELAY = 1200;
@@ -577,7 +577,7 @@ let mainWin = null;
 let loadingWin = null;
 let loginWin = null;
 let topologyWin = null;
-let ipConfigWin = null;
+let globalConfigWin = null;
 let calibratorWin = null;
 // Mirrors `allowMainWindowClose` for the standalone Utility Tool window.
 // Set true after the operator confirms the exit prompt (or by callers that
@@ -2336,7 +2336,7 @@ function registerShortcutsOnce() {
   });
   globalShortcut.register("Control+I", () => {
     const focused = BrowserWindow.getFocusedWindow() || mainWin || null;
-    openIpConfigWindowGuarded(focused).catch((err) => {
+    openGlobalConfigWindowGuarded(focused).catch((err) => {
       console.warn("[main] ip-config shortcut guard failed:", err.message);
     });
   });
@@ -3558,7 +3558,7 @@ function broadcastLicenseStatus(force = false) {
   ]);
   if (!force && signature === lastBroadcastLicenseSignature) return status;
   lastBroadcastLicenseSignature = signature;
-  [mainWin, topologyWin, ipConfigWin, loginWin].forEach((win) => maybeSendLicenseStatus(win, status));
+  [mainWin, topologyWin, globalConfigWin, loginWin].forEach((win) => maybeSendLicenseStatus(win, status));
   return status;
 }
 
@@ -4641,12 +4641,12 @@ function openTopologyWindow() {
   });
 }
 
-function openIpConfigWindow() {
-  if (ipConfigWin && !ipConfigWin.isDestroyed()) {
-    focusWindow(ipConfigWin);
+function openGlobalConfigWindow() {
+  if (globalConfigWin && !globalConfigWin.isDestroyed()) {
+    focusWindow(globalConfigWin);
     return;
   }
-  ipConfigWin = new BrowserWindow({
+  globalConfigWin = new BrowserWindow({
     width: 1320,
     height: 900,
     minWidth: 980,
@@ -4663,15 +4663,15 @@ function openIpConfigWindow() {
       webSecurity: true,
     },
   });
-  ipConfigWin.loadURL(IP_CONFIG_URL).catch((err) => {
+  globalConfigWin.loadURL(GLOBAL_CONFIG_URL).catch((err) => {
     console.error("[main] load ip-config error:", err.message);
   });
-  ipConfigWin.once("ready-to-show", () => {
-    focusWindow(ipConfigWin);
+  globalConfigWin.once("ready-to-show", () => {
+    focusWindow(globalConfigWin);
     broadcastLicenseStatus(true);
   });
-  ipConfigWin.on("closed", () => {
-    ipConfigWin = null;
+  globalConfigWin.on("closed", () => {
+    globalConfigWin = null;
   });
 }
 
@@ -5182,14 +5182,14 @@ async function openTopologyWindowGuarded(ownerWin) {
   return true;
 }
 
-async function openIpConfigWindowGuarded(_ownerWin) {
+async function openGlobalConfigWindowGuarded(_ownerWin) {
   // IP Configuration is editable in BOTH gateway and remote (client) mode.
   // In remote mode the save proxies to the gateway (authoritative) and is then
   // mirrored back into the local store — see _applyIpConfigPostRemote in
   // server/index.js. The page itself shows a remote-mode banner and skips the
   // local LAN reachability scan, so the operator always knows the change lands
   // on the gateway. (Topology / Calibrator remain gateway-only.)
-  openIpConfigWindow();
+  openGlobalConfigWindow();
   return true;
 }
 
@@ -5601,7 +5601,7 @@ ipcMain.on("open-topology-window", async (event) => {
 });
 ipcMain.on("open-ip-config-window", async (event) => {
   const ownerWin = BrowserWindow.fromWebContents(event.sender) || null;
-  await openIpConfigWindowGuarded(ownerWin);
+  await openGlobalConfigWindowGuarded(ownerWin);
 });
 ipcMain.on("open-calibrator", async (event, theme) => {
   if (_calibratorSpawnInProgress) return;
