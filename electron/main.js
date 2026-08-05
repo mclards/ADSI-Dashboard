@@ -68,7 +68,21 @@ process.on("uncaughtException", (err) => {
 });
 process.on("unhandledRejection", (reason) => _routeStartupFatal(reason, "unhandledRejection"));
 
-// ── A2. safeRequire — wrap every third-party require ─────────────────────────
+// ── A2. Memory & Performance Optimizations ─────────────────────────────────────
+// Limit V8 engine's garbage collection heap to prevent memory bloat in long-
+// running instances. Default V8 allows 1GB+; we cap it at 256MB per process.
+app.commandLine.appendSwitch("js-flags", "--max-old-space-size=256 --expose-gc");
+
+// Disable unused Chromium features to save ~50MB of baseline RAM overhead
+app.commandLine.appendSwitch("disable-gpu-memory-buffer-video-frames");
+app.commandLine.appendSwitch("disable-features", "SharedArrayBuffer");
+app.commandLine.appendSwitch("disable-logging");
+app.commandLine.appendSwitch("disable-software-rasterizer");
+// Disable aggressive background networking features not needed for local dashboards
+app.commandLine.appendSwitch("disable-background-networking");
+app.commandLine.appendSwitch("disable-metrics");
+
+// ── A3. safeRequire — wrap every third-party require ─────────────────────────
 // Any module loaded from app.asar can throw SyntaxError on torn writes.
 // Capture the failure, continue booting, and let the integrity gate decide
 // whether to show the recovery dialog.
