@@ -291,6 +291,10 @@
             <span class="toolbar-info" title="Highest combined plant AC output recorded during the day.">Peak Plant Output: <b>—</b></span>
             <span class="toolbar-info" title="Number of inverters that contributed energy data.">Reporting Inverters: <b>—</b></span>
             <span class="toolbar-info" title="Most recent interval with recorded data.">Latest Interval: <b>—</b></span>
+            <button id="popout-btn-analytics" class="btn-popout" type="button"
+                    title="Open Analytics in a new window">
+              <span class="mdi mdi-open-in-new" aria-hidden="true"></span>
+            </button>
           </div>
         </div>
         <div class="chart-grid analytics-grid" id="analyticsCharts"></div>
@@ -322,6 +326,10 @@
           </div>
           <div class="tl-right">
             <span class="toolbar-info" id="alarmCount" title="Total alarm records loaded for the selected filters.">—</span>
+            <button id="popout-btn-alarms" class="btn-popout" type="button"
+                    title="Open Alarms in a new window">
+              <span class="mdi mdi-open-in-new" aria-hidden="true"></span>
+            </button>
           </div>
         </div>
         <div class="table-wrap">
@@ -995,6 +1003,14 @@
 
       <!-- --- PAGE: FORECAST ------------------------------------------------------- -->
       <section id="page-forecast" class="page">
+        <!-- Pop-out button overlay — forecast has no page-toolbar, so float it
+             in the top-right corner of the forecast-shell wrapper. -->
+        <div class="forecast-popout-bar">
+          <button id="popout-btn-forecast" class="btn-popout" type="button"
+                  title="Open Forecast in a new window">
+            <span class="mdi mdi-open-in-new" aria-hidden="true"></span>
+          </button>
+        </div>
         <div class="forecast-shell">
           <div class="forecast-main">
             <span class="smsg" id="forecastPageMsg"></span>
@@ -1061,6 +1077,10 @@
             </label>
             <button id="btnRefreshIgbt" class="btn btn-accent btn-xs" title="Refresh health scores from latest stop-reason and telemetry data.">
               <span class="mdi mdi-refresh" aria-hidden="true"></span><span>Refresh</span>
+            </button>
+            <button id="popout-btn-igbt-health" class="btn-popout" type="button"
+                    title="Open Asset Health in a new window">
+              <span class="mdi mdi-open-in-new" aria-hidden="true"></span>
             </button>
           </div>
         </div>

@@ -1,4 +1,4 @@
-﻿"use strict";
+"use strict";
 /**
  * main.js - Electron entry point for ADSI Inverter Dashboard
  * Starts a Python backend (PyInstaller EXE preferred, python script fallback).
@@ -579,6 +579,9 @@ let loginWin = null;
 let topologyWin = null;
 let globalConfigWin = null;
 let calibratorWin = null;
+// Pop-out windows: keyed by page name (analytics, alarms, forecast, igbt-health).
+// Using a Map prevents duplicate windows and allows focus-on-reclick.
+const popoutWindows = new Map();
 // Mirrors `allowMainWindowClose` for the standalone Utility Tool window.
 // Set true after the operator confirms the exit prompt (or by callers that
 // close the window programmatically, e.g. parent-app shutdown chain) so the
@@ -1789,6 +1792,11 @@ async function shutdownChildWebServerGracefully(proc) {
 async function stopRuntimeServices(reason = "application shutdown") {
   isAppShuttingDown = true;
   allowMainWindowClose = true;
+  // Destroy any open pop-out windows gracefully before tearing down services.
+  for (const [, win] of popoutWindows) {
+    try { if (!win.isDestroyed()) win.destroy(); } catch (_) {}
+  }
+  popoutWindows.clear();
   stopForecastModeSync();
   clearForecastRestartTimer();
   if (appUpdateAutoCheckTimer) {
@@ -4675,6 +4683,61 @@ function openGlobalConfigWindow() {
   });
 }
 
+// ── Pop-out window factory ───────────────────────────────────────────────────
+// Opens a secondary BrowserWindow showing a single dashboard page in popout
+// mode (?popout=<page>). Reuses the same SPA + Express server (port 3500),
+// same preload.js, and the same WebSocket feed — no extra polling or DB impact.
+// Pattern mirrors openGlobalConfigWindow() / calibrator window exactly.
+const POPOUT_ALLOWED = ["analytics", "alarms", "forecast", "igbt-health"];
+const POPOUT_TITLES = {
+  analytics:     "ADSI \u2013 Analytics",
+  alarms:        "ADSI \u2013 Alarms",
+  forecast:      "ADSI \u2013 Forecast",
+  "igbt-health": "ADSI \u2013 Asset Health",
+};
+
+function openPopoutWindow(page, theme) {
+  if (!POPOUT_ALLOWED.includes(page)) {
+    console.warn("[main] openPopoutWindow: rejected page:", page);
+    return;
+  }
+  const existing = popoutWindows.get(page);
+  if (existing && !existing.isDestroyed()) {
+    focusWindow(existing);
+    return;
+  }
+  const win = new BrowserWindow({
+    width: 1280,
+    height: 820,
+    minWidth: 900,
+    minHeight: 600,
+    icon: APP_ICON,
+    title: POPOUT_TITLES[page] || "ADSI Inverter Dashboard",
+    frame: true,
+    autoHideMenuBar: true,
+    backgroundColor: "#080c14",
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      nodeIntegration: false,
+      contextIsolation: true,
+      webSecurity: true,
+    },
+  });
+
+  let popoutUrl = `http://127.0.0.1:${SERVER_PORT}/?popout=${encodeURIComponent(page)}`;
+  const themeStr = String(theme || "").trim();
+  if (/^[a-z]+$/.test(themeStr)) {
+    popoutUrl += `&theme=${encodeURIComponent(themeStr)}`;
+  }
+  win.loadURL(popoutUrl).catch((err) =>
+    console.error(`[main] popout load error (${page}):`, err.message)
+  );
+  win.once("ready-to-show", () => focusWindow(win));
+  win.on("closed", () => { popoutWindows.delete(page); });
+  popoutWindows.set(page, win);
+}
+
 function terminateCalibratorProcesses() {
   try {
     if (calibratorPyProc && !calibratorPyProc.killed) {
@@ -5615,6 +5678,9 @@ ipcMain.on("open-calibrator", async (event, theme) => {
   } finally {
     _calibratorSpawnInProgress = false;
   }
+});
+ipcMain.on("open-popout-window", (event, { page, theme } = {}) => {
+  openPopoutWindow(page, theme);
 });
 ipcMain.handle("create-calibrator-shortcut", async () => {
   try {

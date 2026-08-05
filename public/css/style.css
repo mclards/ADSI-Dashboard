@@ -13445,6 +13445,22 @@ body.mode-transition-active {
   overflow-x: hidden;
   overflow-y: auto;
   padding-right: 4px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Forecast pop-out bar — in-flow at the top of the forecast section.
+   Flex row, right-aligned, minimal height. In normal mode this adds only
+   28px of space at the top of the forecast page (same height as btn-popout).
+   In popout-mode the bar gets a bit more breathing room since there's no
+   header chrome above. Does NOT use position:absolute to avoid overlay. */
+#page-forecast .forecast-popout-bar {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  padding: 4px 4px 0 0;
+  flex-shrink: 0;
+  height: 32px;
 }
 
 #page-forecast .forecast-shell {
@@ -18646,6 +18662,12 @@ body.mode-transition-active {
   grid-template-columns: 1fr;
   grid-template-rows: 1fr;
   gap: 0;
+  /* Establish a local stacking context so the panel's z-index wins over
+     the fleet-grid-wrapper's overflow-auto implicit stacking context.
+     Without this, overflow:auto on the wrapper creates its own stacking
+     context and can paint over the detail panel regardless of z-index. */
+  position: relative;
+  isolation: isolate;
 }
 
 #page-igbt-health .igbt-fleet-table-wrapper {
@@ -19416,20 +19438,24 @@ body.mode-transition-active {
 }
 
 #page-igbt-health .igbt-detail-panel {
-  grid-column: 1;
-  grid-row: 1;
+  /* Position:absolute takes the panel completely out of the grid flow and
+     overlays it on top of the card/table content. This is the only reliable
+     way to guarantee the panel wins over the igbt-fleet-grid-wrapper stacking
+     context created by overflow:auto — z-index tricks on grid items cannot
+     escape a sibling's implicit stacking context in Chromium. The panel
+     anchors to .igbt-page-body which has position:relative. */
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
   display: none;
   flex-direction: column;
   background: var(--surface);
   border-left: 1px solid var(--border);
   overflow: hidden;
-  /* Must sit above the fleet table's sticky <thead> (z-index: 10), otherwise
-     the table column headers bleed through and hide the close ✕ in the panel
-     header. Operator-reported regression 2026-05-11. */
-  z-index: 20;
+  z-index: 50;
   width: 40%;
-  margin-left: auto;
-  box-shadow: -4px 0 16px rgba(0, 0, 0, 0.35);
+  box-shadow: -4px 0 24px rgba(0, 0, 0, 0.45);
 }
 
 #page-igbt-health .igbt-detail-panel:not([hidden]) {
@@ -19854,7 +19880,7 @@ body.mode-transition-active {
 
   #page-igbt-health .igbt-detail-panel {
     width: 100%;
-    margin-left: 0;
+    right: 0;
     border-left: none;
     border-top: 1px solid var(--border);
   }
@@ -22114,6 +22140,70 @@ body.calib-session-active #fieldCalibrationSection {
    fleet grid before the JS route settles. */
 .calibrator-mode #main > .page:not(#page-field-calibration) {
   display: none !important;
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+   Pop-out window mode (.popout-mode)
+   Applied by handlePopoutMode() in app.js when ?popout=<page> is detected.
+   Hides the sidebar and titlebar chrome so the secondary window shows only
+   the target page, full-bleed. Zero effect on the normal dashboard.
+   ─────────────────────────────────────────────────────────────────────────── */
+.popout-mode #sideNav,
+.popout-mode #titlebar,
+.popout-mode #globalProgressRow,
+.popout-mode #licenseNotice {
+  display: none !important;
+}
+
+/* Reclaim the full window now that header + sidebar are gone. */
+.popout-mode #main {
+  top: 0 !important;
+  right: 0 !important;
+  left: 0 !important;
+  bottom: 0 !important;
+}
+
+/* Hide every page except the one being popped out (suppresses flash). */
+.popout-mode #main > .page:not(.active) {
+  display: none !important;
+}
+
+/* Pop-out buttons must not appear inside a popout window — prevents chains. */
+.popout-mode .btn-popout {
+  display: none !important;
+}
+
+/* ── Pop-out icon button ────────────────────────────────────────────────────
+   Small icon button that appears in the tl-right area of each eligible page
+   toolbar. Consistent with existing btn-outline aesthetics but smaller and
+   icon-only. Theme tokens ensure it adapts across dark / light / classic. */
+.btn-popout {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+.btn-popout:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.btn-popout:active {
+  opacity: 0.75;
+}
+.btn-popout .mdi {
+  font-size: 15px;
+  line-height: 1;
+  pointer-events: none;
 }
 
 /* Transport selector — only meaningful for the standalone calibrator (its

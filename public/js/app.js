@@ -27256,6 +27256,7 @@ async function init() {
     initConfirmModal();
     initPromptModal();
     setupNav();
+    initPopoutButtons();
     initSettingsSectionNav();
     // v2.8.10 Phase C: one-shot check of /api/health/db-integrity.
     // If the boot-time probe restored adsi.db from a backup slot, show a
@@ -33960,3 +33961,135 @@ async function _fcalHandleToggleWrites() {
   window.addEventListener("pagehide", _calibTeardown);
   window.addEventListener("beforeunload", _calibTeardown);
 })();
+
+// ── v2.12.x Pop-out window boot hook — ?popout=<page> ─────────────────────
+// When main.js spawns a secondary BrowserWindow it loads this same SPA with
+// ?popout=<page>. This IIFE detects that param, hides the fleet chrome, applies
+// the carried theme, and routes straight to the target page. Zero effect on the
+// normal dashboard (no ?popout → this is a complete no-op).
+// Pattern mirrors handleCalibratorMode() exactly.
+(function handlePopoutMode() {
+  var popoutPage = "";
+  try {
+    popoutPage = new URLSearchParams(window.location.search).get("popout") || "";
+  } catch (_) {
+    popoutPage = "";
+  }
+
+  var POPOUT_ALLOWED = ["analytics", "alarms", "forecast", "igbt-health"];
+  if (!popoutPage || !POPOUT_ALLOWED.includes(popoutPage)) return;
+
+  // Apply popout-mode class to hide sidebar + titlebar chrome.
+  try { document.body.classList.add("popout-mode"); } catch (_) {}
+
+  // Override the window title so the OS taskbar shows a useful name.
+  var POPOUT_TITLES = {
+    analytics:     "ADSI \u2013 Analytics",
+    alarms:        "ADSI \u2013 Alarms",
+    forecast:      "ADSI \u2013 Forecast",
+    "igbt-health": "ADSI \u2013 Asset Health",
+  };
+  function setPopoutTitle() {
+    try {
+      var t = POPOUT_TITLES[popoutPage] || "ADSI Inverter Dashboard";
+      if (document.title !== t) document.title = t;
+    } catch (_) {}
+  }
+  setPopoutTitle();
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", setPopoutTitle);
+  }
+  window.addEventListener("load", setPopoutTitle);
+
+  // Apply the theme carried in ?theme= (same as calibrator carry-over).
+  // Phase 1 — early apply before first paint (before DOM is fully settled).
+  // Phase 2 — re-assert on window load, AFTER init() → initThemeToggle()
+  // reads localStorage and would otherwise overwrite our setting. Both windows
+  // share the same origin (port 3500) and thus the same localStorage, so the
+  // only reliable way to keep the popout's theme independent is to re-apply
+  // after the init chain completes. We do NOT persist, so the main window's
+  // stored theme is never altered by opening a popout.
+  var qsTheme = "";
+  try {
+    qsTheme = String(
+      new URLSearchParams(window.location.search).get("theme") || "",
+    ).trim();
+  } catch (_) {}
+
+  function applyPopoutTheme() {
+    try {
+      if (
+        qsTheme &&
+        typeof SUPPORTED_THEMES !== "undefined" &&
+        SUPPORTED_THEMES.includes(qsTheme) &&
+        typeof applyTheme === "function"
+      ) {
+        applyTheme(qsTheme, false); // do NOT persist — leave main window's stored theme alone
+      } else if (typeof applyTheme === "function" && typeof getStoredTheme === "function") {
+        applyTheme(getStoredTheme(), false);
+      }
+    } catch (err) {
+      console.warn("[popout] theme apply failed:", err?.message || err);
+    }
+  }
+
+  // Phase 1: early apply (suppresses pre-init flash).
+  applyPopoutTheme();
+  // Phase 2: re-assert after load (overrides initThemeToggle's localStorage read).
+  window.addEventListener("load", applyPopoutTheme);
+
+  // Route to the target page. Re-attempt until init() finishes its own
+  // default switchPage call (mirrors the calibrator retry pattern).
+  var _popoutRouted = false;
+  var _popoutAttempts = 0;
+  function routeToPopoutPage() {
+    if (_popoutRouted) return;
+    _popoutAttempts += 1;
+    try {
+      if (typeof switchPage === "function") {
+        switchPage(popoutPage);
+        if (
+          typeof State === "object" && State &&
+          State.currentPage === popoutPage
+        ) {
+          _popoutRouted = true;
+          return;
+        }
+      }
+    } catch (err) {
+      console.warn("[popout] route failed:", err?.message || err);
+    }
+    if (_popoutAttempts < 60) setTimeout(routeToPopoutPage, 250);
+  }
+  routeToPopoutPage();
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", routeToPopoutPage);
+  }
+  window.addEventListener("load", routeToPopoutPage);
+})();
+
+// ── initPopoutButtons — wires pop-out icon buttons in page toolbars ─────────
+// Called once from init(). Safe to call in both normal and popout-mode windows;
+// in popout-mode the buttons are CSS-hidden so the handlers are registered but
+// never reachable by the user (prevents recursive window chains).
+function initPopoutButtons() {
+  var POPOUT_PAGES = ["analytics", "alarms", "forecast", "igbt-health"];
+  POPOUT_PAGES.forEach(function (page) {
+    var btn = document.getElementById("popout-btn-" + page);
+    if (!btn) return;
+    btn.addEventListener("click", function () {
+      try {
+        if (window.electronAPI && typeof window.electronAPI.openPopoutWindow === "function") {
+          var theme = document.documentElement.getAttribute("data-theme") || "dark";
+          window.electronAPI.openPopoutWindow(page, theme);
+        } else {
+          // Fallback for non-Electron (dev server / browser preview): open in new tab.
+          var url = "/?popout=" + encodeURIComponent(page);
+          window.open(url, "_blank", "noopener");
+        }
+      } catch (err) {
+        console.warn("[popout] open window failed:", err?.message || err);
+      }
+    });
+  });
+}
