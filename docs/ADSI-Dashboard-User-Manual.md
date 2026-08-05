@@ -1,12 +1,12 @@
 # ADSI Inverter Dashboard User Manual
 
-**Applies to:** ADSI Inverter Dashboard `v2.11.8`
+**Applies to:** ADSI Inverter Dashboard `v2.12.0`
 **Document type:** Operator and administrator reference  
 **Scope:** Main dashboard, forecast workspace, settings center, cloud backup, standby database workflow, alarm handling, exports, IP Configuration, and Topology
 
 ---
 
-## Service documentation (v2.11.8+)
+## Service documentation (v2.12.0+)
 
 Four Ingeteam reference PDFs ship with the installer under `docs/` and are
 also hosted on GitHub for in-app auto-download from the alarm drilldown:
@@ -228,6 +228,17 @@ The right-side navigation contains the main pages:
 - `Report`
 - `Export`
 - `Settings`
+
+### 3.4 Pop-out Windows
+
+For multi-monitor setups or complex monitoring needs, the dashboard supports isolating specific tools into separate, independent windows. This allows you to monitor live dashboards (like Analytics or Asset Health) simultaneously with other activities without interrupting data polling.
+
+To open a pop-out window:
+1. Navigate to a supported page (**Analytics**, **Forecast**, **Alarms**, or **Asset Health**).
+2. Click the small "pop-out" icon (`↗`) located in the top-right toolbar of the page.
+3. The selected tool will open in a new window with a simplified interface (no side navigation or global header). Both windows will continue to receive live real-time updates independently.
+
+*Note: You can only have one pop-out window active per tool at any given time. Clicking the button again will focus the existing window rather than opening a duplicate.*
 
 The `About` card also shows:
 
