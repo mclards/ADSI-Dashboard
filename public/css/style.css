@@ -22151,9 +22151,12 @@ body.calib-session-active #fieldCalibrationSection {
    ─────────────────────────────────────────────────────────────────────────── */
 .popout-mode #sideNav,
 .popout-mode #titlebar,
-.popout-mode #globalProgressRow,
 .popout-mode #licenseNotice {
   display: none !important;
+}
+
+.popout-mode #globalProgressRow {
+  top: 0 !important;
 }
 
 /* Reclaim the full window now that header + sidebar are gone. */
