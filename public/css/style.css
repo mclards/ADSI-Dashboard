@@ -13443,7 +13443,7 @@ body.mode-transition-active {
 /* Settings rehab: replace duplicated top bars with one sidebar workspace. */
 #page-forecast {
   overflow-x: hidden;
-  overflow-y: auto;
+  overflow-y: hidden;
   padding-right: 4px;
   display: flex;
   flex-direction: column;
@@ -13469,7 +13469,8 @@ body.mode-transition-active {
   flex: 1;
   min-height: 0;
   padding: 0;
-  overflow: visible;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 #page-forecast .forecast-page-sections > .sgroup.settings-card {
