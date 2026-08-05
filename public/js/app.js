@@ -4594,6 +4594,16 @@ function setupNav() {
 
   nav.querySelectorAll(".nav-btn").forEach((btn) => {
     btn.addEventListener("click", () => switchPage(btn.dataset.page));
+    btn.addEventListener("contextmenu", (e) => {
+      const popoutPages = ["analytics", "alarms", "forecast", "igbt-health"];
+      if (popoutPages.includes(btn.dataset.page)) {
+        e.preventDefault();
+        if (window.electronAPI && typeof window.electronAPI.showNavContextMenu === "function") {
+          const theme = document.documentElement.getAttribute("data-theme") || "dark";
+          window.electronAPI.showNavContextMenu(btn.dataset.page, theme);
+        }
+      }
+    });
   });
   initNavDrag();
 }

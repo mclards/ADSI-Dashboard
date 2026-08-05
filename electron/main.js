@@ -5696,6 +5696,17 @@ ipcMain.on("open-calibrator", async (event, theme) => {
 ipcMain.on("open-popout-window", (event, { page, theme } = {}) => {
   openPopoutWindow(page, theme);
 });
+
+ipcMain.on("show-nav-context-menu", (event, { page, theme }) => {
+  const template = [
+    {
+      label: "Open in New Window",
+      click: () => openPopoutWindow(page, theme)
+    }
+  ];
+  const menu = Menu.buildFromTemplate(template);
+  menu.popup(BrowserWindow.fromWebContents(event.sender));
+});
 ipcMain.handle("create-calibrator-shortcut", async () => {
   try {
     if (process.platform !== "win32") {
