@@ -4702,12 +4702,13 @@ function openGlobalConfigWindow() {
 // mode (?popout=<page>). Reuses the same SPA + Express server (port 3500),
 // same preload.js, and the same WebSocket feed — no extra polling or DB impact.
 // Pattern mirrors openGlobalConfigWindow() / calibrator window exactly.
-const POPOUT_ALLOWED = ["analytics", "alarms", "forecast", "igbt-health"];
+const POPOUT_ALLOWED = ["analytics", "alarms", "forecast", "igbt-health", "camera"];
 const POPOUT_TITLES = {
   analytics:     "ADSI \u2013 Analytics",
   alarms:        "ADSI \u2013 Alarms",
   forecast:      "ADSI \u2013 Forecast",
   "igbt-health": "ADSI \u2013 Asset Health",
+  camera:        "ADSI \u2013 Camera Viewer",
 };
 
 function openPopoutWindow(page, theme) {
@@ -4739,7 +4740,7 @@ function openPopoutWindow(page, theme) {
     },
   });
 
-  let popoutUrl = `http://127.0.0.1:${SERVER_PORT}/?popout=${encodeURIComponent(page)}`;
+  let popoutUrl = `${SERVER_URL}/?popout=${encodeURIComponent(page)}`;
   const themeStr = String(theme || "").trim();
   if (/^[a-z]+$/.test(themeStr)) {
     popoutUrl += `&theme=${encodeURIComponent(themeStr)}`;
@@ -4747,9 +4748,23 @@ function openPopoutWindow(page, theme) {
   win.loadURL(popoutUrl).catch((err) =>
     console.error(`[main] popout load error (${page}):`, err.message)
   );
-  win.once("ready-to-show", () => focusWindow(win));
-  win.on("closed", () => { popoutWindows.delete(page); });
+  win.once("ready-to-show", () => {
+    focusWindow(win);
+    if (page === "camera") win.maximize();
+  });
+  win.on("closed", () => {
+    popoutWindows.delete(page);
+    // If a camera popout just closed, tell the main window to resume its camera.
+    if (page === "camera" && mainWin && !mainWin.isDestroyed()) {
+      try { mainWin.webContents.send("camera-popout-closed"); } catch (_) {}
+    }
+  });
   popoutWindows.set(page, win);
+  // If this is a camera popout, tell the main window to pause its camera player
+  // so go2rtc can accept the popout's connection (only one client per stream).
+  if (page === "camera" && mainWin && !mainWin.isDestroyed()) {
+    try { mainWin.webContents.send("camera-popout-opened"); } catch (_) {}
+  }
 }
 
 function terminateCalibratorProcesses() {
@@ -5695,6 +5710,10 @@ ipcMain.on("open-calibrator", async (event, theme) => {
 });
 ipcMain.on("open-popout-window", (event, { page, theme } = {}) => {
   openPopoutWindow(page, theme);
+});
+ipcMain.on("camera-popout-ready", () => {
+  // Popout renderer signals it has successfully started the camera stream.
+  // Nothing extra needed in main — just an acknowledgement hook for future use.
 });
 
 ipcMain.on("show-nav-context-menu", (event, { page, theme }) => {

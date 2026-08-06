@@ -4758,7 +4758,7 @@ function initNavDrag() {
 
 function switchPage(page) {
   State.currentPage = page;
-  if (page !== "inverters" && cameraPlayer) {
+  if (page !== "inverters" && page !== "camera" && cameraPlayer) {
     cameraPlayer.stop();
   }
   if (page !== "analytics") {
@@ -4839,10 +4839,16 @@ function switchPage(page) {
   if (btn) btn.classList.add("active");
   if (window.innerWidth <= 1200) setSideNavOpen(false, true);
 
-  if (page === "inverters") {
-    scheduleInverterCardsUpdate(true);
-    if ($("cameraCard") && cameraPlayer) {
-      cameraPlayer.start();
+  if (page === "inverters" || page === "camera") {
+    if (page === "inverters") scheduleInverterCardsUpdate(true);
+    if ($("cameraCard") && cameraPlayer && !cameraPlayer._pausedForPopout) {
+      const _camIsPopout = document.body.classList.contains("popout-mode");
+      if (_camIsPopout && !cameraPlayer.active) {
+        // Popout: give go2rtc time to release the main window's stream slot
+        setTimeout(() => { if (!cameraPlayer.active) cameraPlayer.start(); }, 800);
+      } else {
+        cameraPlayer.start();
+      }
     }
   }
   if (page === "alarms") initAlarmsPage();
@@ -12037,8 +12043,19 @@ function buildInverterGrid() {
   if (!camPlaced) ordered.push("cam");
   const frag = document.createDocumentFragment();
   frag.appendChild(buildBulkControlPanel());
+  const isPopoutCam = document.body.classList.contains("popout-mode") && 
+                      (new URLSearchParams(window.location.search).get("popout") === "camera");
+
   for (const i of ordered) {
-    if (i === "cam") frag.appendChild(buildCameraCard());
+    if (i === "cam") {
+      const camCard = buildCameraCard();
+      if (isPopoutCam && $("page-camera")) {
+        $("page-camera").innerHTML = ""; // Prevent duplicates
+        $("page-camera").appendChild(camCard);
+      } else {
+        frag.appendChild(camCard);
+      }
+    }
     else frag.appendChild(buildInverterCard(i, nodes));
   }
   grid.appendChild(frag);
@@ -12739,6 +12756,9 @@ function buildCameraCard() {
         </button>
         <button class="cam-ctrl-btn" id="btnCamMute" title="Toggle mute" style="display:none">
           <span class="mdi mdi-volume-off"></span>
+        </button>
+        <button class="cam-ctrl-btn" id="btnCamPopout" title="Open camera in a new window">
+          <span class="mdi mdi-open-in-new"></span>
         </button>
         <button class="cam-ctrl-btn" id="btnCamFullscreen" title="Fullscreen">
           <span class="mdi mdi-fullscreen"></span>
@@ -15361,7 +15381,7 @@ let cameraPlayer = null;
 
 const CAM_DEFAULTS = {
   mode: "hls",
-  go2rtcIp: "100.93.11.9",
+  go2rtcIp: "100.81.240.80",
   go2rtcPort: "1984",
   streamKey: "tapo_cam",
   ip: "192.168.4.211",
@@ -15445,6 +15465,9 @@ function camLoadSettings() {
     const dbVal = fromDb ? fromDb[k] : undefined;
     if (dbVal != null && dbVal !== "") {
       s[k] = String(dbVal);
+      // Keep localStorage in sync with the authoritative DB value so
+      // stale localStorage from old sessions cannot override a fresh DB value.
+      try { localStorage.setItem(lsKey, s[k]); } catch (_) {}
     } else {
       s[k] = localStorage.getItem(lsKey) || CAM_DEFAULTS[k];
     }
@@ -15760,6 +15783,35 @@ function initCameraPlayer() {
 
   cameraPlayer = new CameraPlayer();
 
+  // ── Electron IPC: camera popout lifecycle ──
+  // go2rtc only supports one concurrent WebRTC/HLS client per stream key.
+  // When a camera popout opens we must stop the main window's player so the
+  // popout can claim the stream. When the popout closes we resume here.
+  // This wiring only applies to the main (non-popout) window.
+  const _isPopoutWindow = document.body.classList.contains("popout-mode");
+  if (!_isPopoutWindow && window.electronAPI) {
+    if (typeof window.electronAPI.onCameraPopoutOpened === "function") {
+      window.electronAPI.onCameraPopoutOpened(() => {
+        if (cameraPlayer && cameraPlayer.active) {
+          cameraPlayer.stop();
+          cameraPlayer._pausedForPopout = true;
+        }
+      });
+    }
+    if (typeof window.electronAPI.onCameraPopoutClosed === "function") {
+      window.electronAPI.onCameraPopoutClosed(() => {
+        if (cameraPlayer && cameraPlayer._pausedForPopout) {
+          cameraPlayer._pausedForPopout = false;
+          // Only restart if the user is currently on the camera/inverters page.
+          if (State.currentPage === "camera" || State.currentPage === "inverters") {
+            // Small delay to let go2rtc finish tearing down the popout's connection.
+            setTimeout(() => { cameraPlayer.reconnect(); }, 1200);
+          }
+        }
+      });
+    }
+  }
+
   // ── Settings Modal (page-level) ──
   const backdrop = $("camSettingsModal");
   const modeSelect = $("camMode");
@@ -15893,6 +15945,21 @@ function initCameraPlayer() {
     cameraPlayer.reconnect();
   });
 
+  // ── Popout ──
+  $("btnCamPopout")?.addEventListener("click", () => {
+    const page = "camera";
+    try {
+      if (window.electronAPI && typeof window.electronAPI.openPopoutWindow === "function") {
+        const theme = document.documentElement.getAttribute("data-theme") || "dark";
+        window.electronAPI.openPopoutWindow(page, theme);
+      } else {
+        window.open("/?popout=" + encodeURIComponent(page), "_blank", "noopener");
+      }
+    } catch (err) {
+      console.warn("[camera] open window failed:", err?.message || err);
+    }
+  });
+
   // ── Fullscreen ──
   $("btnCamFullscreen")?.addEventListener("click", () => {
     if (document.fullscreenElement) {
@@ -15919,8 +15986,11 @@ function initCameraPlayer() {
   });
 
   // ── Auto-start if settings exist ──
+  // In popout mode the page routing (switchPage) handles the start with a
+  // brief delay so go2rtc releases the main-window stream slot first.
+  // In the main window, start immediately.
   const saved = camLoadSettings();
-  if (saved.mode && (saved.go2rtcIp || saved.ip)) {
+  if (!_isPopoutWindow && saved.mode && (saved.go2rtcIp || saved.ip)) {
     cameraPlayer.start();
   }
 }
@@ -33986,7 +34056,7 @@ async function _fcalHandleToggleWrites() {
     popoutPage = "";
   }
 
-  var POPOUT_ALLOWED = ["analytics", "alarms", "forecast", "igbt-health"];
+  var POPOUT_ALLOWED = ["analytics", "alarms", "forecast", "igbt-health", "camera"];
   if (!popoutPage || !POPOUT_ALLOWED.includes(popoutPage)) return;
 
   // Apply popout-mode class to hide sidebar + titlebar chrome.
@@ -33998,6 +34068,7 @@ async function _fcalHandleToggleWrites() {
     alarms:        "ADSI \u2013 Alarms",
     forecast:      "ADSI \u2013 Forecast",
     "igbt-health": "ADSI \u2013 Asset Health",
+    camera:        "ADSI \u2013 Camera Viewer",
   };
   function setPopoutTitle() {
     try {
@@ -34057,13 +34128,12 @@ async function _fcalHandleToggleWrites() {
     _popoutAttempts += 1;
     try {
       if (typeof switchPage === "function") {
-        switchPage(popoutPage);
-        if (
-          typeof State === "object" && State &&
-          State.currentPage === popoutPage
-        ) {
-          _popoutRouted = true;
-          return;
+        if (typeof State === "object" && State && State.settings && typeof cameraPlayer !== "undefined" && cameraPlayer) {
+          switchPage(popoutPage);
+          if (State.currentPage === popoutPage) {
+            _popoutRouted = true;
+            return;
+          }
         }
       }
     } catch (err) {
@@ -34083,7 +34153,7 @@ async function _fcalHandleToggleWrites() {
 // in popout-mode the buttons are CSS-hidden so the handlers are registered but
 // never reachable by the user (prevents recursive window chains).
 function initPopoutButtons() {
-  var POPOUT_PAGES = ["analytics", "alarms", "forecast", "igbt-health"];
+  var POPOUT_PAGES = ["analytics", "alarms", "forecast", "igbt-health", "camera"];
   POPOUT_PAGES.forEach(function (page) {
     var btn = document.getElementById("popout-btn-" + page);
     if (!btn) return;

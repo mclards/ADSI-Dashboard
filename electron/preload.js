@@ -85,6 +85,19 @@ contextBridge.exposeInMainWorld("electronAPI", {
   reportRemoteConnectivityFailure: (message) => ipcRenderer.send("dashboard-remote-connectivity-failed", message),
   switchOperationMode: (mode) => ipcRenderer.send("switch-operation-mode", mode),
 
+  // Camera popout lifecycle
+  onCameraPopoutOpened: (cb) => {
+    const handler = () => cb();
+    ipcRenderer.on("camera-popout-opened", handler);
+    return () => ipcRenderer.removeListener("camera-popout-opened", handler);
+  },
+  onCameraPopoutClosed: (cb) => {
+    const handler = () => cb();
+    ipcRenderer.on("camera-popout-closed", handler);
+    return () => ipcRenderer.removeListener("camera-popout-closed", handler);
+  },
+  signalCameraPopoutReady: () => ipcRenderer.send("camera-popout-ready"),
+
   // Cloud Backup OAuth
   // Opens an OAuth window and returns { ok, callbackUrl } or { ok: false, error }
   openOAuthWindow: (authUrl) => ipcRenderer.invoke("oauth-start", { authUrl }),

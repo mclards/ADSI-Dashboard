@@ -20325,7 +20325,7 @@ app.post("/api/substation-meter/:date/recalculate", (req, res) => {
 // --- REMOTE MODE PROXY SUPPORT ---
 async function _applySettingsPostRemote(req, res, targetUrl, token, modeBefore) {
   try {
-    const payload = req.body;
+    const payload = { ...req.body };
     // Strip local-only config before proxying to gateway
     if (payload.remoteGatewayUrl !== undefined) delete payload.remoteGatewayUrl;
     if (payload.remoteApiToken !== undefined) delete payload.remoteApiToken;
@@ -20356,6 +20356,28 @@ async function _applySettingsPostRemote(req, res, targetUrl, token, modeBefore) 
 
 app.post("/api/settings", async (req, res) => {
   const currentMode = readOperationMode();
+
+  // ── Local-only settings: persist BEFORE any remote proxy so they are
+  // always saved regardless of gateway connectivity or remote save outcome.
+  // cameraConfig and go2rtcAutoStart are never forwarded to the gateway.
+  {
+    const localUpdates = {};
+    if (req.body.cameraConfig !== undefined) {
+      localUpdates.cameraConfig = JSON.stringify(sanitizeCameraConfig(req.body.cameraConfig));
+    }
+    if (req.body.go2rtcAutoStart !== undefined) {
+      localUpdates.go2rtcAutoStart =
+        req.body.go2rtcAutoStart === "1" || req.body.go2rtcAutoStart === true ? "1" : "0";
+    }
+    if (Object.keys(localUpdates).length) {
+      try {
+        db.transaction(() => {
+          Object.entries(localUpdates).forEach(([k, v]) => setSetting(k, v));
+        })();
+      } catch (_) { /* non-fatal — will be retried in main save block */ }
+    }
+  }
+
   if (currentMode === 'remote' && req.body.operationMode !== 'gateway') {
     const targetUrl = getRemoteGatewayBaseUrl();
     const token = getRemoteApiToken();
