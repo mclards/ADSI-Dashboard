@@ -23318,6 +23318,236 @@ table.fcal-settings-table .fcal-set-readonly {
   letter-spacing: 0.4px;
   background: color-mix(in srgb, var(--text3) 7%, transparent);
 }
+/* Pinned subheader wrapper holds the Write-all controls AND the group
+   title + gate banner. It sticks at the top of the scrolling settings
+   view so all three pieces ride together across every tab. The inner
+   controls row no longer needs its own sticky — the wrapper handles it. */
+#page-field-calibration #fieldCalibrationSection > #fcalSettingsView .fcal-settings-pinned {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 2px 0 0;
+  margin: 0 0 4px;
+  background: var(--bg, var(--surface));
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 35%, transparent);
+}
+#page-field-calibration #fieldCalibrationSection > #fcalSettingsView .fcal-settings-controls {
+  padding: 0 0 4px;
+  margin: 0;
+}
+/* The pinned header subdivision (group title + gate banner) — keep tight
+   spacing so the strip doesn't dominate the viewport. */
+#page-field-calibration #fieldCalibrationSection > #fcalSettingsView .fcal-settings-pinned-header {
+  padding: 0;
+}
+#page-field-calibration #fieldCalibrationSection > #fcalSettingsView .fcal-settings-pinned-header .fcal-settings-group-title {
+  margin: 4px 0 0;
+}
+#page-field-calibration #fieldCalibrationSection > #fcalSettingsView .fcal-settings-pinned-header .fcal-settings-gate-banner {
+  margin: 6px 16px 0;
+}
+
+/* On settings tabs hide ONLY the calibration scale-factor body — the
+   pinned-header controls (Read, bypass toggles, FW Upgrade, read msg)
+   stay visible across every tab so the single Read button serves all
+   tabs uniformly. */
+#fieldCalibrationSection[data-fcal-view]:not([data-fcal-view="calibration"]) #fcalPanelSingle {
+  display: none;
+}
+
+/* --- Modern Card Grid for IGBT Asset Health --- */
+.igbt-fleet-grid-wrapper {
+  padding: 16px;
+  background: var(--bg-level2);
+  border-radius: 4px; /* Flatter radius */
+  border: 1px solid var(--border); /* Flat border instead of shadow */
+  overflow-y: auto;
+  max-height: calc(100vh - 200px);
+}
+
+.igbt-inverter-group {
+  margin-bottom: 24px;
+}
+
+.igbt-inverter-title {
+  font-family: 'Inter', 'Roboto', sans-serif;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text-main);
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 4px;
+}
+
+.igbt-fleet-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.igbt-card {
+  background: var(--surface); /* Solid flat color */
+  border: 1px solid var(--border); /* Flat border */
+  border-radius: 6px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: border-color 0.15s ease, background-color 0.15s ease; /* Fast, cheap transitions */
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+}
+
+.igbt-card:hover {
+  background: var(--bg-hover);
+  border-color: var(--text-muted);
+}
+
+.igbt-card.selected {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+/* Remove decorative before-bar */
+.igbt-card::before {
+  display: none;
+}
+
+.igbt-card.tier-healthy { color: var(--green); }
+.igbt-card.tier-watch { color: var(--orange); }
+.igbt-card.tier-aging { color: color-mix(in srgb, var(--orange) 60%, var(--red)); }
+.igbt-card.tier-eol { color: var(--red); }
+.igbt-card.tier-offline { color: var(--text-muted); }
+
+.igbt-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+  margin-bottom: 4px;
+}
+
+.igbt-card-title {
+  font-family: 'Inter', 'Roboto', sans-serif;
+  font-weight: 600;
+  font-size: 1.1rem;
+  color: var(--text);
+  letter-spacing: 0.2px;
+}
+
+.igbt-card-body {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0 4px 0;
+}
+
+.igbt-card-score-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.igbt-card-score-val {
+  font-family: 'Inter', 'Roboto', sans-serif;
+  font-size: 2rem;
+  font-weight: 700;
+  line-height: 1;
+  color: currentColor; /* Inherit tier color */
+  letter-spacing: -0.5px;
+}
+
+.igbt-card-score-lbl {
+  font-family: 'Inter', 'Roboto', sans-serif;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  letter-spacing: 0.5px;
+  margin-top: 6px;
+}
+
+.igbt-card-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.igbt-card-stats .stat-row {
+  font-family: 'Inter', 'Roboto', sans-serif;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.igbt-card-stats .stat-row b {
+  color: var(--text);
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.igbt-card-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 4px;
+}
+
+/* ── Card-grid state indicators (parallel to .pe-fleet-table tr.pe-row-* rules) ── */
+/* Offline — node has no 5-min sample in the last 10 min. */
+.igbt-card.pe-row-offline {
+  opacity: 0.55;
+  background: repeating-linear-gradient(
+    -45deg,
+    transparent 0,
+    transparent 6px,
+    color-mix(in srgb, var(--text2) 6%, transparent) 6px,
+    color-mix(in srgb, var(--text2) 6%, transparent) 12px
+  );
+}
+.igbt-card.pe-row-offline:hover {
+  opacity: 0.85;
+}
+
+/* Critical alarm pattern — recurring 0x0240 / 0x0210 (Slice κ.3). */
+.igbt-card.pe-row-critical-pattern {
+  border-left: 4px solid var(--red);
+  background: color-mix(in srgb, var(--red) 6%, var(--surface));
+}
+.igbt-card.pe-row-critical-pattern:hover {
+  background: color-mix(in srgb, var(--red) 12%, var(--surface));
+}
+
+/* Watch alarm pattern — lower severity precursor. */
+.igbt-card.pe-row-watch-pattern {
+  border-left: 4px solid var(--orange);
+}
+
+/* Empty-state placeholder when no nodes match the tier filter. */
+.igbt-empty-state {
+  padding: 48px 24px;
+  text-align: center;
+  color: var(--text2);
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+.igbt-empty-title {
+  font-weight: 600;
+  font-size: 1.05rem;
+  margin-bottom: 8px;
+  color: var(--text);
+}
+.igbt-empty-copy {
+  max-width: 340px;
+  margin: 0 auto;
+}
+
 /* Camera Popout Mode */
 .popout-mode #page-camera { display: flex; flex-direction: column; padding: 0; height: 100vh; width: 100vw; overflow: hidden; }
 .popout-mode #page-camera .camera-card { width: 100%; height: 100%; border-radius: 0; border: none; box-shadow: none; cursor: default; }
