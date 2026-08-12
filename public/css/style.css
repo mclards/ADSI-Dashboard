@@ -4191,6 +4191,37 @@ label[data-required]::after {
   white-space: nowrap;
 }
 
+.cam-codec-badge {
+  position: absolute;
+  top: calc(4px * var(--inv-card-scale));
+  right: calc(6px * var(--inv-card-scale));
+  z-index: 4;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  font-size: calc(8px * var(--inv-card-scale));
+  line-height: 1.45;
+  pointer-events: none;
+}
+
+.hikvision-card .cam-live-dot {
+  right: calc(43px * var(--inv-card-scale));
+}
+
+#hikvisionSnapshot {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.hikvision-native-surface {
+  position: absolute;
+  inset: 0;
+  background: #000;
+  pointer-events: none;
+}
+
 /* Top-right live dot */
 .cam-live-dot {
   position: absolute;
@@ -4489,6 +4520,34 @@ label[data-required]::after {
   margin-bottom: 12px;
 }
 
+.cam-settings-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cam-linked-settings-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 8px;
+  border: 1px solid var(--border2);
+  border-radius: 6px;
+  background: var(--surface2);
+  color: var(--text2);
+  font: inherit;
+  font-size: 9px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.cam-linked-settings-btn:hover,
+.cam-linked-settings-btn:focus-visible {
+  border-color: var(--accent);
+  color: var(--accent);
+  outline: none;
+}
+
 .cam-settings-title {
   font-size: 13px;
   font-weight: 700;
@@ -4744,6 +4803,309 @@ select.cam-field-input { appearance: auto; }
 }
 .cam-settings-actions .btn {
   flex: 1;
+}
+
+.hik-settings-card {
+  width: min(720px, 95vw);
+  max-height: min(92vh, 780px);
+  padding: 0;
+  overflow: hidden;
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.38);
+}
+
+.hik-settings-header {
+  margin: 0;
+  padding: 15px 18px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface2) 76%, transparent);
+}
+
+.hik-title-wrap,
+.hik-header-actions,
+.hik-panel-heading,
+.hik-profile-main,
+.hik-profile-note,
+.hik-service-title,
+.hik-service-content,
+.hik-mode-summary,
+.hik-config-note {
+  display: flex;
+  align-items: center;
+}
+
+.hik-title-wrap { gap: 10px; }
+.hik-header-actions { gap: 10px; }
+
+.hik-title-icon {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface2));
+  color: var(--accent);
+  font-size: 19px;
+}
+
+.hik-title-subtitle {
+  display: block;
+  margin-top: 2px;
+  color: var(--text2);
+  font-size: 9px;
+  font-weight: 500;
+}
+
+.hik-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 68px;
+  justify-content: center;
+  padding: 4px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text2);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.hik-status-pill > span {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text3);
+}
+
+.hik-status-pill[data-state="running"] {
+  color: var(--ok, #32d296);
+  border-color: color-mix(in srgb, var(--ok, #32d296) 36%, var(--border));
+}
+.hik-status-pill[data-state="running"] > span {
+  background: var(--ok, #32d296);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok, #32d296) 16%, transparent);
+}
+.hik-status-pill[data-state="stopped"] { color: var(--text2); }
+
+.hik-settings-card .cam-settings-body {
+  padding: 14px 18px 4px;
+}
+
+.hik-config-note {
+  gap: 7px;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface2));
+  color: var(--text2);
+  padding: 8px 10px;
+  font-size: 9px;
+  line-height: 1.45;
+}
+.hik-config-note .mdi { color: var(--accent); font-size: 13px; }
+
+.hik-identity-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
+  margin-top: 11px;
+}
+.hik-grow { flex: 1; min-width: 0; }
+.hik-grow-2 { flex: 2 !important; }
+
+.hik-switch-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 29px;
+  margin-bottom: 8px;
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+.hik-switch-label input { position: absolute; opacity: 0; pointer-events: none; }
+.hik-switch-track {
+  width: 30px;
+  height: 16px;
+  padding: 2px;
+  border-radius: 999px;
+  background: var(--border2);
+  transition: background .18s;
+}
+.hik-switch-track span {
+  display: block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--surface);
+  transition: transform .18s;
+}
+.hik-switch-label input:checked + .hik-switch-track { background: var(--accent); }
+.hik-switch-label input:checked + .hik-switch-track span { transform: translateX(14px); }
+
+.hik-settings-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+  margin-top: 3px;
+}
+
+.hik-settings-panel,
+.hik-profile-panel,
+.hik-service-panel {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface2) 82%, transparent);
+}
+
+.hik-settings-panel { padding: 11px 11px 5px; }
+
+.hik-panel-heading {
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.hik-panel-heading > span:last-child { min-width: 0; }
+.hik-panel-heading strong,
+.hik-panel-heading small { display: block; }
+.hik-panel-heading strong {
+  color: var(--text);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .45px;
+}
+.hik-panel-heading small {
+  margin-top: 1px;
+  color: var(--text3);
+  font-size: 8px;
+}
+.hik-panel-icon {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 26px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  color: var(--accent);
+  font-size: 14px;
+}
+.hik-settings-panel .cam-field-input { margin-bottom: 4px; }
+.hik-last-row { margin-bottom: 0; }
+.hik-channel-row > :first-child { flex: .58; }
+.hik-playback-select { margin-bottom: 7px !important; }
+
+.hik-mode-summary {
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+  color: var(--accent);
+}
+.hik-mode-summary > .mdi { font-size: 15px; }
+.hik-mode-summary strong,
+.hik-mode-summary small { display: block; }
+.hik-mode-summary strong { font-size: 9px; }
+.hik-mode-summary small { margin-top: 1px; color: var(--text2); font-size: 8px; }
+
+.hik-profile-panel {
+  display: grid;
+  grid-template-columns: minmax(170px, .8fr) minmax(230px, 1.35fr) auto;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+  padding: 10px 11px;
+}
+.hik-profile-main { gap: 9px; }
+.hik-profile-icon { color: var(--accent); font-size: 19px; }
+.hik-profile-label { display: block; color: var(--text2); font-size: 8px; }
+.hik-substream-value { display: block; margin-top: 2px; font-size: 12px; color: var(--text); }
+.hik-profile-note {
+  gap: 6px;
+  color: var(--text2);
+  font-size: 8px;
+  line-height: 1.4;
+}
+.hik-profile-note .mdi { flex: 0 0 auto; color: var(--accent); font-size: 13px; }
+.hik-profile-action { white-space: nowrap; }
+
+.hik-service-panel { margin-top: 10px; padding: 10px 11px; }
+.hik-service-title { justify-content: space-between; margin-bottom: 8px; }
+.hik-service-title > span:first-child {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .4px;
+}
+.hik-service-content { align-items: stretch; gap: 8px; }
+.hik-service-grid { flex: 1; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 0; }
+.hik-service-grid .cam-service-item { padding: 6px 8px; }
+.hik-service-btns { align-items: stretch; }
+.hik-service-btns .btn { min-width: 66px; }
+
+.hik-settings-card .cam-settings-actions {
+  margin: 10px 18px 0;
+  padding: 12px 0 15px;
+}
+.hik-settings-card .cam-settings-actions .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+#hikConfigMsg {
+  display: block;
+  min-height: 14px;
+  margin-top: 7px;
+}
+
+@media (max-width: 720px) {
+  .hik-settings-layout { grid-template-columns: 1fr; }
+  .hik-profile-panel { grid-template-columns: 1fr; }
+  .hik-service-content { align-items: stretch; flex-direction: column; }
+  .hik-service-btns .btn { flex: 1; }
+}
+
+@media (max-width: 480px) {
+  .hik-settings-card { width: 96vw; }
+  .hik-status-pill { display: none; }
+  .hik-identity-row { align-items: stretch; flex-direction: column; gap: 0; }
+  .hik-switch-label { margin-top: -3px; }
+  .hik-channel-row { flex-wrap: wrap; }
+  .hik-channel-row > * { min-width: 90px; }
+  .hik-service-title { align-items: flex-start; flex-direction: column; gap: 7px; }
+}
+
+:root[data-theme="light"] .hik-settings-card {
+  background: var(--surface);
+  color: var(--text);
+}
+:root[data-theme="light"] .hik-settings-card .cam-field-input,
+:root[data-theme="light"] .hik-settings-card .cam-service-item {
+  border-color: var(--border);
+  background: color-mix(in srgb, var(--surface) 82%, white);
+  color: var(--text);
+}
+:root[data-theme="light"] .hik-settings-card .cam-field-input::placeholder {
+  color: var(--text3);
+}
+:root[data-theme="light"] .hik-settings-card .cam-field-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 15%, transparent);
+}
+:root[data-theme="light"] .hik-settings-panel,
+:root[data-theme="light"] .hik-profile-panel,
+:root[data-theme="light"] .hik-service-panel {
+  background: color-mix(in srgb, var(--surface2) 72%, white);
+}
+:root[data-theme="light"] .hik-mode-summary {
+  background: color-mix(in srgb, var(--accent) 7%, white);
 }
 
 /* Ã¢â€â‚¬Ã¢â€â‚¬ Bulk command card Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */

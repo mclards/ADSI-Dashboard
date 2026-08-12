@@ -20,6 +20,7 @@ const fs = require("fs");
 const os = require("os");
 const net = require("net");
 const crypto = require("crypto");
+const hikvisionNativePlayer = require("./hikvisionNativePlayer");
 
 // ── A1. Hoisted global fatal handlers ────────────────────────────────────────
 // Registered BEFORE any third-party require so a corrupt app.asar (torn
@@ -73,7 +74,8 @@ process.on("unhandledRejection", (reason) => _routeStartupFatal(reason, "unhandl
 // running instances. Default V8 allows 1GB+; we cap it at 256MB per process.
 app.commandLine.appendSwitch("js-flags", "--max-old-space-size=256 --expose-gc");
 
-// Disable unused Chromium features to save ~50MB of baseline RAM overhead
+// Hikvision LocalService owns its hardware-decoded native video surface; this
+// Chromium memory optimization therefore does not affect that stream.
 app.commandLine.appendSwitch("disable-gpu-memory-buffer-video-frames");
 app.commandLine.appendSwitch("disable-features", "SharedArrayBuffer");
 app.commandLine.appendSwitch("disable-logging");
@@ -1806,6 +1808,7 @@ async function shutdownChildWebServerGracefully(proc) {
 async function stopRuntimeServices(reason = "application shutdown") {
   isAppShuttingDown = true;
   allowMainWindowClose = true;
+  try { await hikvisionNativePlayer.stop(); } catch (_) {}
   // Destroy any open pop-out windows gracefully before tearing down services.
   for (const [, win] of popoutWindows) {
     try { if (!win.isDestroyed()) win.destroy(); } catch (_) {}
@@ -4525,6 +4528,7 @@ function createMainWindow() {
   });
 
   mainWin.on("closed", () => {
+    hikvisionNativePlayer.stop().catch(() => {});
     clearMainRendererReadyTimer();
     if (initialLoadRetryTimer) {
       clearTimeout(initialLoadRetryTimer);
@@ -5715,6 +5719,31 @@ ipcMain.on("camera-popout-ready", () => {
   // Popout renderer signals it has successfully started the camera stream.
   // Nothing extra needed in main — just an acknowledgement hook for future use.
 });
+
+function getHikvisionNativeConfig() {
+  if (
+    embeddedServerStarted &&
+    embeddedServerModule &&
+    typeof embeddedServerModule.getHikvisionNativeConfig === "function"
+  ) {
+    return embeddedServerModule.getHikvisionNativeConfig();
+  }
+  const manager = require("../server/hikvisionManager");
+  return manager.loadLocalConfigFallback() || manager.defaults();
+}
+
+ipcMain.handle("hikvision-native-start", async (event, rect) => {
+  const owner = BrowserWindow.fromWebContents(event.sender);
+  return hikvisionNativePlayer.start(owner, getHikvisionNativeConfig(), rect);
+});
+ipcMain.handle("hikvision-native-update", async (event, rect) => {
+  const owner = BrowserWindow.fromWebContents(event.sender);
+  return hikvisionNativePlayer.update(owner, rect);
+});
+ipcMain.handle("hikvision-native-stop", () => hikvisionNativePlayer.stop());
+ipcMain.handle("hikvision-native-hide", () => hikvisionNativePlayer.hide());
+ipcMain.handle("hikvision-native-show", () => hikvisionNativePlayer.show());
+ipcMain.handle("hikvision-native-status", () => hikvisionNativePlayer.status());
 
 ipcMain.on("show-nav-context-menu", (event, { page, theme }) => {
   const template = [

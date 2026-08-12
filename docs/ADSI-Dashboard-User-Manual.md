@@ -1787,7 +1787,7 @@ The camera card is a draggable card that participates in the inverter grid layou
 
 ### Camera Settings Modal
 
-Click the **⚙️ Settings** icon on the camera card to open the modal. The modal is a page-level dialog centered on the screen (not card-scoped).
+Click the **⚙️ Settings** icon on the Tapo camera card to open the modal. The modal is a page-level dialog centered on the screen (not card-scoped). Its header includes **Hikvision DVR**, which opens the separate DVR configuration modal without requiring controls on the native Hikvision card.
 
 #### Stream Mode Selection
 
@@ -1854,6 +1854,22 @@ The service status grid polls `GET /api/streaming/go2rtc-status` every 5 seconds
 | **Graceful shutdown** | Stopped automatically during app shutdown, update install, or server stop |
 | **Config override** | Place a `go2rtc.yaml` in `C:\ProgramData\InverterDashboard\go2rtc\` to override bundled defaults |
 
+### Separate Hikvision DVR Card
+
+The Hikvision DVR uses its own draggable dashboard card, settings modal, native decoder bridge, and API routes. Its DVR-specific connection stays separate from the Tapo configuration. The compact modal groups device identity, local connection, channel/playback, stream profile, and native-decoder status into separate panels. Enter the DVR's local username and password; Hik-Connect cloud credentials and camera access codes are not used.
+
+Use **Smooth native playback** for normal operation. Hikvision LocalService decodes the selected DVR stream with the vendor's native hardware path, preserving the DVR's original quality and frame rate without an FFmpeg transcode. The native surface fills the Hikvision card, hides while the card is off-screen or a modal/Tapo fullscreen covers it, and resumes without restarting the stream. Open its configuration through **Tapo Camera Settings > Hikvision DVR**. Double-click the native Hikvision video to enter or leave its LocalService fullscreen view; the card has no HTML Settings or Fullscreen buttons. Repeated unchanged geometry updates are suppressed so window tracking does not interrupt decoding. **Compatible snapshots** remain a low-frame-rate fallback, while **Direct HLS** is retained for diagnostics. **Prepare H.264 Substream** remains an optional isolated change to channel **xx02** and never modifies **xx01**. A blank password means “keep the existing password.” Playback remains local to the workstation in Gateway and Remote dashboard modes.
+
+| Hikvision control | Purpose |
+| --- | --- |
+| `Tapo Camera Settings > Hikvision DVR` | Opens the dedicated Hikvision DVR configuration modal |
+| Double-click Hikvision video | Enters or leaves Hikvision LocalService fullscreen playback |
+| `Playback Mode` | Selects smooth Hikvision LocalService playback, compatible snapshots, or diagnostic direct HLS |
+| `Verify Connection` | Saves the current fields and verifies native playback against the DVR |
+| `Prepare H.264 Substream` | Converts only the selected channel's xx02 profile to browser-compatible H.264 after confirmation |
+| `Save & View` | Persists the Hikvision configuration and reconnects the dedicated card |
+| `Start` / `Stop` | Starts or stops Hikvision LocalService native playback |
+
 ### Troubleshooting
 
 | Problem | Likely Cause | Action |
@@ -1864,6 +1880,8 @@ The service status grid polls `GET /api/streaming/go2rtc-status` every 5 seconds
 | FFmpeg mode shows no video | FFmpeg not installed | Install FFmpeg and add to system PATH |
 | Service controls hidden | Remote operation mode | Switch to Gateway mode in Settings > Connectivity |
 | Status shows `error` | 3+ consecutive crashes | Check RTSP source and `go2rtc.yaml` config, then manually restart |
+| Hikvision card stays on “Starting” | Hikvision LocalService is unavailable, the DVR is unreachable, or the local DVR login failed | Confirm LocalService is running, verify the DVR/LAN connection, then use `Verify Connection` |
+| Hikvision profile or stream is unavailable | DVR IP, RTSP account, or LAN route is incorrect | Verify the DVR is reachable, then use `Test Stream` |
 
 ---
 

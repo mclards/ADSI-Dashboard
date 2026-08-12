@@ -98,6 +98,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
   signalCameraPopoutReady: () => ipcRenderer.send("camera-popout-ready"),
 
+  hikvisionNativeStart: (rect) => ipcRenderer.invoke("hikvision-native-start", rect),
+  hikvisionNativeUpdate: (rect) => ipcRenderer.invoke("hikvision-native-update", rect),
+  hikvisionNativeStop: () => ipcRenderer.invoke("hikvision-native-stop"),
+  hikvisionNativeHide: () => ipcRenderer.invoke("hikvision-native-hide"),
+  hikvisionNativeShow: () => ipcRenderer.invoke("hikvision-native-show"),
+  hikvisionNativeStatus: () => ipcRenderer.invoke("hikvision-native-status"),
+
   // Cloud Backup OAuth
   // Opens an OAuth window and returns { ok, callbackUrl } or { ok: false, error }
   openOAuthWindow: (authUrl) => ipcRenderer.invoke("oauth-start", { authUrl }),

@@ -1468,7 +1468,7 @@
   <div class="info-card note"><div class="info-card-label">Auto-Reconnect</div><p>When a stream drops, the player automatically retries every <b>5 seconds</b> until the connection is restored.</p></div>
 
   <h3>Camera Settings Modal</h3>
-  <p>A page-level modal opened by clicking the <b>gear icon</b> on the camera card. It consolidates all camera and go2rtc configuration in one place.</p>
+  <p>A page-level modal opened by clicking the <b>gear icon</b> on the Tapo camera card. It consolidates the Tapo camera and go2rtc configuration in one place. The header includes a <b>Hikvision DVR</b> button that opens the dedicated DVR configuration modal.</p>
 
   <h4>1. Stream Mode Selector</h4>
   <p>Three visual mode cards at the top of the modal. Selecting a mode dynamically shows or hides the relevant input sections below.</p>
@@ -1564,6 +1564,19 @@
     <li><b>STUN server</b> &mdash; Uses Google&rsquo;s public STUN server (<code>stun:stun.l.google.com:19302</code>) for WebRTC ICE negotiation.</li>
   </ul>
 
+  <h3>Separate Hikvision DVR Card</h3>
+  <p>The Hikvision DVR has its own draggable card, settings modal, native decoder bridge, and API routes. Its DVR-specific connection remains separate from Tapo. The compact modal groups device identity, local connection, channel/playback, stream profile, and native-decoder status into separate panels. Use the DVR&rsquo;s local username and password; Hik-Connect cloud credentials and camera access codes are not required.</p>
+  <div class="info-card note"><div class="info-card-label">Smooth Native Playback</div><p>Use <b>Smooth native playback</b> for normal operation. Hikvision LocalService decodes the selected DVR stream with the vendor&rsquo;s native hardware path, retaining the DVR&rsquo;s original quality and frame rate without an FFmpeg transcode. The native surface fills the Hikvision card, hides while the card is off-screen or a modal/Tapo fullscreen covers it, and resumes without restarting the stream. Open its configuration through <b>Tapo Camera Settings &gt; Hikvision DVR</b>. Double-click the native video to enter or leave Hikvision LocalService fullscreen; the card has no HTML Settings or Fullscreen buttons. Repeated unchanged geometry updates are suppressed so card tracking does not interrupt video decoding. Compatible snapshots remain a low-frame-rate fallback, while Direct HLS is retained for diagnostics.</p></div>
+  <table><thead><tr><th>Hikvision Control</th><th>Function</th></tr></thead><tbody>
+    <tr><td>Tapo Camera Settings &gt; Hikvision DVR</td><td>Opens the dedicated Hikvision DVR configuration modal.</td></tr>
+    <tr><td>Double-click Hikvision video</td><td>Enters or leaves Hikvision LocalService fullscreen playback.</td></tr>
+    <tr><td>Playback Mode</td><td>Selects smooth Hikvision LocalService playback, compatible snapshots, or diagnostic direct HLS.</td></tr>
+    <tr><td>Verify Connection</td><td>Saves the current fields and verifies native playback against the DVR.</td></tr>
+    <tr><td>Prepare H.264 Substream</td><td>Changes only the selected channel&rsquo;s xx02 profile to H.264 after confirmation.</td></tr>
+    <tr><td>Save &amp; View</td><td>Persists the dedicated Hikvision configuration and reconnects the card.</td></tr>
+    <tr><td>Start / Stop</td><td>Starts or stops Hikvision LocalService native playback.</td></tr>
+  </tbody></table>
+
   <h3>Troubleshooting</h3>
   <table><thead><tr><th>Issue</th><th>Cause</th><th>Resolution</th></tr></thead><tbody>
     <tr><td>&ldquo;Stream failed&rdquo; error</td><td>go2rtc not running or wrong IP/port</td><td>Open camera settings, verify go2rtc IP and port, click Start in service section</td></tr>
@@ -1572,6 +1585,8 @@
     <tr><td>FFmpeg mode no video</td><td>FFmpeg not installed on server</td><td>Install FFmpeg and ensure it is on PATH</td></tr>
     <tr><td>Service section hidden</td><td>Remote mode active</td><td>Switch to Gateway mode in Settings &rarr; Connectivity</td></tr>
     <tr><td>Auto-restart stopped</td><td>3+ consecutive crashes</td><td>Check go2rtc logs, fix RTSP source, then manually restart</td></tr>
+    <tr><td>Hikvision card stays on &ldquo;Starting&rdquo;</td><td>Hikvision LocalService is unavailable, the DVR is unreachable, or the local DVR login failed</td><td>Confirm LocalService is running, verify the DVR/LAN connection, then use Verify Connection</td></tr>
+    <tr><td>Hikvision profile unavailable</td><td>DVR IP, local RTSP account, or LAN route is incorrect</td><td>Verify DVR reachability, then use Test Stream</td></tr>
   </tbody></table>
   <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>

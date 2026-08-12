@@ -19,6 +19,7 @@ const cron = require("node-cron");
 const { getPortableDataRoot } = require("./runtimeEnvPaths");
 const streaming = require("./streaming");
 const go2rtcManager = require("./go2rtcManager");
+const hikvisionManager = require("./hikvisionManager");
 const forecastGenLock = require("./forecastGenLock");
 
 const {
@@ -8367,6 +8368,30 @@ const DEFAULT_CAMERA_CFG = Object.freeze({
   pass: "",
 });
 
+function readHikvisionConfig(options = {}) {
+  const rawStored = readJsonSetting("hikvisionConfig", hikvisionManager.defaults());
+  // Restore the proven Hikvision LocalService decoder after browser delivery
+  // modes showed unacceptable buffering on this DVR's high-resolution stream.
+  const legacyMode = String(rawStored?.playbackMode || "").toLowerCase();
+  const nativeRestoreDone = getSetting("hikvisionNativePlaybackRestored", "0") === "1";
+  const migrateToNative = !nativeRestoreDone && ["native", "browser", "auto"].includes(legacyMode);
+  const stored = hikvisionManager.sanitizeConfig({
+    ...rawStored,
+    ...(migrateToNative ? { playbackMode: "localservice", stream: "main" } : {}),
+  });
+  if (migrateToNative) {
+    try {
+      setSetting("hikvisionConfig", JSON.stringify(stored));
+      setSetting("hikvisionNativePlaybackRestored", "1");
+    } catch (_) {}
+  }
+  const localFallback = hikvisionManager.loadLocalConfigFallback();
+  const effective = !stored.password && localFallback
+    ? { ...stored, ...localFallback }
+    : stored;
+  return hikvisionManager.sanitizeConfig(effective, options);
+}
+
 function sanitizeCameraConfig(raw) {
   const src = raw && typeof raw === "object" ? raw : {};
   const str = (v, max = 200) =>
@@ -8534,6 +8559,10 @@ function buildDefaultSettingsSnapshot() {
     exportUiState: buildDefaultExportUiState(),
     inverterPollConfig: { ...DEFAULT_POLL_CFG },
     cameraConfig: { ...DEFAULT_CAMERA_CFG },
+    hikvisionConfig: hikvisionManager.sanitizeConfig(
+      hikvisionManager.defaults(),
+      { redact: true },
+    ),
     dataDir: DATA_DIR,
     // v2.9.0 Slice G — Inverter Clocks section
     inverterClockAutoSyncEnabled: "1",
@@ -8702,6 +8731,10 @@ function buildSettingsSnapshot() {
     cameraConfig: sanitizeCameraConfig(
       readJsonSetting("cameraConfig", DEFAULT_CAMERA_CFG),
     ),
+    // Never return the DVR password to the renderer. The dedicated save route
+    // accepts a replacement password while retaining the existing one when the
+    // password field is left blank.
+    hikvisionConfig: readHikvisionConfig({ redact: true }),
     go2rtcAutoStart: getSetting("go2rtcAutoStart", "0"),
     dataDir: DATA_DIR,
     // v2.9.0 Slice G — Inverter Clocks section
@@ -12875,7 +12908,140 @@ app.post("/api/streaming/go2rtc/stop", (req, res) => {
   go2rtcManager
     .stop()
     .then(() => res.json({ ok: true }))
-    .catch((e) => res.status(500).json({ ok: false, error: e.message }));
+      .catch((e) => res.status(500).json({ ok: false, error: e.message }));
+});
+
+/* ── Dedicated Hikvision DVR streaming ───────────────────────────── */
+function mergeHikvisionConfigInput(input) {
+  const current = readHikvisionConfig();
+  const body = input && typeof input === "object" ? input : {};
+  const merged = { ...current, ...body };
+  // A blank password means "keep the saved password". This lets the renderer
+  // edit the rest of the configuration without ever receiving the secret.
+  if (!Object.prototype.hasOwnProperty.call(body, "password") || body.password === "") {
+    merged.password = current.password;
+  }
+  return hikvisionManager.sanitizeConfig(merged);
+}
+
+app.get("/api/hikvision/config", (req, res) => {
+  res.json({ ok: true, config: readHikvisionConfig({ redact: true }) });
+});
+
+app.post("/api/hikvision/config", async (req, res) => {
+  try {
+    const config = mergeHikvisionConfigInput(req.body);
+    setSetting("hikvisionConfig", JSON.stringify(config));
+    let service = hikvisionManager.getStatus();
+    if (service.running && config.playbackMode === "localservice") {
+      await hikvisionManager.stop();
+      service = hikvisionManager.getStatus();
+    } else if (service.running) {
+      service = await hikvisionManager.restart(config);
+    }
+    res.json({
+      ok: true,
+      config: hikvisionManager.sanitizeConfig(config, { redact: true }),
+      service,
+    });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/api/hikvision/status", (req, res) => {
+  res.json({ ok: true, ...hikvisionManager.getStatus() });
+});
+
+app.post("/api/hikvision/start", async (req, res) => {
+  try {
+    const result = await hikvisionManager.start(readHikvisionConfig());
+    res.status(result.ok ? 200 : 400).json(result);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/api/hikvision/stop", async (req, res) => {
+  try {
+    await hikvisionManager.stop();
+    res.json({ ok: true, ...hikvisionManager.getStatus() });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/api/hikvision/test", async (req, res) => {
+  try {
+    const config = mergeHikvisionConfigInput(req.body);
+    const result = await hikvisionManager.test(config);
+    res.status(result.ok ? 200 : 400).json(result);
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/api/hikvision/substream-profile", async (req, res) => {
+  try {
+    const profile = await hikvisionManager.getSubstreamProfile(readHikvisionConfig());
+    delete profile.xml;
+    res.json({ ok: true, ...profile });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/api/hikvision/substream-profile", async (req, res) => {
+  try {
+    const profile = await hikvisionManager.getSubstreamProfile(
+      mergeHikvisionConfigInput(req.body),
+    );
+    delete profile.xml;
+    res.json({ ok: true, ...profile });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/api/hikvision/optimize-substream", async (req, res) => {
+  try {
+    const config = mergeHikvisionConfigInput(req.body);
+    const result = await hikvisionManager.optimizeSubstream(config);
+    // Preparing xx02 must not silently downgrade a native main-stream view.
+    // Keep the operator's selected playback stream; only the DVR's xx02 codec
+    // profile is modified by optimizeSubstream().
+    const saved = { ...config, playbackMode: "localservice" };
+    setSetting("hikvisionConfig", JSON.stringify(saved));
+    if (hikvisionManager.getStatus().running) await hikvisionManager.stop();
+    const service = hikvisionManager.getStatus();
+    res.json({
+      ...result,
+      config: hikvisionManager.sanitizeConfig(saved, { redact: true }),
+      service,
+    });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/api/hikvision/snapshot", async (req, res) => {
+  try {
+    const snapshot = await hikvisionManager.getSnapshot(readHikvisionConfig());
+    res.set("Content-Type", snapshot.contentType);
+    res.set("Cache-Control", "no-store, no-cache, must-revalidate");
+    res.set("Pragma", "no-cache");
+    res.send(snapshot.body);
+  } catch (err) {
+    res.status(502).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/api/hikvision/hls/*", async (req, res) => {
+  if (!hikvisionManager.getStatus().running) {
+    const result = await hikvisionManager.start(readHikvisionConfig());
+    if (!result.ok) return res.status(503).json(result);
+  }
+  return hikvisionManager.proxyMedia(req, res, readHikvisionConfig());
 });
 
 // v2.10.0 — page-independence verification endpoint. The user reported a
@@ -24510,6 +24676,16 @@ const httpServer = app.listen(PORT, () => {
       })
       .catch((err) => console.warn(`[go2rtc] auto-start error: ${err.message}`));
   }
+  const hikCfg = readHikvisionConfig();
+  if (hikCfg.enabled && hikCfg.autoStart && hikCfg.password && hikCfg.playbackMode !== "localservice") {
+    hikvisionManager
+      .start(hikCfg)
+      .then((r) => {
+        if (r.ok) console.log(`[hikvision] auto-started (PID: ${r.pid})`);
+        else console.warn(`[hikvision] auto-start failed: ${r.error || "unknown"}`);
+      })
+      .catch((err) => console.warn(`[hikvision] auto-start error: ${err.message}`));
+  }
   if (process.send) process.send("ready");
 });
 
@@ -24972,6 +25148,18 @@ async function _runShutdownPhases(mode, reason) {
     if (p && typeof p.then === "function") {
       // go2rtc has its own internal SHUTDOWN_TIMEOUT_MS + SIGKILL fallback,
       // so this await always settles. Guard with a hard ceiling anyway.
+      await Promise.race([
+        p,
+        new Promise((resolve) => {
+          const t = setTimeout(resolve, 3000);
+          if (typeof t.unref === "function") t.unref();
+        }),
+      ]);
+    }
+  } catch (_) {}
+  try {
+    const p = hikvisionManager.stop();
+    if (p && typeof p.then === "function") {
       await Promise.race([
         p,
         new Promise((resolve) => {
@@ -25993,7 +26181,10 @@ app.post("/api/critical-blocks/:inverter/confirm", express.json(), (req, res) =>
   }
 });
 
-module.exports = { shutdownEmbedded };
+module.exports = {
+  shutdownEmbedded,
+  getHikvisionNativeConfig: () => readHikvisionConfig(),
+};
 
 // Test hooks for solcastLazyBackfill tests
 if (process.env.NODE_ENV === "test") {

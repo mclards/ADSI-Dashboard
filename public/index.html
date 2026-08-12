@@ -3856,7 +3856,12 @@ Hover any pill in the column for the row-specific explanation.">Anchor</th>
           <span class="cam-settings-title" id="camSettingsTitle">
             <span class="mdi mdi-cctv"></span> Camera Settings
           </span>
-          <button class="auth-modal-close" id="btnCamModalClose" type="button" aria-label="Close">&times;</button>
+          <div class="cam-settings-header-actions">
+            <button class="cam-linked-settings-btn" id="btnOpenHikSettings" type="button" title="Open Hikvision DVR settings">
+              <span class="mdi mdi-video-input-component"></span> Hikvision DVR
+            </button>
+            <button class="auth-modal-close" id="btnCamModalClose" type="button" aria-label="Close">&times;</button>
+          </div>
         </div>
 
         <div class="cam-settings-body">
@@ -3994,6 +3999,155 @@ Hover any pill in the column for the row-specific explanation.">Anchor</th>
         <div class="cam-settings-actions">
           <button class="btn btn-outline" id="btnCamReset" type="button">Reset Defaults</button>
           <button class="btn btn-accent" id="btnCamApply" type="button">Apply &amp; Connect</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Dedicated Hikvision DVR Settings Modal -->
+    <div id="hikSettingsModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="hikSettingsTitle">
+      <div class="cam-settings-card hik-settings-card">
+        <div class="cam-settings-header hik-settings-header">
+          <div class="hik-title-wrap">
+            <span class="hik-title-icon"><span class="mdi mdi-cctv"></span></span>
+            <span>
+              <span class="cam-settings-title" id="hikSettingsTitle">Hikvision DVR</span>
+              <span class="hik-title-subtitle">Live-view card and local DVR connection</span>
+            </span>
+          </div>
+          <div class="hik-header-actions">
+            <span class="hik-status-pill" id="hikHeaderStatus" data-state="checking"><span></span> Checking</span>
+          <button class="auth-modal-close" id="btnHikModalClose" type="button" aria-label="Close">&times;</button>
+          </div>
+        </div>
+        <div class="cam-settings-body">
+          <div class="hik-config-note">
+            <span class="mdi mdi-shield-lock-outline"></span>
+            <span>Uses the DVR's local account. Hik-Connect cloud credentials and camera access codes are not required.</span>
+          </div>
+
+          <div class="hik-identity-row">
+            <div class="hik-grow">
+              <label class="cam-field-label">Card Name</label>
+              <input type="text" id="hikName" class="cam-field-input" value="Hikvision CCTV" autocomplete="off" />
+            </div>
+            <label class="hik-switch-label">
+              <input type="checkbox" id="hikEnabled" checked />
+              <span class="hik-switch-track"><span></span></span>
+              <span>Show card</span>
+            </label>
+          </div>
+
+          <div class="hik-settings-layout">
+            <section class="hik-settings-panel">
+              <div class="hik-panel-heading">
+                <span class="hik-panel-icon mdi mdi-lan-connect"></span>
+                <span><strong>DVR Connection</strong><small>Local network and login</small></span>
+              </div>
+              <div class="cam-field-row">
+                <div class="hik-grow-2">
+                  <label class="cam-field-label">DVR IP / Host</label>
+                  <input type="text" id="hikHost" class="cam-field-input" value="192.168.1.12" autocomplete="off" />
+                </div>
+                <div>
+                  <label class="cam-field-label">RTSP Port</label>
+                  <input type="number" id="hikRtspPort" class="cam-field-input" value="554" min="1" max="65535" />
+                </div>
+              </div>
+              <div class="cam-field-row hik-last-row">
+                <div>
+                  <label class="cam-field-label">DVR Username</label>
+                  <input type="text" id="hikUser" class="cam-field-input" value="admin" autocomplete="off" />
+                </div>
+                <div>
+                  <label class="cam-field-label">DVR Password</label>
+                  <div class="cam-pw-wrap">
+                    <input type="password" id="hikPassword" class="cam-field-input" placeholder="Enter DVR password" autocomplete="new-password" />
+                    <button type="button" class="cam-pw-toggle" id="btnHikPwToggle" title="Show/hide password">
+                      <span class="mdi mdi-eye-outline"></span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section class="hik-settings-panel">
+              <div class="hik-panel-heading">
+                <span class="hik-panel-icon mdi mdi-video-wireless-outline"></span>
+                <span><strong>Channel &amp; Playback</strong><small>Source and dashboard view</small></span>
+              </div>
+              <div class="cam-field-row hik-channel-row">
+                <div>
+                  <label class="cam-field-label">Channel</label>
+                  <input type="number" id="hikChannel" class="cam-field-input" value="1" min="1" max="32" />
+                </div>
+                <div>
+                  <label class="cam-field-label">Stream</label>
+                  <select id="hikStream" class="cam-field-input">
+                <option value="main" selected>Main quality (xx01)</option>
+                <option value="sub">Lower-bandwidth substream (xx02)</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="cam-field-label">Transport</label>
+                  <select id="hikTransport" class="cam-field-input">
+                    <option value="tcp" selected>TCP</option>
+                    <option value="udp">UDP</option>
+                  </select>
+                </div>
+              </div>
+              <label class="cam-field-label">Playback Mode</label>
+              <select id="hikPlaybackMode" class="cam-field-input hik-playback-select">
+                <option value="localservice">Smooth native playback (recommended)</option>
+                <option value="compatible">Compatible HD snapshots</option>
+                <option value="hls">Direct HLS (diagnostic)</option>
+              </select>
+              <div class="hik-mode-summary" id="hikModeSummary">
+                <span class="mdi mdi-video-wireless-outline"></span>
+                <span><strong>Smooth native playback</strong><small>Uses Hikvision LocalService hardware decoding at the DVR's original quality and frame rate.</small></span>
+              </div>
+            </section>
+          </div>
+
+          <section class="hik-profile-panel">
+            <div class="hik-profile-main">
+              <span class="hik-profile-icon mdi mdi-tune-variant"></span>
+              <span>
+                <span class="hik-profile-label">Channel <span id="hikSubstreamId">--02</span> browser profile</span>
+                <strong class="hik-substream-value" id="hikSubstreamProfile">Checking DVR...</strong>
+              </span>
+            </div>
+            <div class="hik-profile-note">
+              <span class="mdi mdi-information-outline"></span>
+              <span>Preparing H.264 changes only the selected substream. Main recording <strong>xx01</strong> stays unchanged.</span>
+            </div>
+            <button class="btn btn-outline btn-sm hik-profile-action" id="btnHikOptimize" type="button"><span class="mdi mdi-video-check-outline"></span> Prepare H.264</button>
+          </section>
+
+          <section class="hik-service-panel">
+            <div class="hik-service-title">
+              <span><span class="mdi mdi-cog-play-outline"></span> Hikvision Native Decoder</span>
+              <label class="cam-auto-start-label">
+                <input type="checkbox" id="hikAutoStart" />
+                <span>Start with dashboard</span>
+              </label>
+            </div>
+            <div class="hik-service-content">
+              <div class="cam-service-grid hik-service-grid">
+                <div class="cam-service-item"><div class="cam-service-label">Status</div><div class="cam-service-value" id="hikServiceStatus">-</div></div>
+                <div class="cam-service-item"><div class="cam-service-label">Process ID</div><div class="cam-service-value" id="hikServicePid">-</div></div>
+                <div class="cam-service-item"><div class="cam-service-label">Connection</div><div class="cam-service-value" id="hikServiceHealth">-</div></div>
+              </div>
+              <div class="cam-service-btns hik-service-btns">
+                <button id="btnHikStart" class="btn btn-outline btn-sm" type="button"><span class="mdi mdi-play-circle-outline"></span> Start</button>
+                <button id="btnHikStop" class="btn btn-outline btn-sm" type="button"><span class="mdi mdi-stop-circle-outline"></span> Stop</button>
+              </div>
+            </div>
+          </section>
+          <span class="smsg" id="hikConfigMsg"></span>
+        </div>
+        <div class="cam-settings-actions">
+          <button class="btn btn-outline" id="btnHikTest" type="button"><span class="mdi mdi-lan-check"></span> Verify Connection</button>
+          <button class="btn btn-accent" id="btnHikApply" type="button"><span class="mdi mdi-content-save-check-outline"></span> Save &amp; View</button>
         </div>
       </div>
     </div>
