@@ -15422,6 +15422,10 @@ function connectWS() {
 /* ── Camera Streaming ──────────────────────────────────────────────── */
 let cameraPlayer = null;
 let hikvisionPlayer = null;
+// Grid rebuilds are synchronous, but LocalService teardown is asynchronous.
+// Share the stop promise across successive player instances so a retiring
+// instance cannot destroy the native window just opened by its replacement.
+let hikvisionNativeStopGate = Promise.resolve();
 
 const CAM_DEFAULTS = {
   mode: "hls",
@@ -16061,7 +16065,7 @@ class HikVisionPlayer {
     this.nativeHidden = true;
     this.nativeSyncPromise = null;
     this.nativeSyncQueued = false;
-    this.nativeStopPromise = Promise.resolve();
+    this.nativeStopPromise = hikvisionNativeStopGate;
     this.nativeGeometryTimer = null;
     this.requestedMode = "localservice";
     this.effectiveMode = "localservice";
@@ -16179,7 +16183,7 @@ class HikVisionPlayer {
       throw new Error("Smooth Hikvision playback requires the Electron desktop app");
     }
     this._teardownMediaOnly();
-    await this.nativeStopPromise.catch(() => {});
+    await hikvisionNativeStopGate.catch(() => {});
     const surface = $("hikvisionNativeSurface");
     if (surface) surface.style.display = "block";
     this._showOverlay("Starting Hikvision hardware decoder...", "mdi-loading mdi-spin");
@@ -16285,7 +16289,8 @@ class HikVisionPlayer {
     if (this.nativeGeometryTimer) clearInterval(this.nativeGeometryTimer);
     this.nativeGeometryTimer = null;
     if (this.nativeRunning || $("hikvisionCard")?.classList.contains("native-playing")) {
-      this.nativeStopPromise = window.electronAPI?.hikvisionNativeStop?.().catch(() => {}) || Promise.resolve();
+      hikvisionNativeStopGate = window.electronAPI?.hikvisionNativeStop?.().catch(() => {}) || Promise.resolve();
+      this.nativeStopPromise = hikvisionNativeStopGate;
     }
     this.nativeRunning = false;
     this.nativeHidden = true;
@@ -16393,6 +16398,7 @@ class HikVisionPlayer {
 }
 
 let _hikStatusTimer = null;
+let _hikModalGeneration = 0;
 
 function initHikvisionPlayer() {
   const card = $("hikvisionCard");
@@ -16486,20 +16492,28 @@ function initHikvisionPlayer() {
   };
 
   const openModal = async () => {
-    try {
-      const result = await api("/api/hikvision/config");
-      renderConfig(result.config || {});
-    } catch (_) {
-      renderConfig(State.settings.hikvisionConfig || {});
-    }
+    const modalGeneration = ++_hikModalGeneration;
+    // Show the destination modal before any network work. This makes the
+    // Tapo -> Hikvision settings handoff immediate even while the dashboard
+    // server is busy during startup, and hides the native HWND at once.
     modal?.classList.remove("hidden");
     hikvisionPlayer.syncNativePresentation().catch(() => {});
-    refreshStatus();
-    refreshSubstreamProfile();
     clearInterval(_hikStatusTimer);
     _hikStatusTimer = setInterval(refreshStatus, 5000);
+    refreshStatus();
+    try {
+      const result = await api("/api/hikvision/config");
+      if (modalGeneration !== _hikModalGeneration || modal?.classList.contains("hidden")) return;
+      renderConfig(result.config || {});
+    } catch (_) {
+      if (modalGeneration !== _hikModalGeneration || modal?.classList.contains("hidden")) return;
+      renderConfig(State.settings.hikvisionConfig || {});
+    }
+    if (modalGeneration !== _hikModalGeneration || modal?.classList.contains("hidden")) return;
+    refreshSubstreamProfile();
   };
   const closeModal = () => {
+    _hikModalGeneration += 1;
     modal?.classList.add("hidden");
     setTimeout(() => hikvisionPlayer.syncNativePresentation().catch(() => {}), 50);
     clearInterval(_hikStatusTimer);
