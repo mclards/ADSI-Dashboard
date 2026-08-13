@@ -1,4 +1,4 @@
-﻿:root {
+:root {
   --base-font-size: 12px;
   --surface-scale: 1;
   --inv-toolbar-scale: 1;
@@ -27,7 +27,7 @@
   --text3: #9a7a88;
   /* Level-1 aliases: a number of components (camera modals, cap-schedule,
      DB export, alarm docs, serial notifications) reference --text1/--surface1
-     Ã¢â‚¬â€ the primary text / base surface Ã¢â‚¬â€ which were never defined, so those
+     — the primary text / base surface — which were never defined, so those
      rules silently fell back to inherited color or a transparent background.
      Aliasing here (resolved per-theme at use time via var()) fixes them all
      in every theme without touching each call site. */
@@ -176,7 +176,7 @@
 }
 
 :root[data-theme="light"] {
-  /* Warm parchment light mode Ã¢â‚¬â€ muted, eye-friendly, no stark whites. */
+  /* Warm parchment light mode — muted, eye-friendly, no stark whites. */
   --bg: #e6dccb;
   --bg2: #dcd0bd;
   --surface: #f0e7d6;
@@ -820,7 +820,7 @@ body.license-notice-open .side-nav {
 .tb-logo img {
   height: calc(34px * 1.25 * var(--top-scale));
   width: auto;
-  object-fit: fill; width: 100%; height: 100%;
+  object-fit: contain;
 }
 
 .logo-fallback {
@@ -1328,7 +1328,7 @@ body.license-notice-open .side-nav {
   color: var(--text);
   background: color-mix(in srgb, var(--cyan) 24%, transparent);
 }
-/* .xfer-phase-reconcile removed Ã¢â‚¬â€ viewer model has no reconciliation */
+/* .xfer-phase-reconcile removed — viewer model has no reconciliation */
 .xfer-phase-applying {
   color: var(--accent);
 }
@@ -1636,7 +1636,7 @@ body.sidebar-open .side-nav {
 .nav-btn[draggable="true"]:active {
   cursor: grabbing;
 }
-/* Armed via press-and-hold Ã¢â‚¬â€ a gentle lift signals "you can drag me now". */
+/* Armed via press-and-hold — a gentle lift signals "you can drag me now". */
 .nav-btn.nav-armed {
   cursor: grab;
   transform: scale(1.035);
@@ -1713,7 +1713,7 @@ body.sidebar-open .side-nav {
     0 3px 10px rgba(76, 59, 37, 0.14);
 }
 
-/* Accent stripe: var(--accent) = #2b67ad in light Ã¢â‚¬â€ blue on beige, correct */
+/* Accent stripe: var(--accent) = #2b67ad in light — blue on beige, correct */
 :root[data-theme="light"] .side-about-card::before {
   opacity: 0.85;
 }
@@ -1787,7 +1787,7 @@ body.sidebar-open .side-nav {
   animation: pageEnter 0.22s cubic-bezier(0.2, 0, 0.8, 1) forwards;
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Empty State Component Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Empty State Component ────────────────────────────────────────── */
 
 .empty-state {
   display: flex;
@@ -1896,7 +1896,7 @@ body.sidebar-open .side-nav {
   color: var(--text3);
 }
 
-/* ÃŽÂ²-3 Ã¢â‚¬â€ Parameters page advanced-columns toggle + diagnostic-column accent. */
+/* β-3 — Parameters page advanced-columns toggle + diagnostic-column accent. */
 .param-adv-toggle {
   display: inline-flex;
   align-items: center;
@@ -2414,7 +2414,7 @@ label[data-required]::after {
   background: rgba(126, 84, 99, 0.15);
 }
 
-/* Poll-cadence chip Ã¢â‚¬â€ informational by default; amber if any inverter is
+/* Poll-cadence chip — informational by default; amber if any inverter is
  * polling faster than vendor-recommended 1 Hz (Ingeteam Level 2 AAV2011IFA01_
  * p.8, alarm 0x0008 RESET_WD risk). Only visible when the API reports the
  * `pollCadence` block, so gateway-only deploys don't see a stale chip. */
@@ -2563,7 +2563,7 @@ label[data-required]::after {
     gap: calc(4px * var(--inv-card-scale));
   }
 
-  /* Ã¢â€â‚¬Ã¢â€â‚¬ 2 col Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+  /* ── 2 col ────────────────────────────────────────────────────────────── */
   .inv-grid.layout-2 .inv-card {
     --card-row-h: calc(17px * var(--inv-card-scale));
     height: auto;
@@ -2580,7 +2580,7 @@ label[data-required]::after {
     height: calc(190px * var(--inv-card-scale));
   }
 
-  /* Ã¢â€â‚¬Ã¢â€â‚¬ 3 col Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+  /* ── 3 col ────────────────────────────────────────────────────────────── */
   .inv-grid.layout-3 .inv-card {
     --card-row-h: calc(17px * var(--inv-card-scale));
     height: auto;
@@ -2597,7 +2597,7 @@ label[data-required]::after {
     height: calc(198px * var(--inv-card-scale));
   }
 
-  /* Ã¢â€â‚¬Ã¢â€â‚¬ 4 col Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+  /* ── 4 col ────────────────────────────────────────────────────────────── */
   .inv-grid.layout-4 .inv-card {
     --card-row-h: calc(17px * var(--inv-card-scale));
     height: auto;
@@ -2614,7 +2614,7 @@ label[data-required]::after {
     height: calc(196px * var(--inv-card-scale));
   }
 
-  /* Ã¢â€â‚¬Ã¢â€â‚¬ 5 col Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+  /* ── 5 col ────────────────────────────────────────────────────────────── */
   .inv-grid.layout-5 .inv-card {
     --card-table-head-h: calc(17px * var(--inv-card-scale));
     --card-row-h: calc(18px * var(--inv-card-scale));
@@ -2634,7 +2634,7 @@ label[data-required]::after {
     height: calc(170px * var(--inv-card-scale));
   }
 
-  /* Ã¢â€â‚¬Ã¢â€â‚¬ 6 col Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+  /* ── 6 col ────────────────────────────────────────────────────────────── */
   .inv-grid.layout-6 .inv-card {
     --card-table-head-h: calc(17px * var(--inv-card-scale));
     --card-row-h: calc(18px * var(--inv-card-scale));
@@ -2654,7 +2654,7 @@ label[data-required]::after {
     height: calc(152px * var(--inv-card-scale));
   }
 
-  /* Ã¢â€â‚¬Ã¢â€â‚¬ 7 col Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+  /* ── 7 col ────────────────────────────────────────────────────────────── */
   .inv-grid.layout-7 .inv-card {
     --card-table-head-h: calc(17px * var(--inv-card-scale));
     --card-row-h: calc(18px * var(--inv-card-scale));
@@ -2766,7 +2766,7 @@ label[data-required]::after {
     width: 12%;
   }
 
-  /* Ã¢â€â‚¬Ã¢â€â‚¬ 6+ col: further compaction Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+  /* ── 6+ col: further compaction ──────────────────────────────────────── */
   :is(.inv-grid.layout-6, .inv-grid.layout-7) .inv-card {
     --card-table-head-h: calc(15px * var(--inv-card-scale));
     --card-row-gap: calc(1px * var(--inv-card-scale));
@@ -2809,7 +2809,7 @@ label[data-required]::after {
     font-size: calc(9px * var(--inv-card-scale));
   }
 
-  /* Ã¢â€â‚¬Ã¢â€â‚¬ 6-7 col: hide Pdc column to reclaim space Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+  /* ── 6-7 col: hide Pdc column to reclaim space ────────────────────────── */
   :is(.inv-grid.layout-6, .inv-grid.layout-7) .card-table thead th:nth-child(3),
   :is(.inv-grid.layout-6, .inv-grid.layout-7) .card-table td:nth-child(3) {
     display: none;
@@ -2862,7 +2862,7 @@ label[data-required]::after {
     max-height: calc(var(--card-row-h) - 5px);
   }
 
-  /* Ã¢â€â‚¬Ã¢â€â‚¬ 5+ col: tighter PAC strip Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+  /* ── 5+ col: tighter PAC strip ──────────────────────────────────────── */
   :is(.inv-grid.layout-5, .inv-grid.layout-6, .inv-grid.layout-7) .card-pac {
     --card-pac-h: calc(27px * var(--inv-card-scale));
     grid-template-columns:
@@ -2894,7 +2894,7 @@ label[data-required]::after {
     font-size: calc(6.8px * var(--inv-card-scale));
   }
 
-  /* Ã¢â€â‚¬Ã¢â€â‚¬ 6+ col: tighter header Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+  /* ── 6+ col: tighter header ─────────────────────────────────────────── */
   :is(.inv-grid.layout-6, .inv-grid.layout-7) .card-hdr {
     --card-header-h: calc(32px * var(--inv-card-scale));
     gap: calc(4px * var(--inv-card-scale));
@@ -2938,7 +2938,7 @@ label[data-required]::after {
     border-radius: calc(7px * var(--inv-card-scale));
   }
 
-  /* Ã¢â€â‚¬Ã¢â€â‚¬ 7 col: icon-only Start/Stop, narrower controls column Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+  /* ── 7 col: icon-only Start/Stop, narrower controls column ──────────── */
   .inv-grid.layout-7 .card-pac {
     grid-template-columns:
       calc(48px * var(--inv-card-scale)) minmax(0, 1fr)
@@ -2952,7 +2952,7 @@ label[data-required]::after {
     display: inline;
   }
 
-  /* Ã¢â€â‚¬Ã¢â€â‚¬ 5+ col: compact bulk command card Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+  /* ── 5+ col: compact bulk command card ─────────────────────────────── */
   :is(.inv-grid.layout-5, .inv-grid.layout-6, .inv-grid.layout-7)
     .bulk-card-hdr {
     padding: calc(5px * var(--inv-card-scale)) calc(6px * var(--inv-card-scale));
@@ -3018,7 +3018,7 @@ label[data-required]::after {
     display: none;
   }
 
-  /* Ã¢â€â‚¬Ã¢â€â‚¬ 6+ col: further bulk card compaction Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+  /* ── 6+ col: further bulk card compaction ──────────────────────────── */
   :is(.inv-grid.layout-6, .inv-grid.layout-7) .bulk-card-hdr {
     padding: calc(3px * var(--inv-card-scale)) calc(5px * var(--inv-card-scale));
     gap: calc(4px * var(--inv-card-scale));
@@ -3075,7 +3075,7 @@ label[data-required]::after {
     margin-top: 0;
   }
 
-  /* Ã¢â€â‚¬Ã¢â€â‚¬ 7 col: tighter bulk card Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+  /* ── 7 col: tighter bulk card ──────────────────────────────────────── */
   .inv-grid.layout-7 .bulk-card-hdr {
     padding: calc(2px * var(--inv-card-scale)) calc(4px * var(--inv-card-scale));
     gap: calc(3px * var(--inv-card-scale));
@@ -3152,9 +3152,9 @@ label[data-required]::after {
   cursor: grabbing;
 }
 
-/* The drag-handle "Ã¢Â Â¿" glyph was removed: it was absolutely positioned in the
-   header's right-edge lane (right:6px, vertically centered) Ã¢â‚¬â€ the same lane as
-   the status badge and, in the cap-stopped state, the timestamp note Ã¢â‚¬â€ so on
+/* The drag-handle "⠿" glyph was removed: it was absolutely positioned in the
+   header's right-edge lane (right:6px, vertically centered) — the same lane as
+   the status badge and, in the cap-stopped state, the timestamp note — so on
    hover it overlapped them. Draggability is already signalled by the grab
    cursor above, the card lift while dragging, and the dashed placeholder
    pulse, so no decorative handle is needed. Do not re-add a right-anchored
@@ -3591,7 +3591,7 @@ label[data-required]::after {
   vertical-align: middle;
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Status dot (Ctrl column) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Status dot (Ctrl column) ─────────────────────────────────────────── */
 .node-status-dot {
   display: inline-block;
   width: calc(8px * var(--inv-card-scale));
@@ -3732,7 +3732,7 @@ label[data-required]::after {
   color: rgba(255, 255, 255, 0.5);
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ PAC Legend (inverter toolbar) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── PAC Legend (inverter toolbar) ─────────────────────────────────────────── */
 .pac-legend-wrap {
   min-width: 0;
   display: flex;
@@ -4016,7 +4016,7 @@ label[data-required]::after {
   justify-content: center;
 }
 
-/* node-btn: interactivity layer on the indicator Ã¢â‚¬â€ does NOT set background */
+/* node-btn: interactivity layer on the indicator — does NOT set background */
 .node-btn {
   cursor: pointer;
 }
@@ -4133,7 +4133,7 @@ label[data-required]::after {
   filter: brightness(0.92);
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Camera Card Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Camera Card ────────────────────────────────────────────────────── */
 
 /* Same sizing as .inv-card so it sits in the grid alongside inverter cards */
 .camera-card[draggable="true"] {
@@ -4323,7 +4323,7 @@ label[data-required]::after {
   color: #fff;
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Camera Settings Modal Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Camera Settings Modal ─────────────────────────────────────────── */
 .cam-modal-backdrop {
   position: absolute;
   inset: 0;
@@ -4463,7 +4463,7 @@ label[data-required]::after {
   margin-bottom: 2px;
 }
 
-/* Fullscreen mode Ã¢â‚¬â€ break out of card constraints */
+/* Fullscreen mode — break out of card constraints */
 .camera-card:fullscreen,
 .camera-card:-webkit-full-screen {
   width: 100vw;
@@ -4480,7 +4480,7 @@ label[data-required]::after {
 .camera-card:fullscreen .camera-body canvas,
 .camera-card:-webkit-full-screen .camera-body video,
 .camera-card:-webkit-full-screen .camera-body canvas {
-  object-fit: fill; width: 100%; height: 100%;
+  object-fit: contain;
 }
 .camera-card:fullscreen .cam-controls,
 .camera-card:-webkit-full-screen .cam-controls {
@@ -4495,7 +4495,7 @@ label[data-required]::after {
   max-width: 360px;
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Camera Settings Modal (page-level) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Camera Settings Modal (page-level) ─────────────────────────────── */
 .cam-settings-card {
   width: min(400px, 92vw);
   border-radius: 10px;
@@ -4562,7 +4562,6 @@ label[data-required]::after {
   flex: 1;
   overflow-y: auto;
   padding-right: 4px;
-  min-height: 0;
 }
 .cam-settings-body::-webkit-scrollbar { width: 5px; }
 .cam-settings-body::-webkit-scrollbar-track { background: transparent; }
@@ -4805,6 +4804,7 @@ select.cam-field-input { appearance: auto; }
   flex: 1;
 }
 
+/* ── Bulk command card ─────────────────────────────────────────────── */
 .hik-settings-card {
   width: min(720px, 95vw);
   max-height: min(92vh, 780px);
@@ -5108,10 +5108,9 @@ select.cam-field-input { appearance: auto; }
   background: color-mix(in srgb, var(--accent) 7%, white);
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Bulk command card Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
 .bulk-control-bar {
   --card-fixed-h: calc(186px * var(--inv-card-scale));
-  /* Per-density button sizing Ã¢â‚¬â€ overridden per layout below so 5/6/7 columns
+  /* Per-density button sizing — overridden per layout below so 5/6/7 columns
      each get their own tuned format. */
   --bulk-quick-h: 28px;
   --bulk-cmd-h: 34px;
@@ -5298,7 +5297,7 @@ select.cam-field-input { appearance: auto; }
   filter: brightness(0.92);
 }
 
-/* Per-density button sizing Ã¢â‚¬â€ each column count gets its own tuned format.
+/* Per-density button sizing — each column count gets its own tuned format.
    Wider cards (5-col) carry larger, more comfortable actions; narrower cards
    (7-col) step down so the buttons stay proportional to the card width. */
 .inv-grid.layout-5 .bulk-control-bar { --bulk-quick-h: 32px; --bulk-cmd-h: 38px; }
@@ -5679,7 +5678,7 @@ select.cam-field-input { appearance: auto; }
   display: none !important;
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Plant Cap Dedicated Page Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ─── Plant Cap Dedicated Page ─────────────────────────────────────────────── */
 .plant-cap-page-container {
   padding: 0;
   flex: 1;
@@ -5714,7 +5713,7 @@ select.cam-field-input { appearance: auto; }
   color: var(--text3);
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Plant Controller tab strip (APC + NGCP PGC 2016 compliance) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ─── Plant Controller tab strip (APC + NGCP PGC 2016 compliance) ──────── */
 .plant-cap-tab-strip {
   display: flex;
   align-items: center;
@@ -5759,7 +5758,7 @@ select.cam-field-input { appearance: auto; }
 .plant-cap-tab-pane { display: none; }
 .plant-cap-tab-pane.active { display: block; }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Slice ÃŽÂ´ Ã¢â‚¬â€ APC verify chip (next to current %P display) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ─── Slice δ — APC verify chip (next to current %P display) ──────────── */
 .apc-verify-chip {
   display: inline-block;
   margin-left: 8px;
@@ -5779,7 +5778,7 @@ select.cam-field-input { appearance: auto; }
   color: var(--orange); border-color: color-mix(in srgb, var(--orange) 55%, var(--border));
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Architecture clarifications (cabinet vs internal node) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ─── Architecture clarifications (cabinet vs internal node) ──────────── */
 /* Sits inside .apc-field which is a 2-col grid (110px label + 1fr content).
    Without grid-column: 1/-1 the help text falls into the 110px label column
    and renders as a narrow vertical strip. Span both columns. */
@@ -5813,7 +5812,7 @@ select.cam-field-input { appearance: auto; }
   border-radius: 6px;
 }
 
-/* v2.11.x Phase 2 Ã¢â‚¬â€ APC ramp-rate limiter inline row */
+/* v2.11.x Phase 2 — APC ramp-rate limiter inline row */
 .apc-ramp-row {
   display: flex;
   align-items: center;
@@ -5879,7 +5878,7 @@ select.cam-field-input { appearance: auto; }
 }
 .cmp-target-help b { color: var(--text); font-weight: 600; }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Compliance test panels (T2/T3/T5/Reports) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ─── Compliance test panels (T2/T3/T5/Reports) ────────────────────────── */
 .cmp-panel {
   padding: 18px 22px;
   background: var(--surface);
@@ -5941,7 +5940,7 @@ select.cam-field-input { appearance: auto; }
   border: 1px solid var(--border);
 }
 
-/* v2.11.x Phase 1 Ã¢â‚¬â€ Grid Monitor chart cards */
+/* v2.11.x Phase 1 — Grid Monitor chart cards */
 .cmp-chart-card {
   background: var(--surface2);
   border: 1px solid var(--border);
@@ -5990,7 +5989,7 @@ select.cam-field-input { appearance: auto; }
 .cmp-num { width: 70px; text-align: center; }
 .cmp-text { width: 200px; }
 .cmp-text-wide { width: 240px; }
-/* v2.11.x Ã¢â‚¬â€ used by long comma-separated lists (T3 PF sweep, T5 ramp) so
+/* v2.11.x — used by long comma-separated lists (T3 PF sweep, T5 ramp) so
  * the input grows to fill the remaining row width instead of clipping the
  * value. The 320px min keeps the field visually balanced when the row is
  * narrow (small viewport / collapsed sidebar); flex-basis: 0 lets it claim
@@ -6090,7 +6089,7 @@ select.cam-field-input { appearance: auto; }
 .cmp-status-failed    { color: var(--red); }
 .cmp-status-aborted   { color: var(--orange); }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ v2.11.x Ã¢â‚¬â€ How-this-works guide + live observation feed Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ─── v2.11.x — How-this-works guide + live observation feed ────────────── */
 /* Rendered as <details>/<summary> so the operator can collapse the prose
  * once they've read it. The "padding-bottom: 0" / collapsed override below
  * trims the empty-card look when closed so it reads like a single header row. */
@@ -6123,12 +6122,12 @@ select.cam-field-input { appearance: auto; }
 .cmp-howto:not([open]) .cmp-howto-title {
   margin-bottom: 0;
 }
-/* Hide the default disclosure marker Ã¢â‚¬â€ we draw our own chevron so it
+/* Hide the default disclosure marker — we draw our own chevron so it
  * matches the rest of the dashboard's iconography. */
 .cmp-howto-title::-webkit-details-marker { display: none; }
 .cmp-howto-title::marker { content: ""; }
 .cmp-howto-title::before {
-  content: "Ã¢â€“Â¸";
+  content: "▸";
   font-size: 11px;
   color: color-mix(in srgb, var(--accent) 70%, var(--text2));
   transition: transform 0.15s ease;
@@ -6174,7 +6173,7 @@ select.cam-field-input { appearance: auto; }
   flex-direction: column;
   gap: 4px;
 }
-/* The HTML `hidden` attribute should always trump `display: flex` above Ã¢â‚¬â€
+/* The HTML `hidden` attribute should always trump `display: flex` above —
  * without this rule the progress bar is visible in the Idle layout, which
  * makes operators think a run is in flight before they've even pressed Start. */
 .cmp-progress[hidden] { display: none !important; }
@@ -6270,7 +6269,7 @@ select.cam-field-input { appearance: auto; }
 .cmp-pill.warn { background: color-mix(in srgb, var(--orange) 20%, transparent); color: var(--orange); border: 1px solid color-mix(in srgb, var(--orange) 40%, transparent); }
 .cmp-pill.fail { background: color-mix(in srgb, var(--red)    20%, transparent); color: var(--red);    border: 1px solid color-mix(in srgb, var(--red)    40%, transparent); }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Active Power Control (APC) panel Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ─── Active Power Control (APC) panel ──────────────────────────────────── */
 .apc-panel {
   position: relative;
   display: flex;
@@ -6323,7 +6322,7 @@ select.cam-field-input { appearance: auto; }
   text-transform: uppercase;
   color: var(--text3);
 }
-/* v2.11.x Ã¢â‚¬â€ auth-note row replaces the old hardcoded adsiMM input. The
+/* v2.11.x — auth-note row replaces the old hardcoded adsiMM input. The
  * field is rendered as plain text so operators see WHY there's no input
  * (modal pops up on action click) instead of staring at a missing field. */
 .apc-field-auth-note .apc-auth-note {
@@ -6488,7 +6487,7 @@ select.cam-field-input { appearance: auto; }
   border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
 }
 /* Visual separator between the output-gate cluster (STOP/START) and the
-   primary Apply Setpoint action Ã¢â‚¬â€ no more huge dead space pushing Apply
+   primary Apply Setpoint action — no more huge dead space pushing Apply
    to the far right. */
 .apc-actions .apc-actions-divider {
   display: inline-block;
@@ -7489,7 +7488,7 @@ select.cam-field-input { appearance: auto; }
   font-family: var(--font-mono);
 }
 
-/* Chart titlebar Ã¢â‚¬â€ title + stats in one row */
+/* Chart titlebar — title + stats in one row */
 .ana-chart-titlebar {
   display: flex;
   align-items: baseline;
@@ -7668,7 +7667,7 @@ select.cam-field-input { appearance: auto; }
   font-family: var(--font-main);
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Sortable Table Headers Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ─── Sortable Table Headers ─────────────────────────────────────────────────── */
 .data-table thead th.sortable {
   cursor: pointer;
   user-select: none;
@@ -7678,7 +7677,7 @@ select.cam-field-input { appearance: auto; }
     background-color 0.15s ease;
 }
 .data-table thead th.sortable::after {
-  content: " Ã¢â€¡â€¦";
+  content: " ⇅";
   font-size: 9px;
   opacity: 0.35;
   display: inline-block;
@@ -7697,12 +7696,12 @@ select.cam-field-input { appearance: auto; }
   color: var(--accent);
 }
 .data-table thead th.sorted-asc::after {
-  content: " Ã¢â€ â€˜";
+  content: " ↑";
   opacity: 0.85;
   font-size: 10px;
 }
 .data-table thead th.sorted-desc::after {
-  content: " Ã¢â€ â€œ";
+  content: " ↓";
   opacity: 0.85;
   font-size: 10px;
 }
@@ -8380,7 +8379,7 @@ select.cam-field-input { appearance: auto; }
 /* Inline status-message kind modifiers. These pair with the base `.smsg`
    (e.g. class="smsg smsg-err") and are emitted by _fcalSetMsg() and many
    other call sites. They were previously undefined, so every err/ok/warn/
-   info message fell back to the base green Ã¢â‚¬â€ making failures read as
+   info message fell back to the base green — making failures read as
    success. Single-class selectors that follow `.smsg` in source order, so
    they win the cascade over the base color. */
 .smsg-ok {
@@ -8561,7 +8560,7 @@ select.cam-field-input { appearance: auto; }
   overflow: hidden;
 }
 
-/* Old guide accordion/banner CSS removed Ã¢â‚¬â€ guide now uses iframe */
+/* Old guide accordion/banner CSS removed — guide now uses iframe */
 
 /* About sidebar expanded styles */
 .side-about-head {
@@ -8987,7 +8986,7 @@ select.cam-field-input { appearance: auto; }
 #page-analytics .chart-card {
   border-radius: 12px;
   border-color: rgba(96, 46, 61, 0.86);
-  /* No always-on shadow Ã¢â‚¬â€ inherit the subtler base resting shadow and let
+  /* No always-on shadow — inherit the subtler base resting shadow and let
      :hover supply the lift, consistent with cards on every other page. */
 }
 
@@ -9375,7 +9374,7 @@ select.cam-field-input { appearance: auto; }
 .toast-summary-pill[data-sev="success"]  { border-left-color: var(--green); }
 
 /* Pulse animation triggered when a new alarm arrives while the pill is
-   collapsed Ã¢â‚¬â€ draws attention without popping a full toast over the cards. */
+   collapsed — draws attention without popping a full toast over the cards. */
 .toast-summary-pill.pulse {
   animation:
     toast-pill-in 0.22s ease both,
@@ -9456,7 +9455,7 @@ select.cam-field-input { appearance: auto; }
   transform: rotate(180deg);
 }
 
-/* "Dismiss all" chip Ã¢â‚¬â€ shown only when the stack is expanded, sits between
+/* "Dismiss all" chip — shown only when the stack is expanded, sits between
    the pill and the stacked items. */
 .toast-dismiss-all {
   align-self: flex-end;
@@ -9614,7 +9613,7 @@ select.cam-field-input { appearance: auto; }
   color: var(--text3);
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Modern Toast Notification System Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ─── Modern Toast Notification System ─────────────────────────────────────── */
 @keyframes slideInRight {
   from {
     transform: translateX(110%);
@@ -9636,7 +9635,7 @@ select.cam-field-input { appearance: auto; }
   }
 }
 
-/* Transient app-feedback toasts live at the TOP-RIGHT of the content area Ã¢â‚¬â€
+/* Transient app-feedback toasts live at the TOP-RIGHT of the content area —
    above the inverter card grid (over the toolbar/legend strip), so a burst of
    confirmations briefly covers controls rather than the cards themselves. The
    persistent alarm hub + chat bubble keep the bottom-right corner. */
@@ -9763,7 +9762,7 @@ select.cam-field-input { appearance: auto; }
 }
 
 /* The bottom-left floating notification bell was removed in the notification
-   revamp Ã¢â‚¬â€ the sidebar ALARMS badge is the only left-side indicator and the
+   revamp — the sidebar ALARMS badge is the only left-side indicator and the
    bottom-right hub pill (.toast-summary-pill) is the single live-alert
    trigger. Notification surfaces are consolidated on the right. */
 
@@ -10196,7 +10195,7 @@ select.cam-field-input { appearance: auto; }
   font-size: 10px;
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Theme Preview Modal Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Theme Preview Modal ─────────────────────────────────────────────────── */
 .theme-preview-modal-card {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -10306,7 +10305,7 @@ select.cam-field-input { appearance: auto; }
   opacity: 1;
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ App Confirm Dialog Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── App Confirm Dialog ───────────────────────────────────────────────────── */
 .confirm-dialog {
   background: var(--surface2);
   border: 1px solid var(--border2);
@@ -12067,12 +12066,12 @@ body.mode-transition-active {
     0 3px 10px rgba(0, 0, 0, 0.26);
 }
 
-/* Accent stripe: var(--accent) = #2d7ef7 in classic Ã¢â‚¬â€ blue on near-black, correct */
+/* Accent stripe: var(--accent) = #2d7ef7 in classic — blue on near-black, correct */
 :root[data-theme="classic"] .side-about-card::before {
   opacity: 0.75;
 }
 
-/* Version badge: color-mix(var(--accent)) resolves to translucent blue Ã¢â‚¬â€ correct */
+/* Version badge: color-mix(var(--accent)) resolves to translucent blue — correct */
 /* Action button hover: dark-theme shadow already fits classic dark bg */
 :root[data-theme="classic"] .side-about-actions .btn:hover {
   box-shadow:
@@ -13053,7 +13052,7 @@ body.mode-transition-active {
   background: rgba(12, 26, 22, 0.46);
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Midnight: progress text, license bar Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Midnight: progress text, license bar ─────────────────────────────── */
 
 :root[data-theme="midnight"] .tb-progress-text {
   color: #7aaa9e;
@@ -13079,20 +13078,20 @@ body.mode-transition-active {
   border-color: rgba(60, 225, 185, 0.7);
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Midnight: side-nav about card Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Midnight: side-nav about card ────────────────────────────────────── */
 
 :root[data-theme="midnight"] .side-about-card::before {
   background: linear-gradient(90deg, rgba(0, 0, 0, 0) 0%, rgba(38, 201, 160, 0.06) 50%, rgba(0, 0, 0, 0) 100%);
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Midnight: card inv icon glow, header strip Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Midnight: card inv icon glow, header strip ───────────────────────── */
 
 :root[data-theme="midnight"] .card-hdr {
   border-bottom: 1px solid rgba(30, 58, 52, 0.5);
   background: linear-gradient(90deg, rgba(16, 34, 28, 0.9) 0%, rgba(10, 22, 18, 0.82) 100%);
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Midnight: data-tables (alarm/energy/audit/report pages) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Midnight: data-tables (alarm/energy/audit/report pages) ──────────── */
 
 :root[data-theme="midnight"] #page-alarms .data-table thead th,
 :root[data-theme="midnight"] #page-energy .data-table thead th,
@@ -13115,7 +13114,7 @@ body.mode-transition-active {
   border-top-color: rgba(30, 58, 52, 0.6);
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Midnight: energy page KPIs Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Midnight: energy page KPIs ───────────────────────────────────────── */
 
 :root[data-theme="midnight"] #page-energy .energy-kpi-label {
   color: #78a89e;
@@ -13134,7 +13133,7 @@ body.mode-transition-active {
   background: rgba(10, 22, 18, 0.82);
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Midnight: report page KPIs Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Midnight: report page KPIs ───────────────────────────────────────── */
 
 :root[data-theme="midnight"] #page-report .kpi-label {
   color: #78a89e;
@@ -13144,7 +13143,7 @@ body.mode-transition-active {
   color: #e0f2ee;
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Midnight: form inputs & selects Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Midnight: form inputs & selects ──────────────────────────────────── */
 
 :root[data-theme="midnight"] .toolbar-info {
   border-color: rgba(30, 58, 52, 0.7);
@@ -13173,7 +13172,7 @@ body.mode-transition-active {
   box-shadow: 0 0 0 2px rgba(38, 201, 160, 0.12);
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Midnight: notification & alarm panel badges Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Midnight: notification & alarm panel badges ──────────────────────── */
 
 :root[data-theme="midnight"] .tb-nav-toggle,
 :root[data-theme="midnight"] .tb-theme-toggle,
@@ -13197,7 +13196,7 @@ body.mode-transition-active {
   color: #6a8e84;
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Midnight: guide/update modals Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Midnight: guide/update modals ────────────────────────────────────── */
 
 :root[data-theme="midnight"] .guide-modal-head {
   border-bottom-color: rgba(30, 58, 52, 0.5);
@@ -13243,14 +13242,14 @@ body.mode-transition-active {
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(30, 58, 52, 0.2);
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Midnight: license items Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Midnight: license items ──────────────────────────────────────────── */
 
 :root[data-theme="midnight"] .license-audit-wrap {
   border-color: rgba(30, 58, 52, 0.6);
   background: linear-gradient(180deg, rgba(14, 30, 26, 0.88) 0%, rgba(10, 22, 18, 0.94) 100%);
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Midnight: body grid & glow (already via body::before/::after) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Midnight: body grid & glow (already via body::before/::after) ───── */
 
 :root[data-theme="midnight"] #titlebar .tb-theme-toggle {
   border-color: var(--btn-topbar-border);
@@ -13812,7 +13811,7 @@ body.mode-transition-active {
   flex-direction: column;
 }
 
-/* Forecast pop-out bar Ã¢â‚¬â€ in-flow at the top of the forecast section.
+/* Forecast pop-out bar — in-flow at the top of the forecast section.
    Flex row, right-aligned, minimal height. In normal mode this adds only
    28px of space at the top of the forecast page (same height as btn-popout).
    In popout-mode the bar gets a bit more breathing room since there's no
@@ -13933,7 +13932,7 @@ body.mode-transition-active {
   display: none;
 }
 
-/* Forecast page bypasses the tab UI Ã¢â‚¬â€ all subsections render at once with the
+/* Forecast page bypasses the tab UI — all subsections render at once with the
  * existing `order:` rules below. The tab bar is hidden, every panel becomes
  * visible regardless of the [hidden] attribute, and panels collapse to
  * `display: contents` so the inner `forecast-*-panel` subsections inherit the
@@ -14201,10 +14200,10 @@ body.mode-transition-active {
 }
 
 /* Purpose-group overline for #settingsSectionMenu (added 2026-05-30).
-   Title Case only Ã¢â‚¬â€ never uppercase. Fully token-driven so it tracks the
+   Title Case only — never uppercase. Fully token-driven so it tracks the
    dark / light / classic themes; a barely-there hairline fences each group
    while whitespace does most of the separating. Decorative (aria-hidden +
-   pointer-events:none) Ã¢â‚¬â€ the nav JS never sees these nodes. */
+   pointer-events:none) — the nav JS never sees these nodes. */
 #page-settings .settings-menu-group-label {
   margin: 6px 0 1px;
   padding: 5px 12px 0;
@@ -14251,7 +14250,7 @@ body.mode-transition-active {
   justify-content: center;
 }
 
-/* Save Settings is the primary CTA Ã¢â‚¬â€ a touch taller / heavier than the
+/* Save Settings is the primary CTA — a touch taller / heavier than the
    utility actions below it so the hierarchy reads at a glance. */
 #page-settings #btnSaveSettings {
   height: 34px;
@@ -14288,7 +14287,7 @@ body.mode-transition-active {
   border-color: var(--btn-outline-border-hover);
 }
 
-/* Icon picks up the accent on hover/focus Ã¢â‚¬â€ mirrors the settings nav menu
+/* Icon picks up the accent on hover/focus — mirrors the settings nav menu
    directly above this card, tying the two surfaces together. */
 #page-settings .settings-utility-grid .btn-outline:hover .mdi,
 #page-settings .settings-utility-grid .btn-outline:focus-visible .mdi {
@@ -14306,7 +14305,7 @@ body.mode-transition-active {
 }
 
 /* Tier separators inside the utility grid (decorative, aria-hidden). Full-
-   width hairlines that fence the three action groups Ã¢â‚¬â€ config I/O, tools,
+   width hairlines that fence the three action groups — config I/O, tools,
    and the destructive Restore Defaults. The danger variant carries a faint
    red tint so the irreversible action reads as fenced off. Token-driven so
    they track the dark / light / classic themes. */
@@ -14392,7 +14391,7 @@ body.mode-transition-active {
   max-height: none;
 }
 
-/* Inline help prose is removed from the visible UI Ã¢â‚¬â€ guidance lives in the
+/* Inline help prose is removed from the visible UI — guidance lives in the
  * control's title= tooltip (operator preference). Kept in the DOM for
  * aria-describedby / screen-reader context. */
 #page-settings .settings-sections .srow > small {
@@ -14420,7 +14419,7 @@ body.mode-transition-active {
   color: var(--accent);
 }
 
-/* The sticky section header already names the active section Ã¢â‚¬â€ the per-card
+/* The sticky section header already names the active section — the per-card
  * title just duplicates it. Hide it to keep the panel clean. */
 #page-settings .settings-sections > .sgroup.settings-card > .sgroup-title {
   display: none;
@@ -14479,7 +14478,7 @@ body.mode-transition-active {
 }
 
 /* Inside an active tab panel the former subsection wrapper is one level
- * deeper than the card grid Ã¢â‚¬â€ it inherits the panel's block layout, so
+ * deeper than the card grid — it inherits the panel's block layout, so
  * `grid-column` doesn't apply, but it still needs to fill the panel width.
  * Without `width: 100%` the wrapper hugs its content and looks half-width
  * on wide viewports. */
@@ -14490,7 +14489,7 @@ body.mode-transition-active {
   box-sizing: border-box;
 }
 
-/* Scroll containment Ã¢â‚¬â€ Inverter Clocks pattern, generalized to every
+/* Scroll containment — Inverter Clocks pattern, generalized to every
  * tabbed settings card. Goal: no page-level scrollbar; if a tab panel's
  * content overflows the viewport, the OVERFLOW scrolls inside the panel.
  *
@@ -14498,7 +14497,7 @@ body.mode-transition-active {
  *   1. When the section is active AND it has a tab bar, switch from the
  *      default 12-col grid to flex-column with `flex: 1 1 auto; min-height: 0`
  *      so it claims the remaining height of `.settings-sections`.
- *   2. The visible (non-[hidden]) tab panel becomes the scroll container Ã¢â‚¬â€
+ *   2. The visible (non-[hidden]) tab panel becomes the scroll container —
  *      `flex: 1 1 auto; min-height: 0; overflow-y: auto`.
  *   3. Tab bar + outside-tab elements (sgroup-title, sgroup-actions, the
  *      shared cb-progress-wrap) stay non-flexing and pin to the top/bottom.
@@ -14508,7 +14507,7 @@ body.mode-transition-active {
  *
  * Inverter Clocks keeps its bespoke `#inverterClockSection`-scoped rules
  * because its inner table needs sticky-thead + a dedicated scroll wrapper
- * (`.invclock-scroll`) Ã¢â‚¬â€ that pattern is preserved untouched above.  */
+ * (`.invclock-scroll`) — that pattern is preserved untouched above.  */
 #page-settings .settings-sections > .sgroup.settings-card.settings-section-active:has(> .card-tabs) {
   display: flex;
   flex-direction: column;
@@ -14594,7 +14593,7 @@ body.mode-transition-active {
   grid-column: 1;
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Field-width fixes (fit content) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Field-width fixes (fit content) ─────────────────────────────────────── */
 /* Latitude/Longitude hold up to 11-char signed decimals (e.g. -125.284455);
    the shared .inp-sm (72px) clipped both the value and the placeholder, so
    widen these two specifically. */
@@ -14604,13 +14603,13 @@ body.mode-transition-active {
 }
 
 /* Backup Activity date filter: a type=date input needs room for the full
-   mm/dd/yyyy value plus its native calendar/spinner controls Ã¢â‚¬â€ the shared
+   mm/dd/yyyy value plus its native calendar/spinner controls — the shared
    .inp-sm (72px) clipped both the placeholder and the picker icon. */
 #page-settings #cloudBackupSection #cbRestoreDate {
   width: 150px;
 }
 
-/* URL / path inputs (Data/Write API, Export Folder, Remote Gateway) Ã¢â‚¬â€ wider so
+/* URL / path inputs (Data/Write API, Export Folder, Remote Gateway) — wider so
    the default values and typical paths show in full; longer custom values
    still scroll within the field, capped to the cell on narrow layouts. */
 #page-settings .settings-subsection .inp-lg,
@@ -14621,7 +14620,7 @@ body.mode-transition-active {
 
 /* Each tab's .settings-subsection is the first (and only) div in its panel, so
    the old per-subsection nth-of-type grid-column spans matched nothing (and the
-   panels aren't grids) Ã¢â‚¬â€ removed as dead. The .srow grid below governs field
+   panels aren't grids) — removed as dead. The .srow grid below governs field
    width inside whichever tab panel is visible. */
 
 #page-settings #opsCompactSection .settings-subsection .srow,
@@ -15130,7 +15129,7 @@ body.mode-transition-active {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  /* Connectivity: Mode & Remote stays full-width; health+diag stay 7/5 Ã¢â‚¬â€ no override needed */
+  /* Connectivity: Mode & Remote stays full-width; health+diag stay 7/5 — no override needed */
 
   /* Cloud Backup: Provider Setup + Backup Config side-by-side */
   #page-settings #cloudBackupSection .cb-subsection:nth-of-type(2),
@@ -15340,7 +15339,7 @@ body.mode-transition-active {
   }
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Inverter Detail Panel Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Inverter Detail Panel ───────────────────────────────────────────────── */
 .inv-detail-panel {
   padding: 0 0 16px 0;
   display: flex;
@@ -15406,7 +15405,7 @@ body.mode-transition-active {
   font-size: 10px;
 }
 .inv-detail-card-slot {
-  min-width: 0; /* hosts the moved .inv-card Ã¢â‚¬â€ natural card size */
+  min-width: 0; /* hosts the moved .inv-card — natural card size */
 }
 .inv-detail-alarms-wrap {
   overflow: hidden;
@@ -15515,7 +15514,7 @@ body.mode-transition-active {
   }
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Forecast Performance Monitor panel Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Forecast Performance Monitor panel ────────────────────────────────────── */
 .fperf-card {
   background: var(--surface);
   border: 1px solid var(--border2);
@@ -15981,7 +15980,7 @@ body.mode-transition-active {
   }
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Reduced Motion Accessibility Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Reduced Motion Accessibility ─────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
   .page,
   .page.active {
@@ -16026,7 +16025,7 @@ body.mode-transition-active {
   }
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Scheduled Auto-Cap Summary Card Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ─── Scheduled Auto-Cap Summary Card ──────────────────────────────────────── */
 .plant-cap-sched-summary {
   margin-top: 10px;
   padding: 12px 14px;
@@ -16160,7 +16159,7 @@ body.mode-transition-active {
   color: var(--text1);
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Cap Schedule Section Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ─── Cap Schedule Section ──────────────────────────────────────────────────── */
 .cap-sched-list {
   display: flex;
   flex-direction: column;
@@ -16534,7 +16533,7 @@ body.mode-transition-active {
   }
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Alarm Drilldown Modal (v2.8.13) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ─── Alarm Drilldown Modal (v2.8.13) ─────────────────────────────────────── */
 #alarmDetailModal {
   backdrop-filter: blur(2px);
 }
@@ -16578,7 +16577,7 @@ body.mode-transition-active {
   max-height: none; /* override inherited .confirm-dialog-body max-height: 260px */
 }
 
-/* Hex badge Ã¢â‚¬â€ used in header, card heads, inline */
+/* Hex badge — used in header, card heads, inline */
 .alarm-detail-hex {
   display: inline-block;
   font-family: "JetBrains Mono", "Consolas", monospace;
@@ -16597,7 +16596,7 @@ body.mode-transition-active {
   padding: 2px 7px;
 }
 
-/* Copy button Ã¢â‚¬â€ sits inline next to the hex badge */
+/* Copy button — sits inline next to the hex badge */
 .alarm-detail-copy-btn {
   display: inline-flex;
   align-items: center;
@@ -16626,7 +16625,7 @@ body.mode-transition-active {
   font-size: 14px;
 }
 
-/* Banners Ã¢â‚¬â€ fatal (red) + variant (amber) */
+/* Banners — fatal (red) + variant (amber) */
 .alarm-detail-banner {
   display: flex;
   gap: 12px;
@@ -16637,7 +16636,7 @@ body.mode-transition-active {
   border: 1px solid;
 }
 
-/* v2.11.x Slice ÃŽÂº Ã¢â‚¬â€ Asset Health context panel inside the alarm modal.
+/* v2.11.x Slice κ — Asset Health context panel inside the alarm modal.
    Renders compact IGBT + AC contactor health tiles for the alarm's node so
    the operator sees how the alarm fits into wider asset-aging context. */
 .alarm-detail-asset-health {
@@ -16795,7 +16794,7 @@ body.mode-transition-active {
   line-height: 1.55;
 }
 
-/* v2.10.0 Slice F Ã¢â‚¬â€ Captured StopReason snapshot panel */
+/* v2.10.0 Slice F — Captured StopReason snapshot panel */
 .alarm-detail-stop-reason {
   padding: 12px 14px;
   margin-bottom: 12px;
@@ -17003,7 +17002,7 @@ body.mode-transition-active {
 .alarm-sev-dot.sev-warning  { background: #f59e0b; }
 .alarm-sev-dot.sev-info     { background: #60a5fa; }
 
-/* TrinPM chip Ã¢â‚¬â€ MUCH smaller, lighter, grouped; anchor links to ingeconsuntraining.info */
+/* TrinPM chip — MUCH smaller, lighter, grouped; anchor links to ingeconsuntraining.info */
 .alarm-detail-trinpm {
   display: inline-flex;
   align-items: center;
@@ -17028,7 +17027,7 @@ body.mode-transition-active {
   outline: none;
 }
 
-/* Schematic-page chip Ã¢â‚¬â€ in card head, links to schematic download */
+/* Schematic-page chip — in card head, links to schematic download */
 .alarm-detail-pagechip {
   display: inline-flex;
   align-items: center;
@@ -17051,7 +17050,7 @@ body.mode-transition-active {
   font-size: 12px;
 }
 
-/* Debug / sub-code row Ã¢â‚¬â€ small 2-column row */
+/* Debug / sub-code row — small 2-column row */
 .alarm-detail-debug-row {
   display: flex;
   gap: 10px;
@@ -17067,7 +17066,7 @@ body.mode-transition-active {
   flex: 0 0 auto;
 }
 
-/* Troubleshooting step list Ã¢â‚¬â€ numbered, compact, safety-aware */
+/* Troubleshooting step list — numbered, compact, safety-aware */
 .alarm-detail-action-summary {
   font-size: 12.5px;
   color: var(--text, #e5ecf6);
@@ -17116,7 +17115,7 @@ body.mode-transition-active {
   flex: 0 0 auto;
 }
 
-/* Provenance footer Ã¢â‚¬â€ document sources + fallback note */
+/* Provenance footer — document sources + fallback note */
 .alarm-detail-provenance {
   margin-top: 14px;
   padding: 10px 12px;
@@ -17225,7 +17224,7 @@ body.mode-transition-active {
   color: var(--accent);
 }
 
-/* Narrow-viewport (under 520px) Ã¢â‚¬â€ stack buttons, shrink paddings */
+/* Narrow-viewport (under 520px) — stack buttons, shrink paddings */
 @media (max-width: 520px) {
   .alarm-detail-dialog {
     width: 98vw;
@@ -17239,7 +17238,7 @@ body.mode-transition-active {
   .alarm-detail-doc-btn { justify-content: center; }
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ In-app PDF Viewer Modal Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+/* ── In-app PDF Viewer Modal ─────────────────────────────────────────────
    Destination for per-bit schematic page chips. Uses an iframe against the
    local /docs/ Express mount so Chromium's built-in PDF viewer renders
    inline, jumped to the requested #page=N. Stacks ABOVE .alarm-detail
@@ -17387,13 +17386,13 @@ body.mode-transition-active {
   .pdf-viewer-btn { padding: 6px 8px; }
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ v2.9.0 Slice G Ã¢â‚¬â€ Inverter Clocks (Settings + Energy card) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ─── v2.9.0 Slice G — Inverter Clocks (Settings + Energy card) ─────────── */
 /*
  * Uses the project's --accent/--green/--red/--orange/--text/--border tokens
  * so both parchment themes apply without extra overrides.
  */
 
-/* Settings Ã¢â€ â€™ Inverter Clocks form rows Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* Settings → Inverter Clocks form rows ─────────────────────────────────── */
 .invclock-form {
   display: flex;
   flex-direction: column;
@@ -17401,7 +17400,7 @@ body.mode-transition-active {
   margin-top: 4px;
 }
 
-/* v2.9.1 Ã¢â‚¬â€ 2-column layout for the Schedule + Energy Source subsections.
+/* v2.9.1 — 2-column layout for the Schedule + Energy Source subsections.
    Uses flex (not grid) because the parent (#page-settings .settings-main)
    is itself a flex column and a grid child there was reporting min-content
    as its intrinsic cross-axis size, collapsing both columns to per-word
@@ -17442,7 +17441,7 @@ body.mode-transition-active {
   max-width: 100%;
 }
 
-/* v2.9.1 Ã¢â‚¬â€ compact toolbar above the per-unit counter-health table.
+/* v2.9.1 — compact toolbar above the per-unit counter-health table.
    Replaces the old standalone "Operator Actions" subsection that wasted
    vertical space on three small controls. */
 .invclock-toolbar {
@@ -17493,7 +17492,7 @@ body.mode-transition-active {
   white-space: nowrap;
 }
 
-/* v2.10.0 Slice D minimal Ã¢â‚¬â€ Stop Reasons settings card */
+/* v2.10.0 Slice D minimal — Stop Reasons settings card */
 .srn-controls {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   margin-bottom: 12px;
@@ -17535,7 +17534,7 @@ body.mode-transition-active {
   letter-spacing: 0.04em;
 }
 
-/* Fleet-block wrapper Ã¢â‚¬â€ one card per inverter on the Plant Serial Map.
+/* Fleet-block wrapper — one card per inverter on the Plant Serial Map.
  * Card header is a status banner with name, IP, and ok/fail pill so the
  * stacked layout reads as a list of cards rather than naked tables. */
 .srn-fleet-summary {
@@ -17588,7 +17587,7 @@ body.mode-transition-active {
   background: color-mix(in srgb, var(--red) 18%, var(--surface));
   color: var(--red); border: 1px solid color-mix(in srgb, var(--red) 35%, var(--border));
 }
-/* Bulk-Fix status badge Ã¢â‚¬â€ same look as the fleet pill but usable inside
+/* Bulk-Fix status badge — same look as the fleet pill but usable inside
    table cells (the .pill rules are scoped to .srn-fleet-block-head). */
 .srn-badge {
   display: inline-flex; align-items: center;
@@ -17615,20 +17614,20 @@ body.mode-transition-active {
   font-variant-numeric: tabular-nums;
 }
 
-/* v2.10.4 Ã¢â‚¬â€ Stop Reasons snapshots table column widths.
+/* v2.10.4 — Stop Reasons snapshots table column widths.
  * `table-layout: fixed` (set on .srn-table above) honours these <col> widths
- * so the Stop Reason column has enough room for "12 Ã¢â‚¬â€ MOTIVO_PARO_FRAMA3"
+ * so the Stop Reason column has enough room for "12 — MOTIVO_PARO_FRAMA3"
  * stacked over its English description, instead of being truncated with
  * an ellipsis. The Stop Reason cell wraps; every other cell stays nowrap. */
 .srn-table col.srn-col-captured { width: 16rem; }
 .srn-table col.srn-col-node     { width: 6rem;  }
 .srn-table col.srn-col-trigger  { width: 12rem;  }
-.srn-table col.srn-col-reason   { width: auto;  }   /* greedy Ã¢â‚¬â€ takes leftover */
+.srn-table col.srn-col-reason   { width: auto;  }   /* greedy — takes leftover */
 .srn-table col.srn-col-debug    { width: 10rem;  }
 .srn-table col.srn-col-power    { width: 10rem;  }
 .srn-table col.srn-col-active   { width: 6rem;  }
 
-/* 2026-05-19 operator request Ã¢â‚¬â€ every table in Serial Number Setting
+/* 2026-05-19 operator request — every table in Serial Number Setting
  * (Plant Serial Map, Bulk Fix plan/result, Migration History, Firmware
  * Map, Drift log, Read-all) must fill its container with EVENLY
  * distributed columns. `table-layout: fixed` + equal `auto` cols
@@ -17695,7 +17694,7 @@ body.mode-transition-active {
   color: var(--text2);
 }
 .srn-trigger-tag.alarm-transition { background: var(--accent, #3b82f6); color: #fff; }
-/* Lifetime Motive Counters Ã¢â‚¬â€ host wraps the "Captured Ã¢â‚¬Â¦ N slot(s)" header
+/* Lifetime Motive Counters — host wraps the "Captured … N slot(s)" header
  * strip and the histogram table together so they read as one card instead
  * of three drifting elements. The strip's own border/radius is dropped
  * because the host owns the chrome now. */
@@ -17716,7 +17715,7 @@ body.mode-transition-active {
 /* Table fills the host width so the row backgrounds (zebra + hover)
  * extend across the full card, but the # and Motive columns shrink to
  * their content via the `width: 1%; white-space: nowrap` trick. That
- * lets the Count column take all the remaining space Ã¢â‚¬â€ and we align its
+ * lets the Count column take all the remaining space — and we align its
  * content LEFT so the number sits right next to the Motive label
  * instead of being yanked to the far right edge. */
 .srn-histogram-table {
@@ -17757,7 +17756,7 @@ body.mode-transition-active {
 /* `width: 1%` + `nowrap` is the standard CSS trick to shrink a column
  * to its content while letting another column flex. Applied to # and
  * Motive so they hug the left, leaving the Count column to absorb the
- * rest of the row width Ã¢â‚¬â€ content-left so the number is adjacent to
+ * rest of the row width — content-left so the number is adjacent to
  * the label, not stranded at the right edge. */
 .srn-histogram-table th:nth-child(1),
 .srn-histogram-table td:nth-child(1) {
@@ -17784,7 +17783,7 @@ body.mode-transition-active {
   font-variant-numeric: tabular-nums;
   padding-right: 36px;
 }
-/* v2.10.0 Slice ÃŽÂµ Ã¢â‚¬â€ Standard-Modbus cross-check comparison table */
+/* v2.10.0 Slice ε — Standard-Modbus cross-check comparison table */
 .srn-crosscheck-host {
   margin-top: 12px;
   border: 1px solid var(--border);
@@ -17858,7 +17857,7 @@ body.mode-transition-active {
   .invclock-input { max-width: 100%; }
 }
 
-/* Energy Ã¢â€ â€™ Per-Inverter Clock & Counter Status card Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* Energy → Per-Inverter Clock & Counter Status card ─────────────────────── */
 .invclock-card {
   margin-top: 16px;
   border: 1px solid var(--border);
@@ -17958,7 +17957,7 @@ body.mode-transition-active {
 
 /*
  * The parent #inverterClockSection uses the standard Settings 12-col grid.
- * Every direct child in this panel should span the full width Ã¢â‚¬â€ otherwise
+ * Every direct child in this panel should span the full width — otherwise
  * subsections collapse into narrow columns side-by-side.
  */
 #inverterClockSection > .cb-subsection,
@@ -17970,7 +17969,7 @@ body.mode-transition-active {
   grid-column: 1 / -1;
 }
 
-/* v2.10.0 Slice B/C Ã¢â‚¬â€ same 12-col rescue rule for the new sections so their
+/* v2.10.0 Slice B/C — same 12-col rescue rule for the new sections so their
  * direct children span the full width instead of collapsing to ~80 px.  Match
  * the exact pattern used by #inverterClockSection above. */
 #stopReasonsSection > .cb-subsection,
@@ -18022,9 +18021,9 @@ body.mode-transition-active {
 
 /* The wrapper flex-grows to fill the remaining height inside cb-subsection
  * (after the toolbar). With the parent flex chain now bottoming out to a
- * definite height (.settings-sections Ã¢â€ â€™ section Ã¢â€ â€™ tab-panel Ã¢â€ â€™ cb-subsection
+ * definite height (.settings-sections → section → tab-panel → cb-subsection
  * all have definite sizes), `min-height: 0` on each link lets `flex: 1 1 auto`
- * here resolve to a concrete pixel height Ã¢â‚¬â€ and the wrapper becomes the
+ * here resolve to a concrete pixel height — and the wrapper becomes the
  * scroll container. Sticky <thead> pins to its top. */
 #inverterClockSection .invclock-tab-panel .invclock-scroll,
 #inverterClockSection .invclock-tab-panel .cb-history-table-wrap {
@@ -18041,7 +18040,7 @@ body.mode-transition-active {
   flex: 0 0 auto;
 }
 
-/* Remote-mode banner Ã¢â‚¬â€ surfaces above the tab bar in remote mode, explaining
+/* Remote-mode banner — surfaces above the tab bar in remote mode, explaining
  * that statuses are mirrored from the gateway and clock-sync actions are
  * disabled here to keep the WS bridge light. Theme-token colors so it
  * blends with every theme. */
@@ -18061,7 +18060,7 @@ body.mode-transition-active {
 }
 /* The class rule above sets `display: flex`, which has the same specificity
  * as the UA `[hidden] { display: none }` rule but wins on source order.
- * Result: the `hidden` HTML attribute would be visually ignored Ã¢â‚¬â€ the
+ * Result: the `hidden` HTML attribute would be visually ignored — the
  * banner would stay on screen even when JS toggles `banner.hidden = true`
  * (which is exactly the gateway-mode false-positive that operators saw on
  * the Stop Reasons / Serial Number sections). Force `[hidden]` to win. */
@@ -18081,7 +18080,7 @@ body.mode-transition-active {
   font-weight: 600;
 }
 
-/* Generic settings-card tab bar Ã¢â‚¬â€ same visual language as the Inverter
+/* Generic settings-card tab bar — same visual language as the Inverter
  * Clocks tab strip but reusable from any settings section. The HTML uses
  * `.card-tabs` / `.card-tab` / `.card-tab-panel` and the JS helper
  * `setActiveCardTab(sectionId, key)` toggles them. The `.invclock-*`
@@ -18212,7 +18211,7 @@ body.mode-transition-active {
   outline-offset: 2px;
 }
 
-/* Subtle vertical divider between non-active tabs Ã¢â‚¬â€ only visible between
+/* Subtle vertical divider between non-active tabs — only visible between
  * adjacent inactive tabs (the active one disrupts the pattern via :not). */
 .invclock-tab:not(.active) + .invclock-tab:not(.active)::before,
 .card-tab:not(.active) + .card-tab:not(.active)::before {
@@ -18225,7 +18224,7 @@ body.mode-transition-active {
   background: color-mix(in srgb, var(--border2, var(--border)) 60%, transparent);
 }
 
-/* Generic tab panels Ã¢â‚¬â€ the active panel is shown via removing [hidden].
+/* Generic tab panels — the active panel is shown via removing [hidden].
  * Settings cards that opt into tabs declare each former subsection wrapper
  * as `.card-tab-panel data-card-tab-panel="key"`. */
 .card-tab-panel {
@@ -18241,7 +18240,7 @@ body.mode-transition-active {
  * down (search for `.cb-progress-wrap` to find it). `.card-tabs` and
  * `.card-tab-panel` are added to that selector list, so they span the full
  * 12-column grid row instead of collapsing to ~80px. This is the saved
- * project rule Ã¢â‚¬â€ any new direct-child wrapper inside `.sgroup.settings-card`
+ * project rule — any new direct-child wrapper inside `.sgroup.settings-card`
  * needs `grid-column: 1 / -1`. */
 
 /* Light-theme inactive tab text gets a touch more contrast in the generic
@@ -18285,7 +18284,7 @@ body.mode-transition-active {
   color: #2a0606;
   border-color: color-mix(in srgb, var(--red) 70%, black);
 }
-/* Neutral "Nodes" chip Ã¢â‚¬â€ total configured units denominator. Distinct from
+/* Neutral "Nodes" chip — total configured units denominator. Distinct from
  * the green/orange/red status chips so the operator can tell at a glance
  * that this is the topology total, not a status bucket. */
 .invclock-chip-nodes {
@@ -18369,7 +18368,7 @@ body.mode-transition-active {
   border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
 }
 
-/* Etotal/parcE baseline anchor pill Ã¢â‚¬â€ reads at a glance whether the
+/* Etotal/parcE baseline anchor pill — reads at a glance whether the
  * displayed counter values are anchored to a clean snapshot. The pill
  * sits in its own column (Anchor) immediately right of parcE, so it
  * doesn't need a left margin to clear an adjacent value. */
@@ -18412,7 +18411,7 @@ body.mode-transition-active {
   color: color-mix(in srgb, var(--accent) 95%, var(--text));
   border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
 }
-/* v2.10.x Ã¢â‚¬â€ EOD-ONLY: late-created row, weaker than EOD but better than
+/* v2.10.x — EOD-ONLY: late-created row, weaker than EOD but better than
  * POLL for tomorrow's anchor. Amber styling signals "transitional state". */
 .invclock-anchor-eod-only {
   background: color-mix(in srgb, var(--orange) 12%, transparent);
@@ -18495,7 +18494,7 @@ body.mode-transition-active {
   font-style: italic;
 }
 
-/* Polish for the Recent Sync Attempts log panel Ã¢â‚¬â€ the shared
+/* Polish for the Recent Sync Attempts log panel — the shared
  * `.invclock-scroll .data-table` rule uses `width: max-content` so wide
  * fleet-health tables can horizontally-scroll, but for this 7-column log the
  * content is short and that leaves a chunk of empty space on the right of
@@ -18570,7 +18569,7 @@ body.mode-transition-active {
   font-weight: var(--fw-semibold, 600);
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ v2.10.x All Parameters Data page Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+/* ─── v2.10.x All Parameters Data page ─────────────────────────────────────
  * Replaces the legacy Energy table UI with a per-inverter 4-tab parameter
  * log fed by `inverter_5min_param` + `dailyAggregator.js`. The chrome reuses
  * the project-wide `.card-tabs` / `.card-tab-panel` framework. */
@@ -18599,7 +18598,7 @@ body.mode-transition-active {
   border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
 }
 
-/* Compact empty-state pill Ã¢â‚¬â€ single-row icon + title + hint. The big
+/* Compact empty-state pill — single-row icon + title + hint. The big
  * dashed card was wasting roughly half the viewport height when no
  * inverter was picked. */
 .param-blank {
@@ -18634,8 +18633,8 @@ body.mode-transition-active {
   min-width: 0;
 }
 
-/* Day-totals strip Ã¢â‚¬â€ sits above the per-slot table on each Node tab and
- * shows PAC-integrated, Etotal ÃŽâ€, and parcE ÃŽâ€ side-by-side. Three energy
+/* Day-totals strip — sits above the per-slot table on each Node tab and
+ * shows PAC-integrated, Etotal Δ, and parcE Δ side-by-side. Three energy
  * reference points computed simultaneously so the operator can spot
  * divergence at a glance. */
 .param-totals-strip {
@@ -18680,12 +18679,12 @@ body.mode-transition-active {
 /* Param table: 16-column grid with a sticky header so the 288 slots of a
  * full solar-window day never push the page off-screen.
  *
- * The Parameters page is a flex column (.page Ã¢â€ â€™ #paramPanels Ã¢â€ â€™ .param-panel
- * Ã¢â€ â€™ .param-table-wrap). Each ancestor MUST forward flex:1 + min-height:0,
+ * The Parameters page is a flex column (.page → #paramPanels → .param-panel
+ * → .param-table-wrap). Each ancestor MUST forward flex:1 + min-height:0,
  * otherwise the wrap sizes to its own content and its scrollbar (and the
  * bottom rows) get clipped by .page { overflow: hidden }. The earlier
  * max-height: calc(100vh - 220px) hack worked at desktop heights but
- * broke on shorter viewports Ã¢â‚¬â€ flex-fill is the correct fix. */
+ * broke on shorter viewports — flex-fill is the correct fix. */
 #page-energy #paramPanels:not([hidden]) {
   flex: 1 1 auto;
   min-height: 0;
@@ -18742,7 +18741,7 @@ body.mode-transition-active {
   font-family: var(--font-mono, ui-monospace, Consolas, Menlo, monospace);
   color: var(--text2);
 }
-/* v2.10.x Slice ÃŽÂ³ Ã¢â‚¬â€ Parameters page state column */
+/* v2.10.x Slice γ — Parameters page state column */
 .param-table tbody td.state-cell {
   font-family: var(--font-mono, ui-monospace, Consolas, Menlo, monospace);
   font-size: 0.9em;
@@ -18795,8 +18794,8 @@ body.mode-transition-active {
   color: color-mix(in srgb, var(--accent) 70%, var(--text2));
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Power Electronics Health Page (IGBT + AC Contactor) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
-/* v2.11.x Slice ÃŽÂº Ã¢â‚¬â€ tabbed page. The internal id remains #page-igbt-health for
+/* ── Power Electronics Health Page (IGBT + AC Contactor) ─────────────────────── */
+/* v2.11.x Slice κ — tabbed page. The internal id remains #page-igbt-health for
    back-compat with nav routing + deep links; visually it now hosts both the
    IGBT and the AC contactor subsystem tabs. */
 #page-igbt-health {
@@ -18807,7 +18806,7 @@ body.mode-transition-active {
   background: var(--surface);
 }
 
-/* Subsystem tab bar Ã¢â‚¬â€ sits above the page-toolbar. */
+/* Subsystem tab bar — sits above the page-toolbar. */
 #page-igbt-health .pe-tabs {
   display: flex;
   gap: 6px;
@@ -18847,7 +18846,7 @@ body.mode-transition-active {
   font-size: 16px;
 }
 
-/* Linked Findings banner Ã¢â‚¬â€ surfaces IGBT Ã¢â€ â€ Contactor cross-correlation
+/* Linked Findings banner — surfaces IGBT ↔ Contactor cross-correlation
    inside each drilldown. Severity drives the accent colour. */
 #page-igbt-health .pe-linked-findings {
   border-left: 4px solid var(--accent);
@@ -19046,7 +19045,7 @@ body.mode-transition-active {
   flex-direction: column;
 }
 
-/* v2.11.x Slice ÃŽÂº Ã¢â‚¬â€ When the IGBT/Contactor pane is the inactive tab, the
+/* v2.11.x Slice κ — When the IGBT/Contactor pane is the inactive tab, the
    `hidden` attribute MUST win over the `display: flex` rule above. Without
    this override both tables stack in the same grid cell (both wrappers use
    grid-column: 1 / grid-row: 1) and switching tabs has no visible effect. */
@@ -19054,7 +19053,7 @@ body.mode-transition-active {
   display: none;
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ v2.11.x Slice ÃŽÂº Ã¢â‚¬â€ Fleet table comprehensibility polish Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+/* ── v2.11.x Slice κ — Fleet table comprehensibility polish ─────────────────
    Column-group header row, sticky thead, severity tints for count cells,
    alarm-bit chips, and a tightened phase-table for the drilldown. */
 
@@ -19080,16 +19079,16 @@ body.mode-transition-active {
   border-right: none;
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Group separators that continue through the per-column header row AND
+/* ── Group separators that continue through the per-column header row AND
  * every body row, so each group reads as a vertical "lane". The boundary
  * column indices are the LAST cell of each colgroup (1-indexed).
- * IGBT (#igbtFleetTable):       Node[1-3] Ã‚Â· Health[4-5] Ã‚Â· Stop-Event Counts[6-9]
- *                               Ã‚Â· Live Telemetry[10-11] Ã‚Â· Alarms[12] Ã‚Â· Last Stop[13]
- *   Ã¢â€ â€™ boundaries after columns 3, 5, 9, 11, 12.
- * Contactor (#contactorFleetTable): Node[1-3] Ã‚Â· Health[4-5] Ã‚Â· Contactor Events[6-8]
- *                                   Ã‚Â· Under-Load Imbalance[9-10] Ã‚Â· K1 Wear[11-12]
- *                                   Ã‚Â· Alarms[13] Ã‚Â· Last Stop[14]
- *   Ã¢â€ â€™ boundaries after columns 3, 5, 8, 10, 12, 13.
+ * IGBT (#igbtFleetTable):       Node[1-3] · Health[4-5] · Stop-Event Counts[6-9]
+ *                               · Live Telemetry[10-11] · Alarms[12] · Last Stop[13]
+ *   → boundaries after columns 3, 5, 9, 11, 12.
+ * Contactor (#contactorFleetTable): Node[1-3] · Health[4-5] · Contactor Events[6-8]
+ *                                   · Under-Load Imbalance[9-10] · K1 Wear[11-12]
+ *                                   · Alarms[13] · Last Stop[14]
+ *   → boundaries after columns 3, 5, 8, 10, 12, 13.
  * The colour matches the group-head bottom border so the L-shape reads as
  * one continuous frame around each group. */
 #page-igbt-health #igbtFleetTable thead tr:nth-child(2) th:nth-child(3),
@@ -19120,7 +19119,7 @@ body.mode-transition-active {
   border-right: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
 }
 
-/* Tint the leaf-column headers to inherit the group's accent Ã¢â‚¬â€ keeps the
+/* Tint the leaf-column headers to inherit the group's accent — keeps the
  * "lane" identity all the way down without being too loud. */
 #page-igbt-health .pe-fleet-table thead tr:nth-child(2) th {
   border-top: 1px solid color-mix(in srgb, var(--border) 40%, transparent);
@@ -19196,7 +19195,7 @@ body.mode-transition-active {
   border: 1px solid var(--border);
 }
 
-/* Drilldown Ã¢â‚¬â€ Active Alarm Bits chip row */
+/* Drilldown — Active Alarm Bits chip row */
 .pe-alarm-bit-chips {
   display: flex;
   flex-wrap: wrap;
@@ -19300,7 +19299,7 @@ body.mode-transition-active {
   border-color: color-mix(in srgb, var(--orange, #f59f00) 35%, transparent);
 }
 
-/* Fleet-cell "live" pulse marker (Ã¢â€”Â) shown before chips when the source
+/* Fleet-cell "live" pulse marker (●) shown before chips when the source
    is the uncleared alarms table (vs the 5-min OR-mask). */
 .pe-fleet-bit-source-live {
   display: inline-block;
@@ -19316,7 +19315,7 @@ body.mode-transition-active {
   50%      { opacity: 1; }
 }
 
-/* Offline tint on fleet rows Ã¢â‚¬â€ node has no 5-min sample in 10 min. */
+/* Offline tint on fleet rows — node has no 5-min sample in 10 min. */
 #page-igbt-health .pe-fleet-table tbody tr.pe-row-offline {
   opacity: 0.55;
   background: repeating-linear-gradient(
@@ -19331,7 +19330,7 @@ body.mode-transition-active {
   opacity: 0.85;
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ v2.11.x Slice ÃŽÂº.3 Ã¢â‚¬â€ Critical-pattern auto-block (inverter card overlay) Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── v2.11.x Slice κ.3 — Critical-pattern auto-block (inverter card overlay) ── */
 /* Operator rule: "block START control of the entire Inverter once after
    2-day of re-occurrence still not resolved. STOP the generation
    automatically and block the control on the inverter card and put notice
@@ -19439,9 +19438,9 @@ body.mode-transition-active {
   font-size: 1.05em;
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ v2.11.x Slice ÃŽÂº.3 Ã¢â‚¬â€ Critical Alarm Patterns (forensic precursors) Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── v2.11.x Slice κ.3 — Critical Alarm Patterns (forensic precursors) ── */
 /* Red-bordered row indicator on fleet tables for nodes with recurring
-   0x0240 / 0x0210. Operator quote (2026-05-11): "2-day recurring Ã¢â‚¬Â¦ must
+   0x0240 / 0x0210. Operator quote (2026-05-11): "2-day recurring … must
    be considered critical already, needs attention by the inverter engineer." */
 #page-igbt-health .pe-fleet-table tbody tr.pe-row-critical-pattern {
   box-shadow: inset 4px 0 0 0 var(--red);
@@ -19683,7 +19682,7 @@ body.mode-transition-active {
   color: #fff;
 }
 
-/* Drilldown Ã¢â‚¬â€ DC Side & Power Conversion metric strip */
+/* Drilldown — DC Side & Power Conversion metric strip */
 .pe-dc-strip {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
@@ -19738,7 +19737,7 @@ body.mode-transition-active {
   }
 }
 
-/* Drilldown Ã¢â‚¬â€ AC Phase Parameters table */
+/* Drilldown — AC Phase Parameters table */
 .phase-snapshot-when {
   margin-left: auto;
   font-size: 10.5px;
@@ -19805,7 +19804,7 @@ body.mode-transition-active {
   /* Position:absolute takes the panel completely out of the grid flow and
      overlays it on top of the card/table content. This is the only reliable
      way to guarantee the panel wins over the igbt-fleet-grid-wrapper stacking
-     context created by overflow:auto Ã¢â‚¬â€ z-index tricks on grid items cannot
+     context created by overflow:auto — z-index tricks on grid items cannot
      escape a sibling's implicit stacking context in Chromium. The panel
      anchors to .igbt-page-body which has position:relative. */
   position: absolute;
@@ -19838,7 +19837,7 @@ body.mode-transition-active {
   align-items: center;
   justify-content: space-between;
   background: linear-gradient(180deg, var(--surface2) 0%, var(--surface) 100%);
-  /* Sticky inside the panel column so the close Ã¢Å“â€¢ never scrolls out of
+  /* Sticky inside the panel column so the close ✕ never scrolls out of
      reach if the panel itself ever ends up in a scrolling parent. */
   position: sticky;
   top: 0;
@@ -19927,7 +19926,7 @@ body.mode-transition-active {
   border-bottom: none;
 }
 
-/* Score block sits OUTSIDE the section frame entirely Ã¢â‚¬â€ no title, no rows;
+/* Score block sits OUTSIDE the section frame entirely — no title, no rows;
    the tier badge does all the work next to a large score number. */
 #page-igbt-health .igbt-detail-section.igbt-detail-score {
   background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 8%, transparent), transparent);
@@ -20035,7 +20034,7 @@ body.mode-transition-active {
   letter-spacing: 0.5px;
   font-size: 10px;
 }
-/* Inverter / Node label is the row identifier Ã¢â‚¬â€ keep it left-aligned so
+/* Inverter / Node label is the row identifier — keep it left-aligned so
  * the eye can scan the rows without drift. Every other column is a
  * numeric/badge value, which centers nicely under its header. */
 #page-igbt-health .igbt-fleet-table thead th:first-child,
@@ -20263,8 +20262,8 @@ body.mode-transition-active {
   }
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ IGBT Health Page Ã¢â‚¬â€ tier filter chips + empty states Ã¢â€â‚¬Ã¢â€â‚¬ */
-/* Tier filter chips Ã¢â‚¬â€ color-coded outlines */
+/* ── IGBT Health Page — tier filter chips + empty states ── */
+/* Tier filter chips — color-coded outlines */
 #page-igbt-health .tier-filter-group .tier-chip.tier-healthy:not([data-selected="true"]) {
   color: var(--green);
   border-color: color-mix(in srgb, var(--green) 45%, var(--border));
@@ -20405,13 +20404,13 @@ body.mode-transition-active {
   outline-offset: -2px;
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
-   v2.11.x Ã¢â‚¬â€ Field Calibration (own top-nav page #page-field-calibration)
+/* ─────────────────────────────────────────────────────────────────────────
+   v2.11.x — Field Calibration (own top-nav page #page-field-calibration)
    Revamped to cohesive modern design system (2026-05-17)
    All rules scoped under #page-field-calibration to avoid collisions.
    Design system: card recipe (.fcal-group), calm headers, token colors,
-   compact controls, no prose/copy, quietÃ¢â€ â€™accent hierarchy.
-   Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+   compact controls, no prose/copy, quiet→accent hierarchy.
+   ───────────────────────────────────────────────────────────────────────── */
 
 /* Container is flex-column. Tab strip + pinned header static at top;
  * only the active tab panel scrolls. Simple, robust layout. */
@@ -20440,7 +20439,7 @@ body.mode-transition-active {
   background: color-mix(in srgb, var(--surface) 60%, transparent);
 }
 
-/* Compact segmented tab strip Ã¢â‚¬â€ quiet inactive, accent underline on active. */
+/* Compact segmented tab strip — quiet inactive, accent underline on active. */
 #page-field-calibration .fcal-tabs {
   flex-shrink: 0;
   display: flex;
@@ -20485,7 +20484,7 @@ body.mode-transition-active {
   margin-bottom: 0;
   gap: 8px;
 }
-/* Read status ("ReadingÃ¢â‚¬Â¦", errors) sits INLINE next to the Read button
+/* Read status ("Reading…", errors) sits INLINE next to the Read button
    instead of wrapping to its own full-width line (operator request
    2026-05-17: the wrapped line added page height). Overrides the global
    .smsg `flex: 1 1 100%` for this element only; long text ellipsizes. */
@@ -20508,7 +20507,7 @@ body.mode-transition-active {
   color: var(--text2);
 }
 
-/* Pinned header Ã¢â‚¬â€ static, compact toolbar row with per-tab controls. */
+/* Pinned header — static, compact toolbar row with per-tab controls. */
 #page-field-calibration #fieldCalibrationSection .fcal-header {
   flex-shrink: 0;
   background-color: transparent;
@@ -20529,7 +20528,7 @@ body.mode-transition-active {
   display: none !important;
 }
 
-/* Header controls row Ã¢â‚¬â€ compact toolbar with selects and buttons. */
+/* Header controls row — compact toolbar with selects and buttons. */
 #page-field-calibration #fieldCalibrationSection .fcal-header-controls {
   display: flex;
   flex-direction: column;
@@ -20610,9 +20609,9 @@ body.mode-transition-active {
   padding: 0 4px;
 }
 
-/* Full-width status bar Ã¢â‚¬â€ 5 FIXED equal columns spanning the whole row
-   (operator request 2026-05-17): Inverter/Node Ã‚Â· Read-at Ã‚Â· ValidCfgCode Ã‚Â·
-   state Ã‚Â· Pac/Pn. Each element sits in its own fixed 1/5 slot so the bar
+/* Full-width status bar — 5 FIXED equal columns spanning the whole row
+   (operator request 2026-05-17): Inverter/Node · Read-at · ValidCfgCode ·
+   state · Pac/Pn. Each element sits in its own fixed 1/5 slot so the bar
    always fills the width and the layout never shifts with content. */
 #page-field-calibration #fieldCalibrationSection .fcal-readout-header {
   display: grid;
@@ -20648,7 +20647,7 @@ body.mode-transition-active {
 #page-field-calibration #fieldCalibrationSection .fcal-readout-at {
   color: var(--text3, var(--text2));
 }
-/* Narrow screens Ã¢â‚¬â€ 5 fixed slots would squeeze; wrap to a flexible flow. */
+/* Narrow screens — 5 fixed slots would squeeze; wrap to a flexible flow. */
 @media (max-width: 900px) {
   #page-field-calibration #fieldCalibrationSection .fcal-readout-header {
     display: flex;
@@ -20677,7 +20676,7 @@ body.mode-transition-active {
   background: color-mix(in srgb, var(--red) 14%, transparent);
 }
 
-/* TrinPM20 safety gate Ã¢â‚¬â€ state chip. */
+/* TrinPM20 safety gate — state chip. */
 #page-field-calibration #fieldCalibrationSection .fcal-state {
   display: inline-flex;
   align-items: center;
@@ -20721,7 +20720,7 @@ body.mode-transition-active {
   background: color-mix(in srgb, var(--red) 18%, transparent);
 }
 /* Gate verdict is surfaced as a calm rail along the TOP edge of the
-   slot-card (operator request 2026-05-17 Ã¢â‚¬â€ not the left side). block =
+   slot-card (operator request 2026-05-17 — not the left side). block =
    red, warn = orange. Scaffold (no fresh read) suppresses it entirely. */
 #page-field-calibration #fieldCalibrationSection .fcal-slot.fcal-gate-block {
   box-shadow: inset 0 3px 0 0 var(--red);
@@ -20731,20 +20730,20 @@ body.mode-transition-active {
 }
 #page-field-calibration #fcalReadResult.fcal-scaffold .fcal-slot { box-shadow: none; }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Write button: quiet by default, primary only when there is work Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
-   Calm ghost until the row is dirty (New value Ã¢â€°Â  Factor); then it becomes
+/* ── Write button: quiet by default, primary only when there is work ─────
+   Calm ghost until the row is dirty (New value ≠ Factor); then it becomes
    the accent primary action. Red is reserved for a deliberately-armed
-   Force bypass Ã¢â‚¬â€ never a normal write. (primary-action / state-clarity) */
-/* Write button visual progression Ã¢â‚¬â€ operator request 2026-05-21:
+   Force bypass — never a normal write. (primary-action / state-clarity) */
+/* Write button visual progression — operator request 2026-05-21:
  * "make Write with distinct color across the themes". Token-driven so it
  * adapts to every theme; uses --orange because the warm hue reads as
  * "state-changing action" and stands out from the calm --accent used by
  * the consign / mode tiles. Stage progression:
- *   IDLE (clean)         Ã¢â‚¬â€ orange outline, orange text, transparent fill
- *   HOVER                Ã¢â‚¬â€ orange-tinted fill, keeps the outline
- *   DIRTY (value typed)  Ã¢â‚¬â€ full orange fill, white text Ã¢â‚¬â€ "ready to commit"
- *   DIRTY + FORCE armed  Ã¢â‚¬â€ full red fill Ã¢â‚¬â€ "destructive, gate bypassed"
- *   DISABLED             Ã¢â‚¬â€ keeps outline but desaturates (handled below)
+ *   IDLE (clean)         — orange outline, orange text, transparent fill
+ *   HOVER                — orange-tinted fill, keeps the outline
+ *   DIRTY (value typed)  — full orange fill, white text — "ready to commit"
+ *   DIRTY + FORCE armed  — full red fill — "destructive, gate bypassed"
+ *   DISABLED             — keeps outline but desaturates (handled below)
  */
 #page-field-calibration #fieldCalibrationSection .fcal-write-btn {
   display: inline-flex;
@@ -20768,7 +20767,7 @@ body.mode-transition-active {
   border-color: var(--orange);
 }
 #page-field-calibration #fieldCalibrationSection .fcal-write-btn .mdi { margin: 0; font-size: 14px; }
-/* Dirty Ã¢â€ â€™ escalate to filled orange so the slot reads as "ready to write". */
+/* Dirty → escalate to filled orange so the slot reads as "ready to write". */
 #page-field-calibration #fieldCalibrationSection .fcal-row.fcal-dirty .fcal-write-btn {
   color: #fff;
   background: var(--orange);
@@ -20778,7 +20777,7 @@ body.mode-transition-active {
   background: color-mix(in srgb, var(--orange) 86%, #000);
   border-color: color-mix(in srgb, var(--orange) 86%, #000);
 }
-/* Dirty AND a Force bypass armed Ã¢â€ â€™ destructive treatment (red). */
+/* Dirty AND a Force bypass armed → destructive treatment (red). */
 #page-field-calibration #fcalReadResult.fcal-force-on .fcal-row.fcal-dirty .fcal-write-btn,
 #page-field-calibration .fcal-force-on .fcal-row.fcal-dirty .fcal-write-btn {
   background: var(--red);
@@ -20786,7 +20785,7 @@ body.mode-transition-active {
   color: #fff;
 }
 /* Disabled (Calibration Mode off OR safety gate blocks + Force not armed)
- * Ã¢â‚¬â€ keep the orange identity but mute the saturation so the button still
+ * — keep the orange identity but mute the saturation so the button still
  * reads as a Write surface, just unavailable. */
 #page-field-calibration #fieldCalibrationSection .fcal-write-btn:disabled {
   opacity: 0.45;
@@ -20797,7 +20796,7 @@ body.mode-transition-active {
   color: var(--orange);
 }
 
-/* Each parameter group is its own card Ã¢â‚¬â€ clear surface, calm border,
+/* Each parameter group is its own card — clear surface, calm border,
    rounded, no inter-row noise bleeding between groups. */
 #page-field-calibration #fieldCalibrationSection .fcal-group {
   margin: 0;
@@ -20834,7 +20833,7 @@ body.mode-transition-active {
   border-radius: 999px;
 }
 
-/* Group-card footer Ã¢â‚¬â€ holds "Write all", separated from the slot row by a
+/* Group-card footer — holds "Write all", separated from the slot row by a
    calm top border, button right-aligned (operator request 2026-05-17). */
 #page-field-calibration #fieldCalibrationSection .fcal-group-foot {
   display: flex;
@@ -20845,7 +20844,7 @@ body.mode-transition-active {
   /* Pin to the card bottom so footers line up across a stretched row. */
   margin-top: auto;
 }
-/* Write all Ã¢â‚¬â€ quiet ghost; lights up only when the card has dirty rows. */
+/* Write all — quiet ghost; lights up only when the card has dirty rows. */
 #page-field-calibration #fieldCalibrationSection .fcal-write-all-btn {
   flex-shrink: 0;
   display: inline-flex;
@@ -20880,7 +20879,7 @@ body.mode-transition-active {
   border-color: color-mix(in srgb, var(--accent) 86%, #000);
 }
 
-/* v2.11.x Section 4.3 Ã¢â‚¬â€ transient "value applied, input cleared" hint.
+/* v2.11.x Section 4.3 — transient "value applied, input cleared" hint.
    Subtle dimmed/green state on the New Value input right after a
    successful write; the next debounced full re-read repaints fresh. */
 #page-field-calibration #fieldCalibrationSection .fcal-write-input-cleared {
@@ -20889,25 +20888,25 @@ body.mode-transition-active {
   background: color-mix(in srgb, var(--green) 8%, transparent);
 }
 
-/* Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â
-   v2.11.x Ã¢â‚¬â€ Per-Node Readout: FIXED card grid (operator request 2026-05-17)
+/* ════════════════════════════════════════════════════════════════════════
+   v2.11.x — Per-Node Readout: FIXED card grid (operator request 2026-05-17)
    The readout is a permanent grid of grouped parameter slot-cards. Read
-   fills .fcal-val / .fcal-live; Calibration Mode off Ã¢â€ â€™ .fcal-readonly dims
-   the write controls; no fresh read Ã¢â€ â€™ .fcal-scaffold blanks the values.
-   Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â */
+   fills .fcal-val / .fcal-live; Calibration Mode off → .fcal-readonly dims
+   the write controls; no fresh read → .fcal-scaffold blanks the values.
+   ════════════════════════════════════════════════════════════════════════ */
 /* The HOST is the grid: GROUP cards lay out 3 per row (operator request
-   2026-05-17 Ã¢â‚¬â€ "there should be 3 groups in a row"). The readout header,
+   2026-05-17 — "there should be 3 groups in a row"). The readout header,
    write-controls, and the empty/preview frame span all 3 columns.
    align-items:start so each group card keeps its own natural height
    (groups have different parameter counts). Inside a (now ~1/3-width)
-   group card the slots stack one per row Ã¢â‚¬â€ a 3-col card cannot also fit
+   group card the slots stack one per row — a 3-col card cannot also fit
    3 usable slot-columns with number inputs. "Write all" stays a footer. */
 #page-field-calibration #fcalReadResult.fcal-grid-host {
   margin-top: 8px;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
-  /* stretch (not start) Ã¢â€ â€™ every card in a row matches the tallest one,
+  /* stretch (not start) → every card in a row matches the tallest one,
      so the bottoms line up. Footers are pinned down via margin-top:auto. */
   align-items: stretch;
 }
@@ -20915,7 +20914,7 @@ body.mode-transition-active {
   grid-column: 1 / -1;
 }
 /* Inside each group card: one column PER FIELD in that group (operator
-   request 2026-05-17) Ã¢â‚¬â€ 1 field Ã¢â€ â€™ full width, 3 Ã¢â€ â€™ 3 in a row, 4 Ã¢â€ â€™ 4 in a
+   request 2026-05-17) — 1 field → full width, 3 → 3 in a row, 4 → 4 in a
    row. `--fcal-cols` is set inline per group by _fcalRenderSingleEditable.
    Slots are narrow here, so each slot stacks its input + Write vertically
    (see .fcal-slot-write) to stay usable. */
@@ -20925,14 +20924,14 @@ body.mode-transition-active {
   gap: 12px;
   padding: 14px;
 }
-/* Very narrow viewport Ã¢â‚¬â€ drop to a single field so inputs never overflow
+/* Very narrow viewport — drop to a single field so inputs never overflow
    (overrides the per-field column count above). */
 @media (max-width: 560px) {
   #page-field-calibration #fieldCalibrationSection .fcal-param-grid {
     grid-template-columns: 1fr;
   }
 }
-/* Narrow viewport Ã¢â‚¬â€ step the group-card row count down so inputs stay
+/* Narrow viewport — step the group-card row count down so inputs stay
    usable and no horizontal scrollbar appears on a remote-viewer laptop. */
 @media (max-width: 1100px) {
   #page-field-calibration #fcalReadResult.fcal-grid-host {
@@ -20945,7 +20944,7 @@ body.mode-transition-active {
   }
 }
 /* One parameter = one COMPACT slot-card: 3 tight rows (name+offset /
-   FactorÃ‚Â·Live / write). No boxed metrics, no description block Ã¢â‚¬â€ the
+   Factor·Live / write). No boxed metrics, no description block — the
    operator called those redundant. Dense but legible. */
 #page-field-calibration #fieldCalibrationSection .fcal-slot {
   display: flex;
@@ -20985,7 +20984,7 @@ body.mode-transition-active {
   flex: 0 0 auto;
   margin-left: 0;
 }
-/* Factor + Live stacked vertically Ã¢â‚¬â€ Factor on top, Live below.
+/* Factor + Live stacked vertically — Factor on top, Live below.
  * Operator request 2026-05-21: side-by-side layout was clipping signed /
  * larger live values (e.g. "-60 VAr") in narrow 3-up slot columns. The
  * stack guarantees every value renders fully regardless of card width;
@@ -21035,9 +21034,9 @@ body.mode-transition-active {
   justify-content: flex-start;
 }
 #page-field-calibration #fieldCalibrationSection .fcal-slot .fcal-live-num { min-width: 0; }
-/* Write row Ã¢â‚¬â€ input grows, button is the trailing action. Slim height. */
+/* Write row — input grows, button is the trailing action. Slim height. */
 /* Slots are narrow (3-up inside a ~1/3-width group card), so stack the
-   input ABOVE a full-width Write button Ã¢â‚¬â€ guarantees both stay usable at
+   input ABOVE a full-width Write button — guarantees both stay usable at
    any column width instead of an unreadable inline squeeze. */
 #page-field-calibration #fieldCalibrationSection .fcal-slot-write {
   display: flex;
@@ -21045,7 +21044,7 @@ body.mode-transition-active {
   align-items: stretch;
   gap: 7px;
 }
-/* X1 (91) / Y2 (94): display-only Ã¢â‚¬â€ no input/Write. Quiet locked chip
+/* X1 (91) / Y2 (94): display-only — no input/Write. Quiet locked chip
    occupying the same footprint so the grid stays aligned (operator
    2026-05-17: only Y1 + X2 are editable). */
 #page-field-calibration #fieldCalibrationSection .fcal-slot-readonly {
@@ -21079,10 +21078,10 @@ body.mode-transition-active {
   padding: 4px 9px;
   font-size: 11px;
 }
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Meter-value mode (linear scale factors 81Ã¢â‚¬â€œ89) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+/* ── Meter-value mode (linear scale factors 81–89) ──────────────────────
    A compact segmented toggle picks Factor (type the raw scale factor) vs
    Meter (type the multimeter/wattmeter reading; the factor is the closed
-   form of the single-point gain trim, F_E = round(F_EÃ‚Â·meter/live)). Only
+   form of the single-point gain trim, F_E = round(F_E·meter/live)). Only
    .fcal-write-input is pre-filled, so the Write path/gates are unchanged. */
 #page-field-calibration #fieldCalibrationSection .fcal-mode-toggle {
   display: flex;
@@ -21117,7 +21116,7 @@ body.mode-transition-active {
   cursor: not-allowed;
   opacity: 0.55;
 }
-/* Meter input Ã¢â‚¬â€ same footprint as the factor input, with an accent rail so
+/* Meter input — same footprint as the factor input, with an accent rail so
    it reads as "a live measurement", visually distinct from the factor. */
 #page-field-calibration #fieldCalibrationSection .fcal-slot .fcal-meter-input {
   width: 100%;
@@ -21127,7 +21126,7 @@ body.mode-transition-active {
   font-variant-numeric: tabular-nums;
   border-left: 2px solid var(--accent);
 }
-/* Derivation line: "Ã¢â€ â€™ F_E 935 (was 940)" Ã¢â‚¬â€ green when valid, red on guard. */
+/* Derivation line: "→ F_E 935 (was 940)" — green when valid, red on guard. */
 #page-field-calibration #fieldCalibrationSection .fcal-meter-calc {
   font-size: 10.5px;
   font-variant-numeric: tabular-nums;
@@ -21140,7 +21139,7 @@ body.mode-transition-active {
   color: var(--red);
   font-weight: 500;
 }
-/* Dirty (New value Ã¢â€°Â  Factor) Ã¢â€ â€™ accent the whole card edge so the operator
+/* Dirty (New value ≠ Factor) → accent the whole card edge so the operator
    can see "this card has an unsaved change" at a glance. */
 #page-field-calibration #fieldCalibrationSection .fcal-slot.fcal-dirty {
   border-color: var(--accent);
@@ -21149,8 +21148,8 @@ body.mode-transition-active {
   border-color: var(--red);
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Read-only (Calibration Mode off, or scaffold) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
-   The grid stays fully visible Ã¢â‚¬â€ only the write affordances dim. */
+/* ── Read-only (Calibration Mode off, or scaffold) ──────────────────────
+   The grid stays fully visible — only the write affordances dim. */
 #page-field-calibration #fcalReadResult.fcal-readonly .fcal-slot-write {
   opacity: 0.5;
   filter: grayscale(0.3);
@@ -21160,7 +21159,7 @@ body.mode-transition-active {
 #page-field-calibration #fcalReadResult.fcal-readonly .fcal-write-all-btn {
   cursor: not-allowed;
 }
-/* Scaffold (no fresh read) Ã¢â‚¬â€ values are placeholders, keep them quiet. */
+/* Scaffold (no fresh read) — values are placeholders, keep them quiet. */
 #page-field-calibration #fcalReadResult.fcal-scaffold .fcal-slot .fcal-val,
 #page-field-calibration #fcalReadResult.fcal-scaffold .fcal-slot .fcal-live {
   color: var(--text2);
@@ -21179,7 +21178,7 @@ body.mode-transition-active {
 }
 #page-field-calibration #fieldCalibrationSection .fcal-write-note-ro .mdi { font-size: 14px; }
 
-/* Empty state Ã¢â‚¬â€ no catalog read yet this visit (the fixed frame). */
+/* Empty state — no catalog read yet this visit (the fixed frame). */
 #page-field-calibration #fieldCalibrationSection .fcal-group-empty {
   grid-column: 1 / -1;   /* preview / no-catalog frame spans the full row */
   border-style: dashed;
@@ -21249,8 +21248,8 @@ body.mode-transition-active {
   background: transparent;
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Read-only readout table (6 cols: Off|Field|Desc|Factor|Live|Hex) Ã¢â€â‚¬Ã¢â€â‚¬
- * Untouched legacy layout Ã¢â‚¬â€ scoped so it does NOT bleed into the new
+/* ── Read-only readout table (6 cols: Off|Field|Desc|Factor|Live|Hex) ──
+ * Untouched legacy layout — scoped so it does NOT bleed into the new
  * 5-col write table below. */
 #page-field-calibration #fieldCalibrationSection .fcal-table:not(.fcal-write-table) th:nth-child(1),
 #page-field-calibration #fieldCalibrationSection .fcal-table:not(.fcal-write-table) td:nth-child(1) { width: 56px;  text-align: center; color: var(--text2); }
@@ -21265,7 +21264,7 @@ body.mode-transition-active {
 #page-field-calibration #fieldCalibrationSection .fcal-table:not(.fcal-write-table) th:nth-child(6),
 #page-field-calibration #fieldCalibrationSection .fcal-table:not(.fcal-write-table) td:nth-child(6) { width: 110px; text-align: right; color: var(--text2); }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ New compact write table Ã¢â‚¬â€ 5 columns by CLASS, not position Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+/* ── New compact write table — 5 columns by CLASS, not position ──────────
  * Parameter (flexes, holds name+desc so there is NO empty whitespace gulf)
  * | Factor | Live | New value | Write. */
 #page-field-calibration #fieldCalibrationSection .fcal-write-table th.fcal-param,
@@ -21279,7 +21278,7 @@ body.mode-transition-active {
 #page-field-calibration #fieldCalibrationSection .fcal-write-table th.fcal-act,
 #page-field-calibration #fieldCalibrationSection .fcal-write-table td.fcal-act { width: 118px; text-align: right; white-space: nowrap; }
 
-/* Parameter cell Ã¢â‚¬â€ primary name + tiny offset chip, secondary description
+/* Parameter cell — primary name + tiny offset chip, secondary description
  * on its own muted line. This is what removes the giant empty column. */
 #page-field-calibration #fieldCalibrationSection .fcal-param-name {
   display: block;
@@ -21310,9 +21309,9 @@ body.mode-transition-active {
 }
 #page-field-calibration #fieldCalibrationSection .fcal-act .fcal-gate-badge { margin-left: 6px; }
 
-/* Live cell visuals Ã¢â‚¬â€ green numeric value + dim unit, both anchored to the
+/* Live cell visuals — green numeric value + dim unit, both anchored to the
  * column centerline. The numeric span is right-aligned, the unit span is
- * left-aligned with a fixed width Ã¢â‚¬â€ together they form a 2-column micro-
+ * left-aligned with a fixed width — together they form a 2-column micro-
  * grid that keeps every row's unit lined up vertically (same column edge
  * across rows) while keeping the pair centered within the cell. */
 #page-field-calibration #fieldCalibrationSection .fcal-live-pair {
@@ -21337,7 +21336,7 @@ body.mode-transition-active {
   flex: 0 0 30px;
 }
 /* Subtle 1-tick highlight when a Live cell value changes via the auto-
- * refresh Ã¢â‚¬â€ gives the operator visual confirmation that values are live
+ * refresh — gives the operator visual confirmation that values are live
  * without flicker. Falls back to no animation in older browsers. */
 #page-field-calibration #fieldCalibrationSection .fcal-live {
   transition: background-color 320ms ease-out;
@@ -21345,7 +21344,7 @@ body.mode-transition-active {
 #page-field-calibration #fieldCalibrationSection .fcal-live.fcal-live-tick {
   background-color: color-mix(in srgb, var(--accent) 14%, transparent);
 }
-/* Legacy compatibility Ã¢â‚¬â€ keep .fcal-live-val styled for any code paths
+/* Legacy compatibility — keep .fcal-live-val styled for any code paths
  * that still render the old single-span variant. */
 #page-field-calibration #fieldCalibrationSection .fcal-live-val {
   color: var(--accent);
@@ -21380,7 +21379,7 @@ body.mode-transition-active {
   overflow: auto;
 }
 
-/* PARAMETERS page Ã¢â€¡â€ž Fleet Anomalies view switch (#btnParamFleetToggle).
+/* PARAMETERS page ⇄ Fleet Anomalies view switch (#btnParamFleetToggle).
    When .fleet-mode is set we hide the per-node parameter log + its
    log-only toolbar controls so the relocated fleet view owns the page,
    without fighting _paramShowBlank()'s own hidden-state logic. */
@@ -21394,7 +21393,7 @@ body.mode-transition-active {
   display: none !important;
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Fleet anomaly view Ã¢â‚¬â€ compact layout Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Fleet anomaly view — compact layout ──────────────────────────────── */
 #fcalPanelFleet {
   padding-top: 0;
 }
@@ -21426,7 +21425,7 @@ body.mode-transition-active {
   display: none !important;
 }
 
-/* Fleet header bar inside the panel Ã¢â‚¬â€ compact card system. */
+/* Fleet header bar inside the panel — compact card system. */
 #fcalPanelFleet .fcal-fleet-header {
   display: flex;
   flex-wrap: wrap;
@@ -21458,7 +21457,7 @@ body.mode-transition-active {
   flex-shrink: 0;
 }
 
-/* Status line reserved height Ã¢â‚¬â€ prevents layout shift. */
+/* Status line reserved height — prevents layout shift. */
 #fcalPanelFleet .fcal-fleet-msg-row {
   min-height: 18px;
   margin-bottom: 6px;
@@ -21467,7 +21466,7 @@ body.mode-transition-active {
   color: var(--text2);
 }
 
-/* Fleet anomaly view Ã¢â‚¬â€ wider table, scrolls with sticky thead. */
+/* Fleet anomaly view — wider table, scrolls with sticky thead. */
 .fcal-table-scroll {
   overflow: auto;
   max-height: 70vh;
@@ -21502,8 +21501,8 @@ body.mode-transition-active {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* Field cells specifically Ã¢â‚¬â€ slightly tighter for the delta values so
- * "+12.34%Ã¢â€“Â²" fits in an 88 px column without truncation. */
+/* Field cells specifically — slightly tighter for the delta values so
+ * "+12.34%▲" fits in an 88 px column without truncation. */
 .fcal-fleet-table-grouped tbody td.mono {
   font-size: 11.5px;
   padding: 5px 4px;
@@ -21525,7 +21524,7 @@ body.mode-transition-active {
   background: color-mix(in srgb, var(--accent) 8%, var(--surface));
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Fleet anomaly view Ã¢â‚¬â€ summary card + chips + filter row Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Fleet anomaly view — summary card + chips + filter row ──────────── */
 .fcal-fleet-summary-card {
   display: flex;
   flex-direction: column;
@@ -21671,13 +21670,13 @@ body.mode-transition-active {
   color: var(--text2) !important;
   margin-right: 6px;
 }
-/* .fcal-fleet-hint removed Ã¢â‚¬â€ the "click any row to drill in" note is gone
+/* .fcal-fleet-hint removed — the "click any row to drill in" note is gone
    now that the fleet table is a read-only overview. */
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Grouped table Ã¢â‚¬â€ column-group banner row + body separators Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+/* ── Grouped table — column-group banner row + body separators ──────────
  * Uses `table-layout: fixed` + explicit <col> widths to keep every column
  * predictably sized regardless of content. With auto-layout the AC-Current
- * cells (5+ chars: "+1.50%Ã¢â€“Â²") would steal width from the leading Inv/Node
+ * cells (5+ chars: "+1.50%▲") would steal width from the leading Inv/Node
  * column, collapsing it to a single character. Fixed layout fixes that. */
 .fcal-fleet-table-grouped {
   table-layout: fixed;
@@ -21686,9 +21685,9 @@ body.mode-transition-active {
    * With table-layout:fixed the leading cols hold their px width and the
    * spare width is shared across the % field cols. */
   width: 100%;
-  min-width: 1480px;          /* enough for 14 field cols Ãƒâ€” 80 px + 3 leading cols */
+  min-width: 1480px;          /* enough for 14 field cols × 80 px + 3 leading cols */
 }
-/* Per-column widths via <col> Ã¢â‚¬â€ applies to every cell in that column.
+/* Per-column widths via <col> — applies to every cell in that column.
  * Leading 3 cols are fixed px; field cols use % so they absorb the
  * remaining width evenly instead of leaving the table short. */
 .fcal-col-node  { width: 110px; }
@@ -21725,7 +21724,7 @@ body.mode-transition-active {
   border-right: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
 }
 
-/* The per-column header row Ã¢â‚¬â€ second sticky row, sits below the group banner. */
+/* The per-column header row — second sticky row, sits below the group banner. */
 .fcal-fleet-headrow th {
   position: sticky;
   top: 30px;       /* group-row height */
@@ -21740,14 +21739,14 @@ body.mode-transition-active {
   text-overflow: ellipsis;
 }
 /* Sticky-head class kept for cells inside the leading 3 columns of the
- * grouprow / headrow Ã¢â‚¬â€ they need solid bg so the body rows scrolling
- * underneath don't show through. NO horizontal stickiness Ã¢â‚¬â€ that was
+ * grouprow / headrow — they need solid bg so the body rows scrolling
+ * underneath don't show through. NO horizontal stickiness — that was
  * collapsing the leading columns when combined with auto layout; with
  * fixed layout the columns stay visible without horizontal sticky. */
 .fcal-fleet-table-grouped thead .fcal-fleet-sticky-head {
   background: var(--surface2);
 }
-/* Body cell sticky markers Ã¢â‚¬â€ keep the styling hooks but no horizontal
+/* Body cell sticky markers — keep the styling hooks but no horizontal
  * sticky positioning. Operator can scroll horizontally; with the table
  * size we now ship (1480 px) it fits on most monitors without scroll. */
 .fcal-fleet-table-grouped .fcal-fleet-sticky {
@@ -21758,7 +21757,7 @@ body.mode-transition-active {
   text-overflow: ellipsis;
 }
 
-/* Median reference row Ã¢â‚¬â€ tinted, italic, sits at the top of the body. */
+/* Median reference row — tinted, italic, sits at the top of the body. */
 .fcal-fleet-median-row td {
   background: color-mix(in srgb, var(--accent) 7%, var(--surface)) !important;
   font-style: italic;
@@ -21777,7 +21776,7 @@ body.mode-transition-active {
   margin-right: 4px;
 }
 
-/* Tier row borders Ã¢â‚¬â€ left-edge stripe so worst rows pop. Rows are a
+/* Tier row borders — left-edge stripe so worst rows pop. Rows are a
    read-only overview (drill-in removed) so no pointer cursor / hover. */
 .fcal-fleet-row.fcal-fleet-row-bad td:first-child  { border-left: 3px solid var(--red); }
 .fcal-fleet-row.fcal-fleet-row-warn td:first-child { border-left: 3px solid var(--orange); }
@@ -21810,7 +21809,7 @@ body.mode-transition-active {
   background: color-mix(in srgb, var(--red) 16%, transparent);
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Failure section Ã¢â‚¬â€ separated below the main table Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Failure section — separated below the main table ─────────────────── */
 .fcal-fleet-failures {
   margin-top: 14px;
   padding: 10px 14px;
@@ -21914,10 +21913,10 @@ body.mode-transition-active {
   font-size: 11px;
 }
 #page-field-calibration #fieldCalibrationSection .fcal-legend > span::before {
-  content: "Ã¢â€“Â  ";
+  content: "■ ";
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Session card: active vs idle state Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Session card: active vs idle state ─────────────────────────────────── */
 #page-field-calibration #fieldCalibrationSection .fcal-session-card.fcal-session-active {
   background: color-mix(in srgb, var(--red) 8%, var(--surface2));
   border-color: color-mix(in srgb, var(--red) 35%, var(--border));
@@ -21944,10 +21943,10 @@ body.mode-transition-active {
   max-width: 160px;
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Body-level lockdown banner Ã¢â‚¬â€ REMOVED per operator request 2026-05-13.
+/* ── Body-level lockdown banner — REMOVED per operator request 2026-05-13.
  * The banner overlapped the top inverter cards (Pac / Total Energy)
  * during a calibration session. The page-internal session card already
- * shows the active-session state, timer, write count, and target Ã¢â‚¬â€ the
+ * shows the active-session state, timer, write count, and target — the
  * body-level banner was redundant noise. The body class hook is kept so
  * the per-page hide rules below still work; only the visual banner is
  * suppressed. */
@@ -21959,8 +21958,8 @@ body.calib-session-active {
   padding-top: 0;
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Fixed control cards: Consign Mode + Safety Bypass Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
-   Operator request (2026-05-17): these are NOT a separate top strip Ã¢â‚¬â€ they
+/* ── Fixed control cards: Consign Mode + Safety Bypass ─────────────────────
+   Operator request (2026-05-17): these are NOT a separate top strip — they
    are the first two cells of the same parameter grid, so each one is exactly
    one column wide and the same dimension as an AC / DC group-card. They
    reuse `.fcal-group` verbatim (background / border / radius / overflow);
@@ -21992,7 +21991,7 @@ body.calib-session-active {
 #page-field-calibration #fieldCalibrationSection .fcal-consign-tiles-list {
   display: grid;
   /* 6 consign targets share the first row evenly (0/10/20/50/60/70 %); the
-   * Release tile drops to its own full-width row below Ã¢â‚¬â€ operator request
+   * Release tile drops to its own full-width row below — operator request
    * 2026-05-21. The full-width span makes Release unmistakable as a
    * "finish & restore" action distinct from the calibration setpoints. */
   grid-template-columns: repeat(6, minmax(0, 1fr));
@@ -22032,7 +22031,7 @@ body.calib-session-active {
   background: var(--green);
   color: white;
 }
-/* (Removed: the 0 % Consume tile Ã¢â‚¬â€ operator clarified Per. Vacio calibrates
+/* (Removed: the 0 % Consume tile — operator clarified Per. Vacio calibrates
    at consign 50 %, not 0 %; "Pot. Activ" is just Per. Vacio in watts.) */
 
 #page-field-calibration #fieldCalibrationSection .fcal-consign-status {
@@ -22041,14 +22040,14 @@ body.calib-session-active {
   padding: 8px 14px;
   border-top: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
 }
-/* No idle placeholder text Ã¢â‚¬â€ when there's no consign status the footer
+/* No idle placeholder text — when there's no consign status the footer
    collapses entirely (no empty padded bar / divider). */
 #page-field-calibration #fieldCalibrationSection .fcal-consign-status:empty {
   display: none;
 }
 
 /* (The old side-by-side .fcal-controls-row / .fcal-bypass-panel layout and
-   the .fcal-consign-header chip were removed Ã¢â‚¬â€ the two control cards now
+   the .fcal-consign-header chip were removed — the two control cards now
    live as the first two cells of the parameter grid and reuse
    .fcal-group / .fcal-group-title / .fcal-card-hint defined above.) */
 /* Tile = big % over a small role sub-label. */
@@ -22070,7 +22069,7 @@ body.calib-session-active {
   letter-spacing: 0.03em;
   opacity: 0.8;
 }
-/* Reactive procedure guide Ã¢â‚¬â€ the one bit of in-card prose the operator
+/* Reactive procedure guide — the one bit of in-card prose the operator
    explicitly asked for. Kept to a single tight line + a rich tooltip.
    Sits inside the padded .fcal-ctl-body, so it's a self-contained
    rounded note rather than a full-bleed strip. */
@@ -22114,7 +22113,7 @@ body.calib-session-active {
   height: 14px;
 }
 
-/* Not in Calibration Mode Ã¢â€ â€™ the control cards are visible but locked:
+/* Not in Calibration Mode → the control cards are visible but locked:
    dimmed, controls disabled, not-allowed cursor. */
 #page-field-calibration #fieldCalibrationSection .fcal-ctl-locked .fcal-consign-tiles-list {
   opacity: 0.5;
@@ -22124,7 +22123,7 @@ body.calib-session-active {
   cursor: not-allowed;
   transform: none;
 }
-/* Calibration Mode OFF Ã¢â€ â€™ consign tiles are hard-gated (see
+/* Calibration Mode OFF → consign tiles are hard-gated (see
    _fcalHandleConsign + _fcalRefreshWritesBadge). Dim per-tile so the lock
    reads clearly even without the .fcal-ctl-locked ancestor. */
 #page-field-calibration #fieldCalibrationSection .fcal-consign-tile.fcal-consign-tile-locked {
@@ -22144,12 +22143,12 @@ body.calib-session-active {
 #page-field-calibration #fieldCalibrationSection .fcal-force-toggle input:disabled {
   cursor: not-allowed;
 }
-/* (No bespoke responsive rule needed Ã¢â‚¬â€ the two control cards are ordinary
-   .fcal-grid-host cells, so they collapse 3Ã¢â€ â€™2Ã¢â€ â€™1 with the AC/DC group cards
+/* (No bespoke responsive rule needed — the two control cards are ordinary
+   .fcal-grid-host cells, so they collapse 3→2→1 with the AC/DC group cards
    via the host media queries above.) */
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Write controls (Phase 2) Ã¢â‚¬â€ inputs and Force checkbox Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
-/* Slim toolbar Ã¢â‚¬â€ no orange slab. Just a quiet strip with a cached-auth
+/* ── Write controls (Phase 2) — inputs and Force checkbox ──────────────── */
+/* Slim toolbar — no orange slab. Just a quiet strip with a cached-auth
    hint on the left and the two Force chips pushed to the right. */
 #page-field-calibration #fieldCalibrationSection .fcal-write-controls {
   grid-column: 1 / -1;
@@ -22178,13 +22177,13 @@ body.calib-session-active {
   overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Force toggles Ã¢â‚¬â€ operator-armable bypass switches Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+/* ── Force toggles — operator-armable bypass switches ─────────────────────
  * Visual contract:
- *   Ã¢â‚¬Â¢ idle   Ã¢â€ â€™ muted pill with hollow checkbox
- *   Ã¢â‚¬Â¢ hover  Ã¢â€ â€™ border accent, cursor pointer
- *   Ã¢â‚¬Â¢ armed  Ã¢â€ â€™ red border + red text + filled checkbox (impossible to miss)
+ *   • idle   → muted pill with hollow checkbox
+ *   • hover  → border accent, cursor pointer
+ *   • armed  → red border + red text + filled checkbox (impossible to miss)
  * State persists across editable-view re-renders via FieldCalibrationUI
- * .forceWrite / .forceSafety flags Ã¢â‚¬â€ see _fcalRenderSingleEditable. */
+ * .forceWrite / .forceSafety flags — see _fcalRenderSingleEditable. */
 #page-field-calibration #fieldCalibrationSection .fcal-force-toggle {
   display: inline-flex;
   align-items: center;
@@ -22241,7 +22240,7 @@ body.calib-session-active {
   border-radius: 6px;
   transition: border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
 }
-/* Dirty input Ã¢â‚¬â€ subtle accent ring so the operator can see, at a glance,
+/* Dirty input — subtle accent ring so the operator can see, at a glance,
    exactly which rows have unsaved edits (state-clarity). */
 #page-field-calibration #fieldCalibrationSection tr.fcal-row.fcal-dirty .fcal-write-input {
   border-color: var(--accent);
@@ -22252,7 +22251,7 @@ body.calib-session-active {
   font-variant-numeric: tabular-nums;
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Copy panel (Phase 4) Ã¢â‚¬â€ card system Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Copy panel (Phase 4) — card system ───────────────────────────────── */
 #page-field-calibration #fieldCalibrationSection .fcal-copy-panel {
   margin: 10px 0;
   background: var(--surface2);
@@ -22281,7 +22280,7 @@ body.calib-session-active {
   padding: 10px 14px;
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Backup / snapshot panel Ã¢â‚¬â€ card system Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Backup / snapshot panel — card system ────────────────────────────── */
 #page-field-calibration #fieldCalibrationSection .fcal-backup-panel {
   margin: 10px 0;
   background: var(--surface2);
@@ -22446,7 +22445,7 @@ body.calib-session-active {
   gap: 4px;
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ When body is in calib-session-active, hide non-calibration nav pages */
+/* ── When body is in calib-session-active, hide non-calibration nav pages */
 /* Lockdown mode keeps the operator focused on the Field Calibration page; */
 /* all other top-nav pages collapse so accidental nav clicks are blocked.  */
 body.calib-session-active .topbar > *:not(.brand):not(.fcal-session-allowed),
@@ -22472,18 +22471,18 @@ body.calib-session-active #fieldCalibrationSection {
   border-radius: 8px;
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+/* ───────────────────────────────────────────────────────────────────────────
    Standalone Calibrator mode (.calibrator-mode)
    The class is set in TWO places, both intentional:
      1. An inline <head> script in index.html adds it to <html> BEFORE the
-        body is parsed Ã¢â‚¬â€ this is what prevents a flash of the fleet dashboard
+        body is parsed — this is what prevents a flash of the fleet dashboard
         on the first paint of the calibrator window.
      2. handleCalibratorMode() in app.js also adds it to <body> (belt &
         suspenders / SPA bookkeeping).
    The selector is `.calibrator-mode` (no element qualifier) so it matches
    whether the class lands on <html> or <body>. Zero effect on the normal
    dashboard (class is never set there).
-   Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+   ─────────────────────────────────────────────────────────────────────────── */
 .calibrator-mode #titlebar,
 .calibrator-mode #sideNav,
 .calibrator-mode #globalProgressRow,
@@ -22506,12 +22505,12 @@ body.calib-session-active #fieldCalibrationSection {
   display: none !important;
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+/* ───────────────────────────────────────────────────────────────────────────
    Pop-out window mode (.popout-mode)
    Applied by handlePopoutMode() in app.js when ?popout=<page> is detected.
    Hides the sidebar and titlebar chrome so the secondary window shows only
    the target page, full-bleed. Zero effect on the normal dashboard.
-   Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+   ─────────────────────────────────────────────────────────────────────────── */
 .popout-mode #sideNav,
 .popout-mode #titlebar,
 .popout-mode #licenseNotice {
@@ -22535,12 +22534,12 @@ body.calib-session-active #fieldCalibrationSection {
   display: none !important;
 }
 
-/* Pop-out buttons must not appear inside a popout window Ã¢â‚¬â€ prevents chains. */
+/* Pop-out buttons must not appear inside a popout window — prevents chains. */
 .popout-mode .btn-popout {
   display: none !important;
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Pop-out icon button Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+/* ── Pop-out icon button ────────────────────────────────────────────────────
    Small icon button that appears in the tl-right area of each eligible page
    toolbar. Consistent with existing btn-outline aesthetics but smaller and
    icon-only. Theme tokens ensure it adapts across dark / light / classic. */
@@ -22573,7 +22572,7 @@ body.calib-session-active #fieldCalibrationSection {
   pointer-events: none;
 }
 
-/* Transport selector Ã¢â‚¬â€ only meaningful for the standalone calibrator (its
+/* Transport selector — only meaningful for the standalone calibrator (its
    /api/transport/select + /api/serial/ports routes live on :3600, not the
    dashboard :3500). Hidden everywhere except calibrator mode. Theme-token
    styling so it adapts across all themes. */
@@ -22593,13 +22592,13 @@ body.calib-session-active #fieldCalibrationSection {
   background: var(--surface);
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Firmware Upgrade (EXPERIMENTAL) Ã¢â‚¬â€ calibrator mode ONLY Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+/* ── Firmware Upgrade (EXPERIMENTAL) — calibrator mode ONLY ────────────────
    Hidden on the dashboard build entirely; the brick-risk feature only
    surfaces in the standalone Inverter Calibration Tool. Opened from the
    top-right "FW Upgrade" button as a centred modal dialog. Theme-token
    styled so it adapts across all themes. */
 
-/* Top-right opener button Ã¢â‚¬â€ calibrator mode only, pushed to the right
+/* Top-right opener button — calibrator mode only, pushed to the right
    edge of the .srn-controls row. */
 .fcal-fw-open {
   display: none;
@@ -22673,7 +22672,7 @@ body.calib-session-active #fieldCalibrationSection {
   font-size: 15px;
 }
 
-/* The base .btn enforces height/min-height 30px Ã¢â‚¬â€ override on the close
+/* The base .btn enforces height/min-height 30px — override on the close
    button so the title strip stays compact. */
 .calibrator-mode .fcal-fw-header #btnFwClose {
   height: 24px;
@@ -22728,7 +22727,7 @@ body.calib-session-active #fieldCalibrationSection {
   flex: none;
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Transport status chip Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Transport status chip ───────────────────────────────────────────── */
 /* Mirrors FieldCalibrationUI.transportReady so the operator sees, before
    touching hardware, whether a Modbus transport is open. data-state is set
    by _fwSyncTransportStatus(): unknown (initial) / ready / down. */
@@ -22791,12 +22790,12 @@ body.calib-session-active #fieldCalibrationSection {
   color: var(--orange, #e0a800);
 }
 
-/* The "ConnectÃ¢â‚¬Â¦" affordance only makes sense when a transport is missing. */
+/* The "Connect…" affordance only makes sense when a transport is missing. */
 .calibrator-mode .fcal-fw-transport-status:not([data-state="down"]) .fcal-fw-transport-status-link {
   display: none;
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Guided stepper rail Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Guided stepper rail ─────────────────────────────────────────────── */
 .calibrator-mode .fcal-fw-steps {
   display: flex;
   align-items: center;
@@ -22871,12 +22870,12 @@ body.calib-session-active #fieldCalibrationSection {
   opacity: 0.55;
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Step cards Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Step cards ──────────────────────────────────────────────────────── */
 .calibrator-mode .fcal-fw-step {
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--card, var(--surface));
-  /* No overflow:hidden Ã¢â‚¬â€ it clipped a wrapped status line (e.g. the long
+  /* No overflow:hidden — it clipped a wrapped status line (e.g. the long
      "connect a transport first" identity error) at the card's bottom edge on
      high-DPI / zoomed displays. The only thing that needed clipping was the
      active header's tinted background at the rounded top corners, so we round
@@ -22994,7 +22993,7 @@ body.calib-session-active #fieldCalibrationSection {
   flex: none;
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Safety checklist (collapsible, collapsed by default) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Safety checklist (collapsible, collapsed by default) ────────────── */
 .calibrator-mode .fcal-fw-checklist {
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -23059,7 +23058,7 @@ body.calib-session-active #fieldCalibrationSection {
   color: var(--muted, var(--text));
 }
 
-/* Advanced parameters: keep the four controls together but ALLOW wrapping Ã¢â‚¬â€
+/* Advanced parameters: keep the four controls together but ALLOW wrapping —
    nowrap pushed the "Allow downgrade" toggle off the right edge of the
    680px dialog (body clips overflow-x), making it unreachable. Wrapping to a
    second line on narrow widths keeps every control accessible. */
@@ -23116,7 +23115,7 @@ body.calib-session-active #fieldCalibrationSection {
 }
 
 /* The arm controls live inside the step-4 card, which supplies the danger
-   accent Ã¢â‚¬â€ so the block itself is just a plain stack (no nested red box). */
+   accent — so the block itself is just a plain stack (no nested red box). */
 .calibrator-mode .fcal-fw-arm {
   display: flex;
   flex-direction: column;
@@ -23124,7 +23123,7 @@ body.calib-session-active #fieldCalibrationSection {
 }
 
 /* These blocks set an explicit `display`, which (author origin) beats the
-   UA `[hidden] { display: none }` Ã¢â‚¬â€ so toggling the `hidden` attribute from
+   UA `[hidden] { display: none }` — so toggling the `hidden` attribute from
    JS would not actually hide them. Restore [hidden] precedence, exactly as
    the project does elsewhere (cf. .apc-progress-wrap[hidden]). */
 .calibrator-mode .fcal-fw-arm[hidden],
@@ -23250,7 +23249,7 @@ body.calib-session-active #fieldCalibrationSection {
   align-items: center;
 }
 
-/* Label+control pair Ã¢â‚¬â€ inline unit that never splits across a wrap. */
+/* Label+control pair — inline unit that never splits across a wrap. */
 .calibrator-mode .fcal-tg {
   display: inline-flex;
   align-items: center;
@@ -23285,7 +23284,7 @@ body.calib-session-active #fieldCalibrationSection {
   min-height: 16px;
 }
 
-/* Standalone tool connects to ONE inverter by IP (Ethernet) or COM port Ã¢â‚¬â€
+/* Standalone tool connects to ONE inverter by IP (Ethernet) or COM port —
    the fleet "Inverter" picker is redundant here. Hide its label + select in
    calibrator mode; NODE (slave/block id) + Read remain. The picker stays in
    the DOM (still populated so FieldCalibrationUI.inverter has a valid value
@@ -23333,7 +23332,7 @@ body.calib-session-active #fieldCalibrationSection {
 
 
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Utility Tool: read-only setting view tabs (Phase C) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Utility Tool: read-only setting view tabs (Phase C) ─────────────── */
 .fcal-view-tabs {
   display: flex;
   flex-wrap: wrap;
@@ -23364,8 +23363,8 @@ body.calib-session-active #fieldCalibrationSection {
 }
 .fcal-settings-controls { align-items: center; gap: 10px; margin-bottom: 8px; }
 /* Read-only chip in the controls strip. Uses --text2 (defined in every
-   theme) Ã¢â‚¬â€ earlier code referenced var(--muted) which is NOT defined in
-   this codebase and silently fell back to browser default Ã¢â€¡â€™ invisible on
+   theme) — earlier code referenced var(--muted) which is NOT defined in
+   this codebase and silently fell back to browser default ⇒ invisible on
    the cream/parchment theme. All settings-table colours below use defined
    tokens for the same reason. */
 .fcal-settings-ro {
@@ -23440,7 +23439,7 @@ table.fcal-settings-table th {
    adjust weight / family / alignment but stay readable on every theme.
 
    IMPORTANT: every alignment-bearing class is applied to BOTH the <th>
-   and the matching <td>. Headers MUST sit over their data Ã¢â‚¬â€ never let a
+   and the matching <td>. Headers MUST sit over their data — never let a
    left-aligned header label a right-aligned numeric column. */
 table.fcal-settings-table td { color: var(--text); }
 table.fcal-settings-table th.fcal-set-val,
@@ -23462,7 +23461,7 @@ table.fcal-settings-table td.fcal-set-off {
   font-size: 12px;
   white-space: nowrap;
 }
-/* Numeric body column (Modbus#, CAN#, P-Limit) Ã¢â‚¬â€ right-aligned mono so
+/* Numeric body column (Modbus#, CAN#, P-Limit) — right-aligned mono so
    digits compare cleanly; header right-aligned too via the same class. */
 table.fcal-settings-table th.fcal-set-num,
 table.fcal-settings-table td.fcal-set-num { text-align: right; }
@@ -23472,7 +23471,7 @@ table.fcal-settings-table td.fcal-set-num {
   font-size: 12px;
   white-space: nowrap;
 }
-/* IP cell Ã¢â‚¬â€ mono but left-aligned (it's an address, not a magnitude),
+/* IP cell — mono but left-aligned (it's an address, not a magnitude),
    so it stays under a left-aligned IP header. */
 table.fcal-settings-table th.fcal-set-ip,
 table.fcal-settings-table td.fcal-set-ip { text-align: left; }
@@ -23491,8 +23490,8 @@ table.fcal-settings-table tbody tr:nth-child(even) td {
 table.fcal-settings-table tbody tr:hover td {
   background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
-/* Empty-state cell (skeleton "click Scan fleetÃ¢â‚¬Â¦" row) needs readable text
-   on every theme Ã¢â‚¬â€ was inheriting muted/undefined colours. */
+/* Empty-state cell (skeleton "click Scan fleet…" row) needs readable text
+   on every theme — was inheriting muted/undefined colours. */
 table.fcal-settings-table td.srn-empty {
   color: var(--text2);
   background: transparent;
@@ -23504,7 +23503,7 @@ table.fcal-settings-table td.srn-empty {
 table.fcal-settings-table td.srn-empty strong { color: var(--text); }
 /* Small unit suffix shown after a decoded value (e.g. "60 s", "230 V").
    Distinct from .fcal-settings-ro (the bordered chip that labels the view
-   as read-only) Ã¢â‚¬â€ units are inline, lower-weight, no border. */
+   as read-only) — units are inline, lower-weight, no border. */
 .fcal-settings-unit {
   margin-left: 4px;
   font-size: 11px;
@@ -23512,7 +23511,7 @@ table.fcal-settings-table td.srn-empty strong { color: var(--text); }
   font-weight: var(--fw-regular, 400);
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬ Editable Utility Tool tabs (B/C/D/I): New Value + Write columns Ã¢â€â‚¬Ã¢â€â‚¬ */
+/* ── Editable Utility Tool tabs (B/C/D/I): New Value + Write columns ── */
 table.fcal-settings-table th.fcal-set-input,
 table.fcal-settings-table td.fcal-set-input { text-align: left; }
 table.fcal-settings-table th.fcal-set-action,
@@ -23528,15 +23527,15 @@ table.fcal-settings-table td.fcal-set-input input.fcal-set-input-el {
 }
 
 /* Toggle switch for single-bit fields (calibration write table).
-   Compact + calm Ã¢â‚¬â€ sits inline in a table cell next to the New-value
+   Compact + calm — sits inline in a table cell next to the New-value
    inputs. Native checkbox is visually hidden but stays focusable +
    accessible; the track + thumb are purely cosmetic.
 
    States:
-     Ã¢â‚¬Â¢ OFF (read)  Ã¢â‚¬â€ slate track, thumb left,  muted "Off" text
-     Ã¢â‚¬Â¢ ON  (read)  Ã¢â‚¬â€ green track, thumb right, green "On" text
-     Ã¢â‚¬Â¢ DISABLED    Ã¢â‚¬â€ dashed-outline skeleton track, faint "Ã¢â‚¬â€" placeholder
-                     (matches the "no live value yet" Ã¢â‚¬â€ placeholder used
+     • OFF (read)  — slate track, thumb left,  muted "Off" text
+     • ON  (read)  — green track, thumb right, green "On" text
+     • DISABLED    — dashed-outline skeleton track, faint "—" placeholder
+                     (matches the "no live value yet" — placeholder used
                      in every other cell when the operator hasn't Read). */
 .fcal-toggle {
   display: inline-flex;
@@ -23592,10 +23591,10 @@ table.fcal-settings-table td.fcal-set-input input.fcal-set-input-el {
   outline: 2px solid var(--accent, #2f7ed8);
   outline-offset: 2px;
 }
-/* Disabled / not-yet-read state Ã¢â‚¬â€ render as a SKELETON, not a broken
-   toggle. Dashed neutral outline + no thumb glyph + "Ã¢â‚¬â€" label so the
-   operator immediately reads "no value yet Ã¢â‚¬â€ click Read", matching how
-   numeric cells in the same table render "Ã¢â‚¬â€" in the not-read state. */
+/* Disabled / not-yet-read state — render as a SKELETON, not a broken
+   toggle. Dashed neutral outline + no thumb glyph + "—" label so the
+   operator immediately reads "no value yet — click Read", matching how
+   numeric cells in the same table render "—" in the not-read state. */
 .fcal-toggle input:disabled + .fcal-toggle-track {
   background: transparent;
   border: 1px dashed color-mix(in srgb, var(--text3) 60%, transparent);
@@ -23608,7 +23607,7 @@ table.fcal-settings-table td.fcal-set-input input.fcal-set-input-el {
   cursor: not-allowed;
   opacity: 0.85;
 }
-/* Inline status label Ã¢â‚¬â€ plain text in the row, not a heavy chip.
+/* Inline status label — plain text in the row, not a heavy chip.
    Uses cell typography so it reads as part of the table, not a sticker. */
 .fcal-toggle-label {
   font-size: 11.5px;
@@ -23640,7 +23639,7 @@ table.fcal-settings-table .fcal-write-one:disabled {
 }
 
 /* Banner that appears at the top of a settings group when no live values
-   have been read yet Ã¢â‚¬â€ points the operator to the Read settings button. */
+   have been read yet — points the operator to the Read settings button. */
 .fcal-settings-gate-banner {
   display: flex;
   align-items: center;
@@ -23679,6 +23678,259 @@ table.fcal-settings-table .fcal-set-readonly {
   text-transform: uppercase;
   letter-spacing: 0.4px;
   background: color-mix(in srgb, var(--text3) 7%, transparent);
+}
+/* Persistent header layout: the transport selector + node picker live
+/* Pinned subheader wrapper holds the Write-all controls AND the group
+   title + gate banner. It sticks at the top of the scrolling settings
+   view so all three pieces ride together across every tab. The inner
+   controls row no longer needs its own sticky ΓÇö the wrapper handles it. */
+#page-field-calibration #fieldCalibrationSection > #fcalSettingsView .fcal-settings-pinned {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 2px 0 0;
+  margin: 0 0 4px;
+  background: var(--bg, var(--surface));
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 35%, transparent);
+}
+#page-field-calibration #fieldCalibrationSection > #fcalSettingsView .fcal-settings-controls {
+  padding: 0 0 4px;
+  margin: 0;
+}
+/* The pinned header subdivision (group title + gate banner) ΓÇö keep tight
+   spacing so the strip doesn't dominate the viewport. */
+#page-field-calibration #fieldCalibrationSection > #fcalSettingsView .fcal-settings-pinned-header {
+  padding: 0;
+}
+#page-field-calibration #fieldCalibrationSection > #fcalSettingsView .fcal-settings-pinned-header .fcal-settings-group-title {
+  margin: 4px 0 0;
+}
+#page-field-calibration #fieldCalibrationSection > #fcalSettingsView .fcal-settings-pinned-header .fcal-settings-gate-banner {
+  margin: 6px 16px 0;
+}
+
+/* On settings tabs hide ONLY the calibration scale-factor body ΓÇö the
+   pinned-header controls (Read, bypass toggles, FW Upgrade, read msg)
+   stay visible across every tab so the single Read button serves all
+   tabs uniformly. */
+#fieldCalibrationSection[data-fcal-view]:not([data-fcal-view="calibration"]) #fcalPanelSingle {
+  display: none;
+}
+
+/* --- Modern Card Grid for IGBT Asset Health --- */
+.igbt-fleet-grid-wrapper {
+  padding: 16px;
+  background: var(--bg-level2);
+  border-radius: 4px; /* Flatter radius */
+  border: 1px solid var(--border); /* Flat border instead of shadow */
+  overflow-y: auto;
+  max-height: calc(100vh - 200px);
+}
+
+.igbt-inverter-group {
+  margin-bottom: 24px;
+}
+
+.igbt-inverter-title {
+  font-family: 'Inter', 'Roboto', sans-serif;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text-main);
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 4px;
+}
+
+.igbt-fleet-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.igbt-card {
+  background: var(--surface); /* Solid flat color */
+  border: 1px solid var(--border); /* Flat border */
+  border-radius: 6px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: border-color 0.15s ease, background-color 0.15s ease; /* Fast, cheap transitions */
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+}
+
+.igbt-card:hover {
+  background: var(--bg-hover);
+  border-color: var(--text-muted);
+}
+
+.igbt-card.selected {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+/* Remove decorative before-bar */
+.igbt-card::before {
+  display: none;
+}
+
+.igbt-card.tier-healthy { color: var(--green); }
+.igbt-card.tier-watch { color: var(--orange); }
+.igbt-card.tier-aging { color: color-mix(in srgb, var(--orange) 60%, var(--red)); }
+.igbt-card.tier-eol { color: var(--red); }
+.igbt-card.tier-offline { color: var(--text-muted); }
+
+.igbt-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+  margin-bottom: 4px;
+}
+
+.igbt-card-title {
+  font-family: 'Inter', 'Roboto', sans-serif;
+  font-weight: 600;
+  font-size: 1.1rem;
+  color: var(--text);
+  letter-spacing: 0.2px;
+}
+
+.igbt-card-body {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0 4px 0;
+}
+
+.igbt-card-score-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.igbt-card-score-val {
+  font-family: 'Inter', 'Roboto', sans-serif;
+  font-size: 2rem;
+  font-weight: 700;
+  line-height: 1;
+  color: currentColor; /* Inherit tier color */
+  letter-spacing: -0.5px;
+}
+
+.igbt-card-score-lbl {
+  font-family: 'Inter', 'Roboto', sans-serif;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  letter-spacing: 0.5px;
+  margin-top: 6px;
+}
+
+.igbt-card-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.igbt-card-stats .stat-row {
+  font-family: 'Inter', 'Roboto', sans-serif;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.igbt-card-stats .stat-row b {
+  color: var(--text);
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.igbt-card-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 4px;
+}
+
+/* ΓöÇΓöÇ Card-grid state indicators (parallel to .pe-fleet-table tr.pe-row-* rules) ΓöÇΓöÇ */
+/* Offline ΓÇö node has no 5-min sample in the last 10 min. */
+.igbt-card.pe-row-offline {
+  opacity: 0.55;
+  background: repeating-linear-gradient(
+    -45deg,
+    transparent 0,
+    transparent 6px,
+    color-mix(in srgb, var(--text2) 6%, transparent) 6px,
+    color-mix(in srgb, var(--text2) 6%, transparent) 12px
+  );
+}
+.igbt-card.pe-row-offline:hover {
+  opacity: 0.85;
+}
+
+/* Critical alarm pattern ΓÇö recurring 0x0240 / 0x0210 (Slice ╬║.3). */
+.igbt-card.pe-row-critical-pattern {
+  border-left: 4px solid var(--red);
+  background: color-mix(in srgb, var(--red) 6%, var(--surface));
+}
+.igbt-card.pe-row-critical-pattern:hover {
+  background: color-mix(in srgb, var(--red) 12%, var(--surface));
+}
+
+/* Watch alarm pattern ΓÇö lower severity precursor. */
+.igbt-card.pe-row-watch-pattern {
+  border-left: 4px solid var(--orange);
+}
+
+/* Empty-state placeholder when no nodes match the tier filter. */
+.igbt-empty-state {
+  padding: 48px 24px;
+  text-align: center;
+  color: var(--text2);
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+.igbt-empty-title {
+  font-weight: 600;
+  font-size: 1.05rem;
+  margin-bottom: 8px;
+  color: var(--text);
+}
+.igbt-empty-copy {
+  max-width: 340px;
+  margin: 0 auto;
+}
+
+   ABOVE the tab strip so they're available across every tab (the operator
+   connects/picks once, then browses tabs). The .field-calibration-container
+   is a flex column — we reorder children with `order:` instead of moving
+   DOM nodes, so the existing init/event wiring stays untouched. */
+#page-field-calibration #fieldCalibrationSection > #fcalRemoteBanner { order: 0; }
+#page-field-calibration #fieldCalibrationSection > .fcal-header      { order: 1; }
+#page-field-calibration #fieldCalibrationSection > .fcal-view-tabs   { order: 2; }
+#page-field-calibration #fieldCalibrationSection > #fcalSettingsView { order: 3; }
+#page-field-calibration #fieldCalibrationSection > #fcalPanelSingle  { order: 4; }
+
+/* The settings view (B/C/D/I/Fleet) must scroll INSIDE its own viewport
+   so the pinned header + tab strip stay put when the table is tall. The
+   container is overflow:hidden, so we need explicit flex sizing here. */
+#page-field-calibration #fieldCalibrationSection > #fcalSettingsView {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 0 24px;
+}
+#page-field-calibration #fieldCalibrationSection > #fcalSettingsView[hidden] {
+  display: none !important;
 }
 /* Pinned subheader wrapper holds the Write-all controls AND the group
    title + gate banner. It sticks at the top of the scrolling settings
@@ -23909,58 +24161,3 @@ table.fcal-settings-table .fcal-set-readonly {
   max-width: 340px;
   margin: 0 auto;
 }
-
-/* Camera Popout Mode */
-.popout-mode #page-camera { display: flex; flex-direction: column; padding: 0; height: 100vh; width: 100vw; overflow: hidden; }
-.popout-mode #page-camera .camera-card { width: 100%; height: 100%; border-radius: 0; border: none; box-shadow: none; cursor: default; }
-.popout-mode #page-camera .camera-body { height: 100vh; }
-.popout-mode #page-camera .camera-body video,
-.popout-mode #page-camera .camera-body canvas { object-fit: fill; width: 100%; height: 100%; }
-.popout-mode #btnCamPopout { display: none !important; }
-
-.popout-mode .app-footer, .popout-mode .floating-chat-btn { display: none !important; }
-
-/* Scale up the UI overlay elements for the large popout window */
-.popout-mode #page-camera .cam-label {
-  top: 16px; left: 16px;
-  font-size: 16px;
-  padding: 4px 10px;
-  border-radius: 6px;
-  background: rgba(0, 0, 0, 0.7);
-}
-.popout-mode #page-camera .cam-live-dot {
-  top: 22px; right: 20px;
-  width: 12px; height: 12px;
-}
-.popout-mode #page-camera .cam-controls {
-  padding: 12px 20px;
-  gap: 12px;
-  background: linear-gradient(transparent, rgba(0, 0, 0, 0.85));
-}
-.popout-mode #page-camera .cam-ctrl-btn {
-  font-size: 24px;
-  padding: 6px 12px;
-  border-radius: 6px;
-  background: rgba(0, 0, 0, 0.4);
-}
-.popout-mode #page-camera .cam-ctrl-btn:hover {
-  background: rgba(255, 255, 255, 0.2);
-}
-.popout-mode #page-camera .camera-overlay-icon {
-  font-size: 48px;
-  margin-bottom: 8px;
-}
-.popout-mode #page-camera .camera-overlay-text {
-  font-size: 16px;
-  text-align: center;
-  padding: 0 40px;
-  max-width: 600px;
-  line-height: 1.5;
-}
-.popout-mode #page-camera .cam-retry-btn {
-  font-size: 14px;
-  padding: 6px 16px;
-  margin-top: 12px;
-}
-
-
