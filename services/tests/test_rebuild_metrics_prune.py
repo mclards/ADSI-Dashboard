@@ -18,7 +18,6 @@ import unittest
 
 import services.inverter_engine as engine
 
-
 def _mk_metrics(*nks):
     """Seed every metrics_state dict with the given node keys."""
     engine.metrics_state["pacEnergy"].clear()
@@ -35,10 +34,8 @@ def _mk_metrics(*nks):
         engine.metrics_state["lastUpdate"][nk] = 0
         engine.metrics_state["pacEnergyHistory"][nk] = {"2026-05-29": 1.0}
 
-
 def _all_nks():
     return set(engine.metrics_state["pacEnergy"].keys())
-
 
 class RebuildMetricsPruneTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -153,7 +150,6 @@ class RebuildMetricsPruneTests(unittest.IsolatedAsyncioTestCase):
         # Lock-step across all five dicts.
         for sub in ("pacEnergy", "pdcData", "uiAlarm", "lastUpdate", "pacEnergyHistory"):
             self.assertNotIn("1_4", engine.metrics_state[sub], f"{sub} still holds 1_4")
-
 
 if __name__ == "__main__":
     unittest.main()

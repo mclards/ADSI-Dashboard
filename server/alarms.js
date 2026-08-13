@@ -1,4 +1,4 @@
-﻿"use strict";
+"use strict";
 /**
  * alarms.js — Ingeteam INGECON SUN PowerMax 920TL DCAC Outdoor
  * Alarm register: 16-bit bitfield (AAV2015IQE01_B §19.2–19.4)

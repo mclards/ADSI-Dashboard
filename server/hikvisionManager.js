@@ -37,6 +37,7 @@ function defaults() {
     enabled: true,
     name: "Hikvision CCTV",
     host: "192.168.1.12",
+    httpPort: "80",
     rtspPort: "554",
     channel: "1",
     stream: "main",
@@ -76,6 +77,7 @@ function sanitizeConfig(raw, options = {}) {
   const base = defaults();
   const host = cleanText(src.host || base.host, 120).replace(/[^a-zA-Z0-9.:[\]-]/g, "");
   const rtspPortNum = Number(src.rtspPort || base.rtspPort);
+  const httpPortNum = Number(src.httpPort || base.httpPort);
   const channelNum = Math.max(1, Math.min(32, Math.trunc(Number(src.channel || 1)) || 1));
   const stream = cleanText(src.stream || base.stream, 12).toLowerCase() === "main" ? "main" : "sub";
   const transport = cleanText(src.transport || base.transport, 12).toLowerCase() === "udp" ? "udp" : "tcp";
@@ -93,6 +95,7 @@ function sanitizeConfig(raw, options = {}) {
     enabled: src.enabled !== false && src.enabled !== "0",
     name: cleanText(src.name || base.name, 80) || base.name,
     host: host || base.host,
+    httpPort: String(Number.isInteger(httpPortNum) && httpPortNum >= 1 && httpPortNum <= 65535 ? httpPortNum : 80),
     rtspPort: String(Number.isInteger(rtspPortNum) && rtspPortNum >= 1 && rtspPortNum <= 65535 ? rtspPortNum : 554),
     channel: String(channelNum),
     stream,
@@ -576,6 +579,13 @@ async function test(configRaw) {
   }
 }
 
+function rewriteHikvisionPlaylist(text) {
+  return String(text || "").replace(
+    /\/api\/hls\//g,
+    "/api/hikvision/hls/hls/",
+  );
+}
+
 function proxyMedia(req, res, configRaw) {
   const requestedMode = cleanText(req.query?.mode, 20).toLowerCase();
   const cfg = sanitizeConfig({
@@ -596,12 +606,28 @@ function proxyMedia(req, res, configRaw) {
   const upstream = http.get(
     { host: API_HOST, port: API_PORT, path: upstreamPath, timeout: 10000 },
     (mediaRes) => {
+      const isPlaylist = /\.m3u8(?:\?|$)/i.test(upstreamPath);
       res.status(mediaRes.statusCode || 502);
-      for (const name of ["content-type", "content-length", "cache-control"]) {
+      for (const name of ["content-type", "cache-control"]) {
         if (mediaRes.headers[name]) res.set(name, mediaRes.headers[name]);
       }
       res.set("Cache-Control", "no-store");
-      mediaRes.pipe(res);
+      if (!isPlaylist) {
+        if (mediaRes.headers["content-length"]) res.set("Content-Length", mediaRes.headers["content-length"]);
+        mediaRes.pipe(res);
+        return;
+      }
+      const chunks = [];
+      mediaRes.on("data", (chunk) => chunks.push(chunk));
+      mediaRes.on("end", () => {
+        // go2rtc emits absolute child-playlist and segment paths under
+        // /api/hls/*. Keep every hop inside this authenticated dashboard
+        // route; otherwise Remote mode asks Express for /api/hls/* and Hls.js
+        // receives the dashboard HTML instead of an HLS manifest.
+        const playlist = rewriteHikvisionPlaylist(Buffer.concat(chunks).toString("utf8"));
+        res.set("Content-Length", String(Buffer.byteLength(playlist)));
+        res.send(playlist);
+      });
     },
   );
   upstream.on("timeout", () => upstream.destroy(new Error("Hikvision media proxy timed out")));
@@ -629,4 +655,5 @@ module.exports = {
   optimizeSubstream,
   getStatus,
   proxyMedia,
+  __test: { rewriteHikvisionPlaylist },
 };

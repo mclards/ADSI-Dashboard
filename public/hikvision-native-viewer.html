@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ADSI – Hikvision Native Viewer</title>
+  <link rel="stylesheet" href="/css/hikvision-native-viewer.css" />
+</head>
+<body data-theme="dark">
+  <main id="nativeSurface" class="native-surface" aria-label="Hikvision native video surface">
+    <div id="nativePlaceholder" class="native-placeholder">
+      <div class="native-spinner" aria-hidden="true"></div>
+      <strong>Hikvision CCTV</strong>
+      <p id="nativePlaceholderText">Connecting to Hikvision LocalService…</p>
+      <button id="nativeRetry" class="native-retry" type="button" hidden>Retry</button>
+    </div>
+  </main>
+
+  <script src="/js/hikvision-native-viewer.js"></script>
+</body>
+</html>

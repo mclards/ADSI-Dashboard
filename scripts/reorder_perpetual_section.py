@@ -18,10 +18,8 @@ from _docx_utils import (
     resolve_input_output,
 )
 
-
 def _row_count(tbl_el) -> int:
     return len(tbl_el.findall(qn("w:tr")))
-
 
 def _classify(elements: list[object]) -> dict[str, object]:
     out = {
@@ -57,7 +55,6 @@ def _classify(elements: list[object]) -> dict[str, object]:
         ):
             out["aftermarket_note"] = el
     return out
-
 
 def reorder(doc: Document) -> tuple[bool, str]:
     body = doc.element.body
@@ -119,7 +116,6 @@ def reorder(doc: Document) -> tuple[bool, str]:
     insert_before(sec_aftermarket, ordered)
     return True, "Perpetual section reordered."
 
-
 def main() -> int:
     in_path, out_path = resolve_input_output("Reorder perpetual section safely.")
     doc = Document(str(in_path))
@@ -134,7 +130,6 @@ def main() -> int:
     print(f"DONE: {msg}")
     print(f"Saved: {out_path}")
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

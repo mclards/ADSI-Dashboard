@@ -29,7 +29,6 @@ See services/inverter_engine.py for frame assembly and v2.10.x sign extension.
 from pymodbus.client.sync import ModbusTcpClient
 import time
 
-
 # T3.7 + T3.10 fix (Phase 6, 2026-04-14):
 #   T3.7 — On a TRUE exception during read (not just an isError() result),
 #          the underlying socket may be in a corrupted state.  Close the
@@ -56,13 +55,11 @@ def _refresh_timeout(client):
     except Exception:
         pass
 
-
 def _close_quietly(client):
     try:
         client.close()
     except Exception:
         pass
-
 
 def create_client(ip, port=502, timeout=1.0):
     """
@@ -76,7 +73,6 @@ def create_client(ip, port=502, timeout=1.0):
         pass
     return client
 
-
 def read_input(client, address, count, unit):
     _refresh_timeout(client)
     try:
@@ -88,7 +84,6 @@ def read_input(client, address, count, unit):
         _close_quietly(client)
     return None
 
-
 def read_holding(client, address, count, unit):
     _refresh_timeout(client)
     try:
@@ -98,7 +93,6 @@ def read_holding(client, address, count, unit):
     except Exception:
         _close_quietly(client)
     return None
-
 
 def write_single(client, address, value, unit):
     """

@@ -119,13 +119,13 @@ Added `windowsHide: true` to all six options bags. Verified by grep that no cons
 After-state grep:
 
 ```
-2304:      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true },
-2322:      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true },
-2342:      { encoding: "utf8", stdio: ["ignore", "ignore", "ignore"], windowsHide: true },
-2355:      { encoding: "utf8", stdio: ["ignore", "ignore", "ignore"], windowsHide: true },
-3715:      execFileSync("taskkill", ["/IM", image, "/F"], { stdio: "ignore", windowsHide: true });
-4071:    execFile("taskkill", ["/pid", String(backendProc.pid), "/f", "/t"], { stdio: "ignore", windowsHide: true }, ...
-5446:  execFile("taskkill", ["/pid", String(proc.pid), "/f", "/t"], { stdio: "ignore", windowsHide: true }, ...
+{ encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true },
+{ encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true },
+{ encoding: "utf8", stdio: ["ignore", "ignore", "ignore"], windowsHide: true },
+{ encoding: "utf8", stdio: ["ignore", "ignore", "ignore"], windowsHide: true },
+execFileSync("taskkill", ["/IM", image, "/F"], { stdio: "ignore", windowsHide: true });
+execFile("taskkill", ["/pid", String(backendProc.pid), "/f", "/t"], { stdio: "ignore", windowsHide: true }, ...
+execFile("taskkill", ["/pid", String(proc.pid), "/f", "/t"], { stdio: "ignore", windowsHide: true }, ...
 ```
 
 `electron/storageConsolidationMigration.js:52` and `electron/bootstrapRestore.js:160-163` were checked and already pass `windowsHide: true`. `electron/integrityGate.js:119-122` also already correct.

@@ -90,7 +90,7 @@ db.pragma("synchronous = NORMAL");
 **Recommendation:** Add explicit LIMIT and project only needed columns:
 ```js
 // db.js:1682
-`SELECT id, ts, inverter, unit, alarm_code, severity FROM alarms 
+`SELECT id, ts, inverter, unit, alarm_code, severity FROM alarms
  WHERE cleared_ts IS NULL ORDER BY ts DESC LIMIT 5000`
 ```
 
@@ -106,7 +106,7 @@ db.pragma("synchronous = NORMAL");
 
 **Recommendation:** Future enhancement — add `soft_deleted_at INTEGER DEFAULT NULL` and create partial indexes:
 ```sql
-CREATE INDEX IF NOT EXISTS idx_isr_active 
+CREATE INDEX IF NOT EXISTS idx_isr_active
   ON inverter_stop_reasons(read_at_ms DESC) WHERE soft_deleted_at IS NULL;
 ```
 
@@ -140,7 +140,7 @@ db.prepare("DELETE FROM inverter_counter_baseline WHERE date_key < ?").run(cutof
 
 **Recommendation:** Ensure the composite index `idx_icb_inv_unit_date` exists:
 ```sql
-CREATE INDEX IF NOT EXISTS idx_icb_inv_unit_date 
+CREATE INDEX IF NOT EXISTS idx_icb_inv_unit_date
   ON inverter_counter_baseline(inverter, unit, date_key);
 ```
 This index is missing from the schema.
@@ -197,7 +197,7 @@ CREATE TABLE IF NOT EXISTS inverter_5min_param (
 
 **Recommendation:** Add a secondary index for bulk operations:
 ```sql
-CREATE INDEX IF NOT EXISTS idx_p5m_inv_slave 
+CREATE INDEX IF NOT EXISTS idx_p5m_inv_slave
   ON inverter_5min_param(inverter_ip, slave);
 ```
 
@@ -453,7 +453,7 @@ If a NULL value is ever inserted, aggregations like `SUM(etotal_kwh)` will retur
 
 **Recommendation:** Add `NOT NULL` to these columns:
 ```sql
-ALTER TABLE inverter_counter_state 
+ALTER TABLE inverter_counter_state
   MODIFY etotal_kwh INTEGER NOT NULL DEFAULT 0,
   MODIFY parce_kwh INTEGER NOT NULL DEFAULT 0,
   MODIFY pac_w INTEGER NOT NULL DEFAULT 0;
@@ -475,7 +475,7 @@ The code assumes severity is 'fault' | 'warning' | 'info', but the database allo
 
 **Recommendation:**
 ```sql
-ALTER TABLE alarms ADD CONSTRAINT ck_severity_valid 
+ALTER TABLE alarms ADD CONSTRAINT ck_severity_valid
   CHECK(severity IN ('fault', 'warning', 'info'));
 ```
 
@@ -890,9 +890,9 @@ All INSERT/UPDATE/DELETE operations use parameterized prepared statements. ✓ N
 
 ---
 
-**Report generated:** 2026-04-28  
-**Scope:** SQLite schema, migration hygiene, query patterns, concurrency, data integrity  
-**Excluded:** Application logic, forecast models, Python service contracts  
+**Report generated:** 2026-04-28
+**Scope:** SQLite schema, migration hygiene, query patterns, concurrency, data integrity
+**Excluded:** Application logic, forecast models, Python service contracts
 **Files audited:**
 - `/d/ADSI-Dashboard/server/db.js` (4334 lines)
 - `/d/ADSI-Dashboard/server/poller.js` (1500+ lines, sampled)

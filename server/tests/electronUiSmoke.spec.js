@@ -72,6 +72,76 @@ test.describe("Electron UI smoke", () => {
       await expect(mainWindow.locator("#totalPac")).not.toHaveText(/^\s*[—-]?\s*$/);
       await expect(mainWindow.locator("#totalKwh")).not.toHaveText(/^\s*[—-]?\s*$/);
 
+      const hikvisionCard = mainWindow.locator("#hikvisionCard");
+      await expect(hikvisionCard).toBeVisible({ timeout: 30000 });
+      await expect(mainWindow.locator("#btnHikvisionSettings")).toBeVisible();
+      await expect(mainWindow.locator("#btnHikvisionPopout")).toHaveCount(0);
+      await expect(mainWindow.locator("#btnHikvisionNativeViewer")).toBeVisible();
+      await expect(hikvisionCard).toHaveCount(1);
+      await expect(hikvisionCard.locator(".cam-controls .cam-ctrl-btn")).toHaveCount(2);
+
+      await mainWindow.locator("#btnHikvisionNativeViewer").click();
+      const nativeViewer = await waitForWindow(
+        electronApp,
+        async (page, url) => {
+          if (!url.includes("hikvision-native-viewer.html")) return false;
+          await page.waitForLoadState("domcontentloaded");
+          return true;
+        },
+        30000,
+      );
+      await expect(nativeViewer).toHaveTitle("ADSI – Hikvision Native Viewer");
+      const nativeWindowState = await electronApp.evaluate(({ BrowserWindow }) => {
+        const win = BrowserWindow.getAllWindows().find((candidate) =>
+          candidate.webContents.getURL().includes("hikvision-native-viewer.html"),
+        );
+        return win ? {
+          fullscreen: win.isFullScreen(),
+          resizable: win.isResizable(),
+          minimizable: win.isMinimizable(),
+          maximizable: win.isMaximizable(),
+          minimumSize: win.getMinimumSize(),
+        } : null;
+      });
+      expect(nativeWindowState).toEqual({
+        fullscreen: false,
+        resizable: true,
+        minimizable: true,
+        maximizable: true,
+        minimumSize: [900, 600],
+      });
+      await expect(nativeViewer.locator("#nativeSurface")).toBeVisible();
+      await expect(nativeViewer.locator("#nativeExit")).toHaveCount(0);
+      const nativeLayout = await nativeViewer.evaluate(() => {
+        const surface = document.getElementById("nativeSurface").getBoundingClientRect();
+        return {
+          surfaceTop: surface.top,
+          surfaceLeft: surface.left,
+          surfaceWidth: surface.width,
+          surfaceHeight: surface.height,
+          viewportWidth: innerWidth,
+          viewportHeight: innerHeight,
+        };
+      });
+      expect(nativeLayout.surfaceTop).toBeLessThanOrEqual(1);
+      expect(nativeLayout.surfaceLeft).toBeLessThanOrEqual(1);
+      expect(nativeLayout.surfaceWidth).toBeGreaterThanOrEqual(nativeLayout.viewportWidth - 1);
+      expect(nativeLayout.surfaceHeight).toBeGreaterThanOrEqual(nativeLayout.viewportHeight - 1);
+      expect(nativeLayout.surfaceHeight).toBeGreaterThan(100);
+      await nativeViewer.close();
+      await expect.poll(
+        () => electronApp.windows().filter((page) => page.url().includes("hikvision-native-viewer.html")).length,
+        { timeout: 15000 },
+      ).toBe(0);
+
+      await mainWindow.locator("#btnHikvisionSettings").click();
+      await expect(mainWindow.locator("#hikSettingsModal")).toBeVisible();
+      await expect(mainWindow.locator("#hikRoutePanel")).toBeVisible();
+      await expect(mainWindow.locator("#hikCompactPath")).not.toHaveText("Checking...", { timeout: 15000 });
+      await expect(mainWindow.locator("#btnHikRouteCheck")).toBeVisible();
+      await mainWindow.locator("#btnHikModalClose").click();
+      await expect(mainWindow.locator("#hikSettingsModal")).toBeHidden();
+
       await mainWindow.selectOption("#invFilter", "1");
       await expect(mainWindow.locator("#invDetailPanel")).toBeVisible();
       await expect
@@ -89,12 +159,21 @@ test.describe("Electron UI smoke", () => {
 
       await mainWindow.locator('[data-page="export"]').evaluate((el) => el.click());
       await expect(mainWindow.locator("#page-export")).toBeVisible();
+      await expect(hikvisionCard).not.toHaveClass(/is-floating/);
+      await expect(hikvisionCard).not.toBeVisible();
+      await expect(hikvisionCard).toHaveCount(1);
+      await expect(mainWindow.locator("#hikvisionVideo")).toBeHidden();
       await expect(mainWindow.locator("#expEnergyDate")).toBeVisible();
       await expect(
         mainWindow.locator('#page-export input[type="date"][id^="expEnergy"]'),
       ).toHaveCount(1);
       await expect(mainWindow.locator("#expEnergyStart")).toHaveCount(0);
       await expect(mainWindow.locator("#expEnergyEnd")).toHaveCount(0);
+
+      await mainWindow.locator('[data-page="inverters"]').evaluate((el) => el.click());
+      await expect(mainWindow.locator("#page-inverters")).toBeVisible();
+      await expect(hikvisionCard).toBeVisible();
+      await expect(hikvisionCard).not.toHaveAttribute("hidden", "");
 
       await mainWindow.locator('[data-page="settings"]').evaluate((el) => el.click());
       await mainWindow

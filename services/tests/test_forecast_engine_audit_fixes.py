@@ -32,7 +32,6 @@ try:
 except ImportError:
     HAS_FORECAST_ENGINE = False
 
-
 @pytest.mark.skipif(not HAS_FORECAST_ENGINE, reason="forecast_engine not importable")
 class TestAuditFixes:
     """Test suite for 2026-05-28 audit fixes."""
@@ -176,7 +175,6 @@ class TestAuditFixes:
         )
         assert X_test.shape[1] == 72
 
-
 class TestOverrideToMeanBlend100:
     """
     F-T2: Tests for override_to_mean_blend_100 signal handling.
@@ -202,7 +200,6 @@ class TestOverrideToMeanBlend100:
         source = inspect.getsource(fe.run_dayahead)
         # Should check for override_to_mean_blend_100
         assert "override_to_mean_blend_100" in source or "mean_blend" in source
-
 
 class TestRegimeTransitionEdgeCase:
     """
@@ -250,7 +247,6 @@ class TestRegimeTransitionEdgeCase:
         """Relaxed threshold should be < standard threshold."""
         assert fe.REGIME_MODEL_MIN_DAYS_TRANSITION < fe.REGIME_MODEL_MIN_DAYS
 
-
 class TestSklearnVsLightGBMBackend:
     """
     ML-T1: sklearn vs LightGBM backend presence/shape test.
@@ -284,7 +280,6 @@ class TestSklearnVsLightGBMBackend:
         # Either None (available) or a string (error message)
         if fe._LIGHTGBM_IMPORT_ERROR is not None:
             assert isinstance(fe._LIGHTGBM_IMPORT_ERROR, str)
-
 
 @pytest.mark.skipif(not HAS_FORECAST_ENGINE, reason="forecast_engine not importable")
 class TestForecastTunables:
@@ -356,7 +351,6 @@ class TestForecastTunables:
         # Defaults must remain the operator-tuned baselines (zero behavior change at default).
         assert abs(fe.EST_ACTUAL_WEIGHT_FACTOR - 0.93) < 1e-9
         assert abs(fe.INTRADAY_BLEND_MAX - 0.72) < 1e-9
-
 
 @pytest.mark.skipif(not HAS_FORECAST_ENGINE, reason="forecast_engine not importable")
 class TestPhysicsFallback:
@@ -446,7 +440,6 @@ class TestPhysicsFallback:
     def test_no_dead_residual_var(self):
         import inspect
         assert "slot_cap_mw_arr" not in inspect.getsource(fe)
-
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

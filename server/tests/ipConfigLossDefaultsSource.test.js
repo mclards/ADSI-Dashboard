@@ -7,7 +7,7 @@ const path = require("path");
 function run() {
   const serverSrc = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8");
   const pollerSrc = fs.readFileSync(path.join(__dirname, "..", "poller.js"), "utf8");
-  const uiSrc = fs.readFileSync(path.join(__dirname, "..", "..", "public", "ip-config.html"), "utf8");
+  const uiSrc = fs.readFileSync(path.join(__dirname, "..", "..", "public", "global-config.html"), "utf8");
 
   assert(serverSrc.includes("const DEFAULT_INVERTER_LOSS_PCT = 2.5;"));
   assert(serverSrc.includes("cfg.losses[i] = DEFAULT_INVERTER_LOSS_PCT;"));

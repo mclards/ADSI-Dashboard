@@ -52,7 +52,6 @@ RESPONSE_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "private"
 )
 
-
 def load_api_key(cli_key: str | None) -> tuple[str, str]:
     """Return (key, source-label). Raises RuntimeError if none found."""
     if cli_key:
@@ -87,7 +86,6 @@ def load_api_key(cli_key: str | None) -> tuple[str, str]:
         "No API key found. Set SOLCAST_API_KEY env var, create "
         f"{DEFAULT_KEY_FILE}, or pass --api-key."
     )
-
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -235,7 +233,6 @@ def main() -> int:
     print(f"SUCCESS — response saved at {out_path}")
     print("=" * 72)
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

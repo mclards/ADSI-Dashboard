@@ -95,11 +95,9 @@ PDF_EXPECTED = {
     1009: ("Restrictive Freq Limits",     lambda v: v in (0, 1)),
 }
 
-
 def _s16(u16):
     u = int(u16) & 0xFFFF
     return u - 0x10000 if u & 0x8000 else u
-
 
 def _read(client, addr, count, slave):
     try:
@@ -119,7 +117,6 @@ def _read(client, addr, count, slave):
         return None, f"short frame: got {len(regs)}/{count}"
     return regs, None
 
-
 def _write(client, addr, values, slave):
     try:
         try:
@@ -131,7 +128,6 @@ def _write(client, addr, values, slave):
     if r is None or (hasattr(r, "isError") and r.isError()):
         return False, f"modbus error: {r}"
     return True, None
-
 
 def _classify(regs, expected_map, base_addr):
     """Score how well a given expected_map matches the observed registers.
@@ -156,7 +152,6 @@ def _classify(regs, expected_map, base_addr):
         lines.append(f"    {marker} reg {addr+40001} (idx {addr-1000:3d}) = {val:6d} (0x{val:04X})  {name}")
     score = hits / total if total else 0.0
     return score, hits, total, lines
-
 
 def phase1_readonly(client, slave):
     print("\n" + "=" * 72)
@@ -201,7 +196,6 @@ def phase1_readonly(client, slave):
         return "pdf"
     print("    INCONCLUSIVE — neither map fits cleanly. Inspect raw values above.")
     return "inconclusive"
-
 
 def phase2_write_restore(client, slave, signature_raw=100):
     print("\n" + "=" * 72)
@@ -274,7 +268,6 @@ def phase2_write_restore(client, slave, signature_raw=100):
         print("  for read-back may be wrong, OR the inverter rejected cmd 1 silently.")
     return False
 
-
 def main(argv):
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--ip", required=True, help="Inverter IP address")
@@ -300,7 +293,6 @@ def main(argv):
     finally:
         try: client.close()
         except Exception: pass
-
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))

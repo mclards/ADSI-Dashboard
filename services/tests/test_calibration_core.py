@@ -19,7 +19,6 @@ from services.calibration_core import (
     _CALIB_READ_COUNT,
 )
 
-
 class FakeModbusResponse:
     """Fake pymodbus response object."""
     def __init__(self, registers=None, is_error=False):
@@ -28,7 +27,6 @@ class FakeModbusResponse:
 
     def isError(self):
         return self._is_error
-
 
 class FakeModbusClient:
     """Fake pymodbus ModbusSerialClient / ModbusTcpClient for testing."""
@@ -48,7 +46,6 @@ class FakeModbusClient:
         self.call_log.append(('read_input', address, count, unit))
         key = (address, count, unit)
         return self.read_input_registers_returns.get(key, FakeModbusResponse())
-
 
 class TestReadCalibrationBlockSync(unittest.TestCase):
     """Test _read_calibration_block_sync transport-neutral core."""
@@ -158,7 +155,6 @@ class TestReadCalibrationBlockSync(unittest.TestCase):
         """Verify module constants have expected values."""
         self.assertEqual(_CALIB_READ_BASE, 80)
         self.assertEqual(_CALIB_READ_COUNT, 15)
-
 
 class TestReadLiveForCalibrationSync(unittest.TestCase):
     """Test _read_live_for_calibration_sync transport-neutral core."""
@@ -409,7 +405,6 @@ class TestReadLiveForCalibrationSync(unittest.TestCase):
         # Should be an int millisecond timestamp
         self.assertIsInstance(result["read_at_ms"], int)
         self.assertGreater(result["read_at_ms"], 1000000000000)  # > Jan 2001
-
 
 if __name__ == "__main__":
     unittest.main()

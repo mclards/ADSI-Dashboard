@@ -97,6 +97,18 @@ contextBridge.exposeInMainWorld("electronAPI", {
     return () => ipcRenderer.removeListener("camera-popout-closed", handler);
   },
   signalCameraPopoutReady: () => ipcRenderer.send("camera-popout-ready"),
+  openHikvisionNativeViewer: (theme) => ipcRenderer.invoke("hikvision-native-viewer-open", { theme }),
+  hikvisionNativeViewerStatus: () => ipcRenderer.invoke("hikvision-native-viewer-status"),
+  onHikvisionNativeViewerOpened: (cb) => {
+    const handler = () => cb();
+    ipcRenderer.on("hikvision-native-viewer-opened", handler);
+    return () => ipcRenderer.removeListener("hikvision-native-viewer-opened", handler);
+  },
+  onHikvisionNativeViewerClosed: (cb) => {
+    const handler = () => cb();
+    ipcRenderer.on("hikvision-native-viewer-closed", handler);
+    return () => ipcRenderer.removeListener("hikvision-native-viewer-closed", handler);
+  },
 
   hikvisionNativeStart: (rect) => ipcRenderer.invoke("hikvision-native-start", rect),
   hikvisionNativeUpdate: (rect) => ipcRenderer.invoke("hikvision-native-update", rect),

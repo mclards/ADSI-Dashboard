@@ -21,7 +21,6 @@ SETTINGS_KEYS = (
     "plantLongitude",
 )
 
-
 def read_settings():
     uri = f"file:{DB_PATH}?mode=ro"
     conn = sqlite3.connect(uri, uri=True, timeout=5.0)
@@ -35,7 +34,6 @@ def read_settings():
         return {r["key"]: r["value"] for r in rows}
     finally:
         conn.close()
-
 
 def http_get(url: str, headers: dict, timeout: float = 25.0):
     req = urllib.request.Request(url, headers=headers)
@@ -51,7 +49,6 @@ def http_get(url: str, headers: dict, timeout: float = 25.0):
         return e.code, body
     except Exception as e:
         return -1, f"transport error: {e}"
-
 
 def main():
     print("=" * 72)
@@ -170,7 +167,6 @@ def main():
     print("Probe complete.")
     print("=" * 72)
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

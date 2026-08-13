@@ -269,6 +269,6 @@ The root-level spike/research artifacts are expected and clearly separate from p
 
 ---
 
-**Audit completed:** 2026-04-28  
-**Auditor:** refactor-cleaner (Haiku 4.5, read-only mode)  
+**Audit completed:** 2026-04-28
+**Auditor:** refactor-cleaner (Haiku 4.5, read-only mode)
 **Next steps:** Operator decision on `_spike/`, `_ism/`, and `sync-agents.ps1`

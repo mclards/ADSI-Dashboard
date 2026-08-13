@@ -10,7 +10,6 @@ from docx.oxml.ns import qn
 
 DEFAULT_DOC_PATH = Path("docs/ADSI-Dashboard-Pricing-Summary.docx")
 
-
 def resolve_input_output(description: str) -> tuple[Path, Path]:
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument(
@@ -46,20 +45,16 @@ def resolve_input_output(description: str) -> tuple[Path, Path]:
 
     return in_path, out_path
 
-
 def paragraph_text(el) -> str:
     return "".join(t.text or "" for t in el.iter(qn("w:t")))
-
 
 def is_paragraph(el) -> bool:
     tag = el.tag
     return tag.endswith("}p") or tag == "w:p"
 
-
 def is_table(el) -> bool:
     tag = el.tag
     return tag.endswith("}tbl") or tag == "w:tbl"
-
 
 def paragraph_matches(el, pattern: str, startswith: bool = False, case_insensitive: bool = True) -> bool:
     if not is_paragraph(el):
@@ -75,17 +70,14 @@ def paragraph_matches(el, pattern: str, startswith: bool = False, case_insensiti
         return text_cmp.startswith(pat_cmp)
     return pat_cmp in text_cmp
 
-
 def find_first_paragraph(doc: Document, matcher) -> object:
     for p in doc.paragraphs:
         if matcher(p.text or ""):
             return p._element
     return None
 
-
 def numbered_heading_text(text: str) -> bool:
     return bool(re.match(r"^\s*\d{2}(?:-[A-Z])?\.\s+", (text or "").strip()))
-
 
 def find_next_numbered_heading(start_el) -> object:
     cur = start_el.getnext()
@@ -97,7 +89,6 @@ def find_next_numbered_heading(start_el) -> object:
         cur = cur.getnext()
     return None
 
-
 def collect_siblings_until(start_after_el, stop_before_el) -> list[object]:
     out = []
     cur = start_after_el.getnext()
@@ -105,7 +96,6 @@ def collect_siblings_until(start_after_el, stop_before_el) -> list[object]:
         out.append(cur)
         cur = cur.getnext()
     return out
-
 
 def collect_from_to(start_el, stop_before_el) -> list[object]:
     out = []
@@ -115,16 +105,13 @@ def collect_from_to(start_el, stop_before_el) -> list[object]:
         cur = cur.getnext()
     return out
 
-
 def remove_elements(body_el, elements: list[object]) -> None:
     for el in elements:
         body_el.remove(el)
 
-
 def insert_before(anchor_el, elements_in_order: list[object]) -> None:
     for el in reversed(elements_in_order):
         anchor_el.addprevious(el)
-
 
 def insert_after(anchor_el, elements_in_order: list[object]) -> object:
     ref = anchor_el
@@ -132,7 +119,6 @@ def insert_after(anchor_el, elements_in_order: list[object]) -> object:
         ref.addnext(el)
         ref = el
     return ref
-
 
 def make_spacer(after_twips: int = 80):
     new_p = OxmlElement("w:p")

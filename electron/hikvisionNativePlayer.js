@@ -9,21 +9,52 @@ const REQUEST_TIMEOUT_MS = 8000;
 let socket = null;
 let uuid = "";
 let ownerWindow = null;
+let ownerWebContentsId = null;
 let running = false;
 let visible = false;
 let currentRect = null;
 let playInfo = {};
 let generation = 0;
+let operationChain = Promise.resolve();
+let detachOwnerLifecycle = null;
 const pending = new Map();
 
-function sanitizeRect(rect) {
+function ownerId(owner) {
+  try { return owner && !owner.isDestroyed() ? owner.webContents.id : null; } catch (_) { return null; }
+}
+
+function sanitizeRect(rect, owner = ownerWindow) {
+  const values = [rect?.left, rect?.top, rect?.width, rect?.height].map(Number);
+  if (!values.every(Number.isFinite) || values[2] < 2 || values[3] < 2) {
+    throw new Error("Invalid Hikvision native surface rectangle");
+  }
   const scale = Math.max(0.5, Math.min(4, Number(rect?.scaleFactor) || 1));
+  const content = owner && !owner.isDestroyed() ? owner.getContentSize() : [values[2], values[3]];
+  const maxWidth = Math.max(2, Math.round((Number(content[0]) || values[2]) * scale));
+  const maxHeight = Math.max(2, Math.round((Number(content[1]) || values[3]) * scale));
+  const left = Math.max(0, Math.min(maxWidth - 2, Math.round(values[0] * scale)));
+  const top = Math.max(0, Math.min(maxHeight - 2, Math.round(values[1] * scale)));
   return {
-    left: Math.round((Number(rect?.left) || 0) * scale),
-    top: Math.round((Number(rect?.top) || 0) * scale),
-    width: Math.max(1, Math.round((Number(rect?.width) || 1) * scale)),
-    height: Math.max(1, Math.round((Number(rect?.height) || 1) * scale)),
+    left,
+    top,
+    width: Math.max(2, Math.min(maxWidth - left, Math.round(values[2] * scale))),
+    height: Math.max(2, Math.min(maxHeight - top, Math.round(values[3] * scale))),
   };
+}
+
+function enqueue(operation) {
+  const result = operationChain.then(operation, operation);
+  operationChain = result.catch(() => {});
+  return result;
+}
+
+function assertGeneration(expectedGeneration) {
+  if (expectedGeneration !== generation) throw new Error("Hikvision playback start was superseded");
+}
+
+function assertOwner(owner) {
+  const id = ownerId(owner);
+  if (!id || id !== ownerWebContentsId) throw new Error("Hikvision native player is owned by another window");
 }
 
 function geometryOf(rect) {
@@ -133,69 +164,139 @@ async function createNativeWindow(owner, rect) {
   await request("video.setWndRatioMode", { wndIndex: 0, mode: 0, allWnd: false }).catch(() => {});
 }
 
-async function start(owner, config, rect) {
-  if (!owner || owner.isDestroyed()) throw new Error("Hikvision host window is unavailable");
-  if (!config?.password) throw new Error("Hikvision DVR password is not configured");
-  if (running) {
-    ownerWindow = owner;
-    await update(owner, rect);
-    await show();
-    return status();
+function attachOwnerLifecycle(owner) {
+  detachOwnerLifecycle?.();
+  const id = ownerId(owner);
+  const onGone = () => stopOwnedById(id).catch(() => {});
+  const onNavigation = (_event, _url, _isInPlace, isMainFrame) => {
+    if (isMainFrame) onGone();
+  };
+  owner.once("closed", onGone);
+  owner.webContents.once("destroyed", onGone);
+  owner.webContents.once("render-process-gone", onGone);
+  owner.webContents.on("did-start-navigation", onNavigation);
+  owner.webContents.on("leave-html-full-screen", onGone);
+  detachOwnerLifecycle = () => {
+    try { owner.removeListener("closed", onGone); } catch (_) {}
+    try { owner.webContents.removeListener("destroyed", onGone); } catch (_) {}
+    try { owner.webContents.removeListener("render-process-gone", onGone); } catch (_) {}
+    try { owner.webContents.removeListener("did-start-navigation", onNavigation); } catch (_) {}
+    try { owner.webContents.removeListener("leave-html-full-screen", onGone); } catch (_) {}
+    detachOwnerLifecycle = null;
+  };
+}
+
+async function cleanupNative() {
+  detachOwnerLifecycle?.();
+  if (socket && socket.readyState === WebSocket.OPEN && uuid) {
+    await request("video.stop", { wndIndex: 0 }, 2500).catch(() => {});
+    await request("window.destroyWnd", {}, 2500).catch(() => {});
   }
-  await stop();
+  const oldSocket = socket;
+  socket = null;
+  uuid = "";
+  ownerWindow = null;
+  ownerWebContentsId = null;
+  running = false;
+  visible = false;
+  currentRect = null;
+  playInfo = {};
+  settlePending(new Error("Hikvision LocalService stopped"));
+  try { oldSocket?.close(); } catch (_) {}
+  return status();
+}
+
+function start(owner, config, rect) {
+  if (!owner || owner.isDestroyed()) return Promise.reject(new Error("Hikvision host window is unavailable"));
+  if (!config?.password) return Promise.reject(new Error("Hikvision DVR password is not configured"));
+  let sanitized;
+  try { sanitized = sanitizeRect(rect, owner); } catch (err) { return Promise.reject(err); }
   const runGeneration = ++generation;
-  ownerWindow = owner;
-  currentRect = sanitizeRect(rect);
-  await connectService(runGeneration);
-  await createNativeWindow(owner, currentRect);
+  const newOwnerId = ownerId(owner);
+  return enqueue(async () => {
+    assertGeneration(runGeneration);
+    if (running && ownerWebContentsId === newOwnerId) {
+      currentRect = sanitized;
+      await updateCurrentRect();
+      await showCurrent();
+      return status();
+    }
+    await cleanupNative();
+    assertGeneration(runGeneration);
+    ownerWindow = owner;
+    ownerWebContentsId = newOwnerId;
+    currentRect = sanitized;
+    attachOwnerLifecycle(owner);
+    try {
+      await connectService(runGeneration);
+      assertGeneration(runGeneration);
+      await createNativeWindow(owner, currentRect);
+      assertGeneration(runGeneration);
 
-  const channel = Math.max(1, Math.min(32, Number(config.channel) || 1));
-  const streamSuffix = config.stream === "sub" ? "02" : "01";
-  const sourceId = Number(`${channel}${streamSuffix}`) - 1;
-  const httpPort = Math.max(1, Math.min(65535, Number(config.httpPort) || 80));
-  const auth = Buffer.from(`:::2:${config.username}:${config.password}`, "utf8").toString("base64");
-  await request("video.startPlay", {
-    url: `http://${config.host}:${httpPort}/SDK/play/${sourceId}/004`,
-    token: "",
-    auth,
-    wndIndex: 0,
-    startTime: "",
-    stopTime: "",
-  }, 12000);
-  if (runGeneration !== generation) throw new Error("Hikvision playback start was superseded");
-  running = true;
-  visible = true;
-  await new Promise((resolve) => setTimeout(resolve, 1000));
-  playInfo = await request("video.getPlayInfo", { wndIndex: 0 }).catch(() => ({}));
-  return status();
+      const channel = Math.max(1, Math.min(32, Number(config.channel) || 1));
+      const streamSuffix = config.stream === "sub" ? "02" : "01";
+      const sourceId = Number(`${channel}${streamSuffix}`) - 1;
+      const httpPort = Math.max(1, Math.min(65535, Number(config.httpPort) || 80));
+      const auth = Buffer.from(`:::2:${config.username}:${config.password}`, "utf8").toString("base64");
+      await request("video.startPlay", {
+        url: `http://${config.host}:${httpPort}/SDK/play/${sourceId}/004`,
+        token: "",
+        auth,
+        wndIndex: 0,
+        startTime: "",
+        stopTime: "",
+      }, 12000);
+      assertGeneration(runGeneration);
+      running = true;
+      visible = true;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      assertGeneration(runGeneration);
+      playInfo = await request("video.getPlayInfo", { wndIndex: 0 }).catch(() => ({}));
+      assertGeneration(runGeneration);
+      return status();
+    } catch (err) {
+      await cleanupNative();
+      throw err;
+    }
+  });
 }
 
-async function update(owner, rect) {
+async function updateCurrentRect() {
   if (!running || !socket || socket.readyState !== WebSocket.OPEN) return status();
-  if (owner && !owner.isDestroyed()) ownerWindow = owner;
-  const nextRect = sanitizeRect(rect);
-  const geometryUnchanged = currentRect &&
-    currentRect.left === nextRect.left &&
-    currentRect.top === nextRect.top &&
-    currentRect.width === nextRect.width &&
-    currentRect.height === nextRect.height;
-  currentRect = nextRect;
-  // LocalService applies geometry changes synchronously in its native decoder.
-  // Re-sending the same rectangle on every dashboard tick can stall frames.
-  if (!geometryUnchanged) {
-    await request("window.setWndGeometry", { rect: geometryOf(currentRect) }).catch(() => {});
-  }
+  await request("window.setWndGeometry", { rect: geometryOf(currentRect) }).catch(() => {});
   return status();
 }
 
-async function hide() {
+function update(owner, rect) {
+  let nextRect;
+  try {
+    assertOwner(owner);
+    nextRect = sanitizeRect(rect, owner);
+  } catch (err) { return Promise.reject(err); }
+  return enqueue(async () => {
+    assertOwner(owner);
+    const previous = currentRect;
+    currentRect = nextRect;
+    const unchanged = previous && previous.left === nextRect.left && previous.top === nextRect.top &&
+      previous.width === nextRect.width && previous.height === nextRect.height;
+    if (running && !unchanged) await request("window.setWndGeometry", { rect: geometryOf(currentRect) }).catch(() => {});
+    return status();
+  });
+}
+
+async function hideCurrent() {
   if (!running) return status();
   await request("window.hideWnd").catch(() => {});
   visible = false;
   return status();
 }
 
-async function show() {
+function hide(owner) {
+  try { assertOwner(owner); } catch (err) { return Promise.reject(err); }
+  return enqueue(async () => { assertOwner(owner); return hideCurrent(); });
+}
+
+async function showCurrent() {
   if (!running) return status();
   if (ownerWindow?.isDestroyed()) return status();
   if (currentRect) {
@@ -206,23 +307,35 @@ async function show() {
   return status();
 }
 
-async function stop() {
-  generation += 1;
-  if (socket && socket.readyState === WebSocket.OPEN && uuid) {
-    await request("video.stop", { wndIndex: 0 }, 2500).catch(() => {});
-    await request("window.destroyWnd", {}, 2500).catch(() => {});
-  }
-  const oldSocket = socket;
-  socket = null;
-  uuid = "";
-  ownerWindow = null;
-  running = false;
+function show(owner) {
+  try { assertOwner(owner); } catch (err) { return Promise.reject(err); }
+  return enqueue(async () => { assertOwner(owner); return showCurrent(); });
+}
+
+function hideImmediately() {
+  if (!socket || socket.readyState !== WebSocket.OPEN || !uuid) return;
   visible = false;
-  currentRect = null;
-  playInfo = {};
-  settlePending(new Error("Hikvision LocalService stopped"));
-  try { oldSocket?.close(); } catch (_) {}
-  return status();
+  request("window.hideWnd", {}, 1000).catch(() => {});
+}
+
+function stop(owner = null) {
+  if (owner) {
+    if (ownerWebContentsId == null) return Promise.resolve(status());
+    try { assertOwner(owner); } catch (err) { return Promise.reject(err); }
+  }
+  generation += 1;
+  hideImmediately();
+  return enqueue(cleanupNative);
+}
+
+function stopOwnedById(id) {
+  if (!id || id !== ownerWebContentsId) return Promise.resolve(status());
+  generation += 1;
+  hideImmediately();
+  return enqueue(async () => {
+    if (id !== ownerWebContentsId) return status();
+    return cleanupNative();
+  });
 }
 
 function status() {
@@ -231,9 +344,18 @@ function status() {
     running,
     visible,
     connected: Boolean(socket && socket.readyState === WebSocket.OPEN && uuid),
+    ownerWebContentsId,
     width: Number(pictureSize.width) || null,
     height: Number(pictureSize.height) || null,
   };
 }
 
-module.exports = { start, update, stop, hide, show, status };
+module.exports = {
+  start,
+  update,
+  stop,
+  hide,
+  show,
+  status,
+  __test: { sanitizeRect },
+};

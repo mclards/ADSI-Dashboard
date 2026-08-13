@@ -11,7 +11,6 @@ import sys
 import types
 import unittest
 
-
 def _load_classifier():
     """Load the classify_seed_decision helper without executing the rest of
     inverter_engine.py (which spawns asyncio loops, opens files, etc.)."""
@@ -30,9 +29,7 @@ def _load_classifier():
     exec(match.group(0), namespace)
     return namespace["classify_seed_decision"]
 
-
 classify_seed_decision = _load_classifier()
-
 
 HEALTHY = dict(
     cur_etotal=30_500,
@@ -43,7 +40,6 @@ HEALTHY = dict(
     yesterday_present=True,
     rtc_year_ok=True,
 )
-
 
 class SeedGateHappyPath(unittest.TestCase):
     def test_seeds_etotal_delta_when_all_anchors_present(self):
@@ -61,7 +57,6 @@ class SeedGateHappyPath(unittest.TestCase):
         kwh, source, reason = classify_seed_decision(**scenario)
         self.assertEqual(source, "parce")
         self.assertAlmostEqual(kwh, 500.0)
-
 
 class SeedGateRefusesWithoutYesterdaySnapshot(unittest.TestCase):
     """The whole point of v2.9.1: zero-seed when we cannot anchor."""
@@ -114,7 +109,6 @@ class SeedGateRefusesWithoutYesterdaySnapshot(unittest.TestCase):
         self.assertEqual(source, "etotal")
         self.assertAlmostEqual(kwh, HEALTHY["cur_etotal"] - 30_010)
 
-
 class SeedGateRespectsExistingHealthGates(unittest.TestCase):
     def test_refuses_on_invalid_rtc_year(self):
         scenario = {**HEALTHY, "rtc_year_ok": False}
@@ -150,7 +144,6 @@ class SeedGateRespectsExistingHealthGates(unittest.TestCase):
         self.assertEqual(source, "zero")
         self.assertEqual(reason, "counter_flat")
         self.assertEqual(kwh, 0.0)
-
 
 if __name__ == "__main__":
     unittest.main()

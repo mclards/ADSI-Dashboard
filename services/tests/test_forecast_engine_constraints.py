@@ -15,7 +15,6 @@ MODULE_PATH = ROOT / "services" / "forecast_engine.py"
 WORK_TMP = ROOT / ".tmp" / "forecast-engine-tests"
 WORK_TMP.mkdir(parents=True, exist_ok=True)
 
-
 def load_module(temp_root: Path, tag: str):
     (temp_root / "data").mkdir(parents=True, exist_ok=True)
     (temp_root / "portable").mkdir(parents=True, exist_ok=True)
@@ -26,7 +25,6 @@ def load_module(temp_root: Path, tag: str):
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
-
 
 class ForecastEngineConstraintTests(unittest.TestCase):
     def test_operational_constraint_profile_tracks_carryover_and_mixed_scope(self):
@@ -453,7 +451,6 @@ class ForecastEngineConstraintTests(unittest.TestCase):
         finally:
             logging.shutdown()
             shutil.rmtree(tmp_root, ignore_errors=True)
-
 
 if __name__ == "__main__":
     unittest.main()

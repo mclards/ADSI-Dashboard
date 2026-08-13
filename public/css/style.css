@@ -4466,8 +4466,10 @@ label[data-required]::after {
 /* Fullscreen mode — break out of card constraints */
 .camera-card:fullscreen,
 .camera-card:-webkit-full-screen {
+  inset: 0;
   width: 100vw;
   height: 100vh;
+  aspect-ratio: auto;
   max-height: none;
   border-radius: 0;
   border: none;
@@ -4806,8 +4808,8 @@ select.cam-field-input { appearance: auto; }
 
 /* ── Bulk command card ─────────────────────────────────────────────── */
 .hik-settings-card {
-  width: min(720px, 95vw);
-  max-height: min(92vh, 780px);
+  width: min(780px, 95vw);
+  max-height: min(92vh, 820px);
   padding: 0;
   overflow: hidden;
   border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
@@ -4829,7 +4831,9 @@ select.cam-field-input { appearance: auto; }
 .hik-service-title,
 .hik-service-content,
 .hik-mode-summary,
-.hik-config-note {
+.hik-config-note,
+.hik-route-heading,
+.hik-route-item {
   display: flex;
   align-items: center;
 }
@@ -4953,6 +4957,7 @@ select.cam-field-input { appearance: auto; }
 }
 
 .hik-settings-panel,
+.hik-route-panel,
 .hik-profile-panel,
 .hik-service-panel {
   border: 1px solid var(--border);
@@ -4961,6 +4966,107 @@ select.cam-field-input { appearance: auto; }
 }
 
 .hik-settings-panel { padding: 11px 11px 5px; }
+
+.hik-route-panel {
+  margin-top: 10px;
+  padding: 10px 11px;
+  border-color: color-mix(in srgb, var(--accent) 22%, var(--border));
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent) 6%, var(--surface2)),
+    color-mix(in srgb, var(--surface2) 92%, transparent)
+  );
+}
+
+.hik-route-heading { gap: 8px; }
+.hik-route-heading > span:nth-child(2) { flex: 1; min-width: 0; }
+.hik-route-heading strong,
+.hik-route-heading small { display: block; }
+.hik-route-heading strong {
+  color: var(--text);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .45px;
+}
+.hik-route-heading small {
+  margin-top: 1px;
+  color: var(--text2);
+  font-size: 8px;
+  line-height: 1.35;
+}
+.hik-route-heading .btn { flex: 0 0 auto; white-space: nowrap; }
+
+.hik-route-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+  margin-top: 9px;
+}
+
+.hik-route-item {
+  position: relative;
+  gap: 7px;
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+}
+.hik-route-icon {
+  flex: 0 0 auto;
+  color: var(--accent);
+  font-size: 16px;
+}
+.hik-route-item > span:nth-child(2) { min-width: 0; }
+.hik-route-item small,
+.hik-route-item strong { display: block; }
+.hik-route-item small { color: var(--text3); font-size: 8px; }
+.hik-route-item strong {
+  overflow: hidden;
+  margin-top: 2px;
+  color: var(--text);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hik-route-state {
+  margin-left: auto;
+  padding: 2px 5px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text3);
+  font-size: 7px;
+  font-weight: 800;
+  letter-spacing: .25px;
+  text-transform: uppercase;
+}
+.hik-route-state[data-state="ready"] {
+  border-color: color-mix(in srgb, var(--ok, #32d296) 38%, var(--border));
+  color: var(--ok, #32d296);
+}
+.hik-route-state[data-state="warning"] {
+  border-color: color-mix(in srgb, var(--warn, #f5a623) 42%, var(--border));
+  color: var(--warn, #f5a623);
+}
+.hik-route-state[data-state="error"] {
+  border-color: color-mix(in srgb, var(--danger, #ef5350) 42%, var(--border));
+  color: var(--danger, #ef5350);
+}
+.hik-route-guidance {
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+  color: var(--text2);
+  font-size: 8px;
+  line-height: 1.45;
+}
+.hik-route-guidance code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--accent);
+  font-family: ui-monospace, Consolas, monospace;
+}
 
 .hik-panel-heading {
   gap: 8px;
@@ -5066,6 +5172,7 @@ select.cam-field-input { appearance: auto; }
 }
 
 @media (max-width: 720px) {
+  .hik-route-grid { grid-template-columns: 1fr; }
   .hik-settings-layout { grid-template-columns: 1fr; }
   .hik-profile-panel { grid-template-columns: 1fr; }
   .hik-service-content { align-items: stretch; flex-direction: column; }
@@ -5100,6 +5207,7 @@ select.cam-field-input { appearance: auto; }
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 15%, transparent);
 }
 :root[data-theme="light"] .hik-settings-panel,
+:root[data-theme="light"] .hik-route-panel,
 :root[data-theme="light"] .hik-profile-panel,
 :root[data-theme="light"] .hik-service-panel {
   background: color-mix(in srgb, var(--surface2) 72%, white);

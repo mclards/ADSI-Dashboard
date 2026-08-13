@@ -24,12 +24,10 @@ import threading
 from dataclasses import dataclass
 from typing import Optional
 
-
 # ─── FC 0x71 SCOPE memory peek ─────────────────────────────────────────────
 
 class VendorPduError(Exception):
     """Raised when a vendor PDU exchange fails (transport, framing, or CRC)."""
-
 
 def build_fc71_peek_pdu(addr: int, count_words: int) -> bytes:
     """Build the 9-byte FC 0x71 PDU body (FC byte excluded — pymodbus prepends).
@@ -48,7 +46,6 @@ def build_fc71_peek_pdu(addr: int, count_words: int) -> bytes:
         count_words & 0xFF,
         0x00, 0x00, 0x00, 0x00,
     ])
-
 
 def parse_fc71_response_pdu(pdu_after_fc: bytes, expected_addr: int) -> bytes:
     """Parse the FC 0x71 response payload (FC byte already stripped by framer).
@@ -71,7 +68,6 @@ def parse_fc71_response_pdu(pdu_after_fc: bytes, expected_addr: int) -> bytes:
             f"{3 + expected_data_bytes} got {len(pdu_after_fc)}"
         )
     return bytes(pdu_after_fc[3:3 + expected_data_bytes])
-
 
 def vendor_scope_peek(
     client,
@@ -147,7 +143,6 @@ def vendor_scope_peek(
         raise VendorPduError(f"FC echo mismatch: got 0x{fc:02X}, expected 0x71")
     return parse_fc71_response_pdu(body[1:], addr)
 
-
 # ─── FC11 Report Slave ID ──────────────────────────────────────────────────
 
 @dataclass(frozen=True)
@@ -170,7 +165,6 @@ class SlaveIdInfo:
     firmware_aux: str
     live_snapshot_raw: bytes    # 20 bytes raw
     raw_payload: bytes          # full 102-byte payload for forensics
-
 
 def parse_fc11_slave_id(raw_payload: bytes) -> SlaveIdInfo:
     """Parse the slave-ID payload returned by FC11.
@@ -200,7 +194,6 @@ def parse_fc11_slave_id(raw_payload: bytes) -> SlaveIdInfo:
         live_snapshot_raw=bytes(raw_payload[14:34]),
         raw_payload=bytes(raw_payload),
     )
-
 
 def read_slave_id(client, slave: int, timeout_s: float = 3.0) -> SlaveIdInfo:
     """Issue FC11 Report Slave ID and parse the result.
@@ -257,12 +250,10 @@ def read_slave_id(client, slave: int, timeout_s: float = 3.0) -> SlaveIdInfo:
     payload = body[2:2 + byte_count]
     return parse_fc11_slave_id(payload)
 
-
 # ─── Internals ─────────────────────────────────────────────────────────────
 
 _TXN_ID_COUNTER = [0]
 _TXN_ID_LOCK = threading.Lock()
-
 
 def _next_txn_id() -> int:
     # PY-C-001 — protect the increment so concurrent vendor_scope_peek /
@@ -272,7 +263,6 @@ def _next_txn_id() -> int:
         _TXN_ID_COUNTER[0] = (_TXN_ID_COUNTER[0] + 1) & 0xFFFF
         val = _TXN_ID_COUNTER[0] or 1
     return val
-
 
 def _recv_exact(sock, n: int, timeout_s: float) -> bytes:
     """Receive exactly n bytes or raise. Sock must already have timeout set."""
@@ -289,7 +279,6 @@ def _recv_exact(sock, n: int, timeout_s: float) -> bytes:
             raise OSError(f"recv_exact: peer closed after {len(buf)}/{n} bytes")
         buf += chunk
     return buf
-
 
 def _force_reconnect(client) -> None:
     """Close the underlying socket so the next call forces a clean reconnect.

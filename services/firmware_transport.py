@@ -48,20 +48,16 @@ _FILENAME_RE = re.compile(r"^[A-Za-z]{3}\d{4}")   # ISM "LLLnnnn..." rule
 _TXN_LOCK = threading.Lock()
 _TXN = [0]
 
-
 def _next_txn() -> int:
     with _TXN_LOCK:
         _TXN[0] = (_TXN[0] + 1) & 0xFFFF
         return _TXN[0]
 
-
 class FlashGateError(FirmwareError):
     """A required safety gate failed. Raised BEFORE any wire I/O — a live
     flash never starts unless every gate passes."""
 
-
 # ─── Live transport (implements firmware_loader.Transport) ─────────────────
-
 
 class ModbusVendorTcpTransport:
     """Raw MBAP transport for vendor firmware frames over Modbus-TCP.
@@ -165,7 +161,6 @@ class ModbusVendorTcpTransport:
         # indexing matches the RTU view (vendor_pdu.py contract).
         return bytes([r_unit]) + body
 
-
 # ─── Live transport — RS485 / Modbus-RTU (the most-direct path) ────────────
 
 #
@@ -180,7 +175,6 @@ class ModbusVendorTcpTransport:
 # `[func,…,xor]` prefixed by the node unit-id and suffixed by CRC16
 # (poly 0xA001, init 0xFFFF), exactly as ISM's `Add_CRC` builds it.
 
-
 def _modbus_crc16(data: bytes) -> int:
     """Modbus RTU CRC16 (poly 0xA001, init 0xFFFF). Kept local so this
     module stays import-light (no pymodbus pull); identical to
@@ -191,7 +185,6 @@ def _modbus_crc16(data: bytes) -> int:
         for _ in range(8):
             crc = (crc >> 1) ^ 0xA001 if (crc & 1) else (crc >> 1)
     return crc & 0xFFFF
-
 
 class ModbusVendorRtuTransport:
     """Raw Modbus-RTU transport for vendor firmware frames over RS485.
@@ -359,9 +352,7 @@ class ModbusVendorRtuTransport:
             raise TransportError("FC11 RTU CRC mismatch")
         return _vpdu.parse_fc11_slave_id(raw[3:end])
 
-
 # ─── Gate: firmware file verification (security review CRITICAL #1) ─────────
-
 
 def verify_firmware_file(path: str, *, allowed_dir: Optional[str] = None,
                          expected_sha256: Optional[str] = None,
@@ -405,15 +396,12 @@ def verify_firmware_file(path: str, *, allowed_dir: Optional[str] = None,
             f"(file={digest})")
     return digest
 
-
 # ─── Gate: inverter ↔ file compatibility / downgrade (CRITICAL #2,#3) ───────
-
 
 def _fw_code_from_filename(path: str) -> str:
     """`AAV1003IJK01BC_InverterFirmware.S` → `AAV1003IJK01BC` (upper)."""
     stem = os.path.splitext(os.path.basename(path))[0].upper()
     return stem.split("_")[0]
-
 
 def verify_inverter_compatible(slave_id, image: FirmwareImage,
                                firmware_path: str, *,
@@ -459,7 +447,6 @@ def verify_inverter_compatible(slave_id, image: FirmwareImage,
             f"appears newer than file version {file_version!r} ({code!r}); "
             "downgrade requires explicit allow_downgrade=True")
 
-
 def firmware_upgrade_direction(slave_id, firmware_path: str) -> dict:
     """ISM QueHableAhoraOCalleParaSiempre — classify the pending flash as
     upgrade / downgrade / same / unknown by comparing the running model_code
@@ -492,9 +479,7 @@ def firmware_upgrade_direction(slave_id, firmware_path: str) -> dict:
         "file_code": code,
     }
 
-
 # ─── The gated orchestrator ────────────────────────────────────────────────
-
 
 def flash_inverter_node(
     *,

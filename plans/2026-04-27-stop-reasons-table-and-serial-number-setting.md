@@ -485,7 +485,6 @@ from dataclasses import dataclass
 from pymodbus.client import AsyncModbusTcpClient
 from pymodbus.pdu import ModbusRequest, ModbusResponse
 
-
 # ── FC 0x71 SCOPE memory peek ──
 class ScopePeekRequest(ModbusRequest):
     function_code = 0x71
@@ -509,7 +508,6 @@ class ScopePeekRequest(ModbusRequest):
             0x00, 0x00, 0x00, 0x00,    # padding
         ])
 
-
 class ScopePeekResponse(ModbusResponse):
     function_code = 0x71
 
@@ -531,7 +529,6 @@ class ScopePeekResponse(ModbusResponse):
             )
         self.data = bytes(data[3:3 + bc_words * 2])
 
-
 async def vendor_scope_peek(
     client: AsyncModbusTcpClient,
     slave: int,
@@ -548,7 +545,6 @@ async def vendor_scope_peek(
         raise VendorPduError(f"FC 0x71 failed: {response}")
     return response.data
 
-
 # ── FC11 Report Slave ID ──
 @dataclass(frozen=True)
 class SlaveIdInfo:
@@ -559,7 +555,6 @@ class SlaveIdInfo:
     firmware_aux: str         # e.g. "AAS1092_F"
     live_snapshot_raw: bytes  # 20 bytes — PotAC, Vac, Iac, Frec, Cos snapshot
     raw_payload: bytes        # full 102-byte payload for forensics
-
 
 def parse_fc11_slave_id(raw_payload: bytes) -> SlaveIdInfo:
     """Parse the 102-byte FC11 slave-ID payload (Motorola variant).
@@ -584,7 +579,6 @@ def parse_fc11_slave_id(raw_payload: bytes) -> SlaveIdInfo:
         raw_payload=bytes(raw_payload),
     )
 
-
 async def read_slave_id(
     client: AsyncModbusTcpClient,
     slave: int,
@@ -598,7 +592,6 @@ async def read_slave_id(
     # See implementation note below.
     raw_payload = _extract_fc11_payload(response)
     return parse_fc11_slave_id(raw_payload)
-
 
 class VendorPduError(Exception):
     pass
@@ -724,7 +717,6 @@ class StopReasonRecord:
             f"{self.hora_min_hour:02d}:{self.hora_min_min:02d}"
         )
 
-
 def parse_stop_reason(raw: bytes) -> StopReasonRecord:
     """Parse a 50-byte (or longer) FC 0x71 SCOPE peek response."""
     if len(raw) < 50:
@@ -749,7 +741,6 @@ def parse_stop_reason(raw: bytes) -> StopReasonRecord:
         debug_desc=w[24],
     )
 
-
 # ────────────────────────────────────────────────────────────────────
 # Per-node read helper
 # ────────────────────────────────────────────────────────────────────
@@ -766,7 +757,6 @@ async def read_node_stop_reason(transport, slave: int, node: int) -> tuple[bytes
     raw = await vendor_scope_peek(transport, slave, addr, count_words=25)
     return raw, parse_stop_reason(raw)
 
-
 # ────────────────────────────────────────────────────────────────────
 # ARRAYHISTMOTPARO — 31 lifetime counters
 # ────────────────────────────────────────────────────────────────────
@@ -779,7 +769,6 @@ class StopMotiveHistogram:
     @property
     def total(self) -> int:
         return self.counters[30]
-
 
 async def read_arrayhistmotparo(transport, slave: int) -> StopMotiveHistogram:
     raw = await vendor_scope_peek(transport, slave, ARRAYHIST_ADDR, count_words=31)
@@ -1000,7 +989,6 @@ async def write_serial(transport, slave: int, new_serial: str, fmt: str) -> None
     ]
     await transport.write_registers(address=0x9C74, values=regs, slave=slave)
 
-
 async def verify_serial_write(transport, slave: int, expected: str) -> bool:
     """Re-read after write to confirm. ISM does Sleep(1000) — we do the same."""
     await asyncio.sleep(1.0)
@@ -1091,7 +1079,6 @@ class ConflictLocation:
     existing_serial: str
     last_seen_ms: int
 
-
 @dataclass(frozen=True)
 class UniquenessResult:
     unique: bool
@@ -1099,11 +1086,9 @@ class UniquenessResult:
     unreachable: list[tuple[str, int]]   # (ip, slave) pairs
     scanned: int
 
-
 # 5-minute TTL fleet serial map cache, populated on demand
 _fleet_serial_cache: dict[tuple[str, int], tuple[str, int]] = {}  # (ip, slave) → (serial, scanned_at_ms)
 _FLEET_CACHE_TTL_MS = 5 * 60 * 1000
-
 
 async def fleet_uniqueness_check(
     candidate_serial: str,
@@ -1131,7 +1116,6 @@ async def fleet_uniqueness_check(
         scanned=len(targets) - len(unreachable),
     )
 
-
 async def _check_one(sem, ip, name, slave, candidate):
     async with sem:
         # Cache fast path
@@ -1155,10 +1139,8 @@ async def _check_one(sem, ip, name, slave, candidate):
             )
         return None  # no conflict from this node
 
-
 def invalidate_cache_for(ip: str, slave: int) -> None:
     _fleet_serial_cache.pop((ip, slave), None)
-
 
 # Called after every successful Slice C write
 async def write_serial_with_verify(
@@ -1277,7 +1259,7 @@ Inverter Diagnostics                                            [▼]
     Architecture
     (●) Motorola Format (12 byte)
     (○) TexasTMS320 Format (32 byte)
-    
+
     Detected: Model AAV1003BA · Firmware AAS1091AA / AAS1092_F
     Status: idle
     Recent changes: [view audit log]

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ADSI Inverter Dashboard — User Guide v2.11.7</title>
+<title>ADSI Inverter Dashboard — User Guide v2.12.4</title>
 <style>
   /* ══════════════════════════════════════════════
      CSS VARIABLES & RESET
@@ -987,7 +987,7 @@
   <div class="cover-meta">
     <div class="cover-meta-item">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1v6l4 2" stroke="#4d9fff" stroke-width="1.5" stroke-linecap="round"/><circle cx="8" cy="8" r="7" stroke="#4d9fff" stroke-width="1.5"/></svg>
-      <span><b>Version 2.8.1</b></span>
+      <span><b>Version 2.12.4</b></span>
     </div>
     <div class="cover-meta-item">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 8a3 3 0 100-6 3 3 0 000 6zM2 14c0-3.3 2.7-5 6-5s6 1.7 6 5" stroke="#c084fc" stroke-width="1.5" stroke-linecap="round"/></svg>
@@ -995,7 +995,7 @@
     </div>
     <div class="cover-meta-item">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="2" y="3" width="12" height="11" rx="2" stroke="#34d399" stroke-width="1.5"/><path d="M2 7h12M5 1v4M11 1v4" stroke="#34d399" stroke-width="1.5" stroke-linecap="round"/></svg>
-      <span><b>March 2026</b></span>
+      <span><b>August 2026</b></span>
     </div>
   </div>
 </div>
@@ -1017,17 +1017,19 @@
     <a href="#s8"><span class="toc-num">8</span> Forecast Page</a>
     <a href="#s9"><span class="toc-num">9</span> Forecast Performance Monitor</a>
     <a href="#s10"><span class="toc-num">10</span> Alarms Page</a>
-    <a href="#s11"><span class="toc-num">11</span> Energy Page</a>
+    <a href="#s11"><span class="toc-num">11</span> Parameters Page</a>
     <a href="#s12"><span class="toc-num">12</span> Audit Page</a>
     <a href="#s13"><span class="toc-num">13</span> Report Page</a>
     <a href="#s14"><span class="toc-num">14</span> Export Page</a>
+    <a href="#sStopSerial"><span class="toc-num">14a</span> Stop Reasons &amp; Serial Number</a>
+    <a href="#sFirmware"><span class="toc-num">14b</span> Firmware Upgrade (Experimental)</a>
     <a href="#sCam"><span class="toc-num">15</span> Camera Viewer</a>
     <a href="#s15"><span class="toc-num">16</span> Settings</a>
     <a href="#s16"><span class="toc-num">17</span> Operating Modes</a>
     <a href="#s17"><span class="toc-num">18</span> Operator Messaging</a>
     <a href="#s18"><span class="toc-num">19</span> Cloud Backup &amp; Restore</a>
     <a href="#s19"><span class="toc-num">20</span> Standard Workflows</a>
-    <a href="#s20"><span class="toc-num">21</span> IP Configuration</a>
+    <a href="#s20"><span class="toc-num">21</span> Global Configuration</a>
     <a href="#s21"><span class="toc-num">22</span> Keyboard Shortcuts &amp; Tips</a>
     <a href="#s22"><span class="toc-num">23</span> Troubleshooting</a>
     <a href="#s23"><span class="toc-num">24</span> Quick Reference</a>
@@ -1161,7 +1163,7 @@
   <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="3" y="8" width="7" height="11" rx="2" stroke="#34d399" stroke-width="1.8"/><rect x="12" y="4" width="7" height="15" rx="2" stroke="#4d9fff" stroke-width="1.8"/></svg></div><h2>Inverters Page</h2></div>
   <p>The primary live operations workspace for monitoring the full inverter fleet, reviewing node-level status, and sending control commands.</p>
   <h3>Toolbar Controls</h3>
-  <table><thead><tr><th>Control</th><th>Function</th></tr></thead><tbody><tr><td>Inverter Filter</td><td>All, Online, Offline, or Alarmed</td></tr><tr><td>Layout</td><td>Auto, 2&ndash;7 column grid</td></tr></tbody></table>
+  <table><thead><tr><th>Control</th><th>Function</th></tr></thead><tbody><tr><td>Inverter Filter</td><td>All, Online, Offline, or Alarmed</td></tr><tr><td>Layout</td><td>Auto, 2&ndash;7 column grid</td></tr><tr><td>Show/Hide Cap</td><td>Toggle the plant output cap panel</td></tr></tbody></table>
   <h3>Fleet Status Chips</h3>
   <table><thead><tr><th>Chip</th><th>Meaning</th></tr></thead><tbody><tr><td><b>Inverters</b></td><td>Active / Total</td></tr><tr><td><b>Nodes</b></td><td>Active / Total</td></tr><tr><td><b>Online</b></td><td>Currently producing</td></tr><tr><td><b>Alarmed</b></td><td>Active unACK'd alarms</td></tr><tr><td><b>Offline</b></td><td>Not responding</td></tr></tbody></table>
   <h3>PAC Output Band Legend</h3>
@@ -1194,23 +1196,14 @@
   <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
-<!-- 6. PLANT OUTPUT CAPPING (Dedicated Page) -->
+<!-- 6. PLANT OUTPUT CAPPING -->
 <section id="s6">
-  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M3 17h16M3 17l4-6 3 3 4-5 5 8" stroke="#fb923c" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><line x1="3" y1="8" x2="19" y2="8" stroke="#f87171" stroke-width="1.5" stroke-dasharray="3 2"/></svg></div><h2>Plant Cap Page</h2></div>
-  <p>The <b>Plant Cap</b> page is a dedicated workspace for plant output capping, accessible from the navigation bar. It automatically regulates total plant output within a defined MW band by sequentially stopping and starting whole inverters.</p>
-  <h3>Page Toolbar</h3>
-  <p>The toolbar at the top of the page shows live summary indicators and a quick-access button:</p>
-  <table><thead><tr><th>Element</th><th>Function</th></tr></thead><tbody><tr><td>Status badge</td><td>Current controller mode: <b>Enabled</b>, <b>Paused</b>, or <b>Idle</b></td></tr><tr><td>Plant MW</td><td>Current plant total AC output from live PAC data</td></tr><tr><td>Band</td><td>Configured lower&ndash;upper MW cap band</td></tr><tr><td><b>+ Add Schedule</b></td><td>Opens the schedule creation modal</td></tr></tbody></table>
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M3 17h16M3 17l4-6 3 3 4-5 5 8" stroke="#fb923c" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><line x1="3" y1="8" x2="19" y2="8" stroke="#f87171" stroke-width="1.5" stroke-dasharray="3 2"/></svg></div><h2>Plant Output Auto Capping</h2></div>
+  <p>Automatically regulates total plant output within a defined MW band by sequentially stopping and starting whole inverters.</p>
   <h3>Cap Configuration</h3>
   <table><thead><tr><th>Field</th><th>Function</th></tr></thead><tbody><tr><td>Upper Limit (MW)</td><td>Threshold that triggers automatic stop</td></tr><tr><td>Lower Limit (MW)</td><td>Threshold for restarting stopped inverters</td></tr><tr><td>Sequence</td><td>Ascending, Descending, or Exemption mode</td></tr><tr><td>Exempted Inverters</td><td>Comma-separated exclusion list</td></tr><tr><td>Cooldown (s)</td><td>Settling time between actions (default: 30s)</td></tr></tbody></table>
   <h3>Cap Actions</h3>
   <table><thead><tr><th>Action</th><th>Function</th></tr></thead><tbody><tr><td>Preview Plan</td><td>Simulates next decision using live state</td></tr><tr><td>Enable Cap</td><td>Arms the controller (requires authorization)</td></tr><tr><td>Disable Monitoring</td><td>Stops automation without restarting stopped inverters</td></tr><tr><td>Release Controlled</td><td>Restarts stopped inverters sequentially and ends session</td></tr></tbody></table>
-  <h3>Scheduled Auto-Cap</h3>
-  <p>The <b>Scheduled Auto-Cap</b> section displays compact chip cards for each configured schedule, showing the time window, name, and current state badge (Active, Waiting, Paused, Completed, or Disabled).</p>
-  <table><thead><tr><th>Action</th><th>How</th></tr></thead><tbody><tr><td>Create schedule</td><td>Click <b>+ Add Schedule</b> in the toolbar or <b>+ Add</b> in the chip section</td></tr><tr><td>Edit schedule</td><td>Click the pencil icon on any schedule chip</td></tr><tr><td>Delete schedule</td><td>Use the delete option in the schedule detail</td></tr></tbody></table>
-  <h4>Schedule Form (Modal)</h4>
-  <p>The schedule form opens as a centered modal overlay. Fields:</p>
-  <table><thead><tr><th>Field</th><th>Description</th></tr></thead><tbody><tr><td>Name</td><td>Display label for the schedule</td></tr><tr><td>Start Time *</td><td>24-hour HH:MM when the cap activates daily</td></tr><tr><td>Stop Time *</td><td>24-hour HH:MM when the cap releases daily (must be after start)</td></tr><tr><td>Upper MW</td><td>Override for this schedule (blank uses global default)</td></tr><tr><td>Lower MW</td><td>Override for this schedule (blank uses global default)</td></tr><tr><td>Sequence Mode</td><td>Override inverter selection order (blank uses global default)</td></tr><tr><td>Cooldown (s)</td><td>Override cooldown seconds (blank uses global default)</td></tr><tr><td>Auth Key *</td><td>Plant-wide control authorization key (required for all mutations)</td></tr></tbody></table>
   <h3>Cap Status Panel</h3>
   <table><thead><tr><th>Field</th><th>Description</th></tr></thead><tbody><tr><td>Status</td><td>Active, Idle, or Cooldown</td></tr><tr><td>Reason</td><td>Human-readable trigger explanation</td></tr><tr><td>Last Action</td><td>Timestamp of most recent event</td></tr><tr><td>Cooldown</td><td>Remaining time before re-engagement</td></tr><tr><td>Curtailed</td><td>Total MW removed</td></tr><tr><td>Controllable</td><td>Inverters available for dispatch</td></tr><tr><td>Pending</td><td>In-flight actions</td></tr><tr><td>Exempted</td><td>Excluded numbers</td></tr></tbody></table>
   <div class="info-card warn"><div class="info-card-label">Important</div><ul style="margin:0"><li>Whole-inverter sequential control only</li><li>Narrow bands may not settle cleanly</li><li>Non-exempted inverters stay under controller authority while cap is enabled</li><li>Manual control is blocked for non-exempted inverters until cap is disabled</li><li>In Remote mode, cap actions proxy to the gateway</li></ul></div>
@@ -1253,7 +1246,10 @@
   <h3>Solcast Access Modes</h3>
   <table><thead><tr><th>Mode</th><th>Use</th></tr></thead><tbody><tr><td>Toolkit Login</td><td>Chart feed via account sign-in</td></tr><tr><td>API Key</td><td>Formal API credentials and resource ID</td></tr></tbody></table>
   <h3>Solcast Settings</h3>
-  <table><thead><tr><th>Field</th><th>Description</th></tr></thead><tbody><tr><td>Plant Resource ID</td><td>Unique Solcast site identifier</td></tr><tr><td>Forecast Days</td><td>1&ndash;15 (default: 2)</td></tr><tr><td>Resolution</td><td>PT5M, PT10M, PT15M, PT30M, PT60M</td></tr><tr><td>Toolkit Email / Password</td><td>Account credentials</td></tr></tbody></table>
+  <table><thead><tr><th>Field</th><th>Description</th></tr></thead><tbody><tr><td>Plant Resource ID</td><td>Unique Solcast site identifier</td></tr><tr><td>Forecast Days</td><td>1&ndash;7 (default: 2)</td></tr><tr><td>Resolution</td><td>PT5M, PT10M, PT15M, PT30M, PT60M</td></tr><tr><td>Toolkit Email / Password</td><td>Account credentials</td></tr></tbody></table>
+  <h3>Forecast Tuning</h3>
+  <p>Manual overrides for ML engine training parameters. Leave blank to use the engine's own defaults.</p>
+  <table><thead><tr><th>Field</th><th>Purpose</th><th>Range</th><th>Default</th></tr></thead><tbody><tr><td>Est-actual Weight</td><td>Override the satellite est-actual training weight (how much weight the engine gives to Solcast estimated-actual values when training the model). Validate new values with a backtest before relying.</td><td>0.50–1.00</td><td>Auto (engine-tuned)</td></tr><tr><td>Intraday Blend Max</td><td>Cap how strongly intraday observed vs. day-ahead corrections are blended (0 = no intraday blending, 1 = maximum). Validate with a backtest.</td><td>0.00–1.00</td><td>0.72</td></tr></tbody></table>
   <div class="ml-highlight">
     <div class="info-card-label" style="color:var(--accent)">ML Training Engine &mdash; Day-Ahead Generation</div>
     <p>The day-ahead forecast uses a <b>trained LightGBM model</b> (default since v2.4.40) that learns your plant's generation profile from historical data. It runs on the gateway and produces next-day forecasts from weather inputs and observed patterns.</p>
@@ -1301,15 +1297,26 @@
   <h3>Alarm Episode Model</h3>
   <ul><li>New alarm = new episode</li><li>Bitmask change on active node = same episode</li><li>ACK state preserved across changes</li></ul>
   <h3>Quick-ACK System</h3>
-  <ul><li>Toast notification (12s TTL) with inline ACK button</li><li>Bottom-right notification hub panel with ACK for up to 50 recent alarms</li><li>Auto-dismiss 1.2s after ACK</li><li>Sound triggers after <b>5 seconds</b> unacknowledged</li><li>Mute button silences audio only, not visual alerts</li></ul>
+  <ul><li>Bottom-right notification hub panel with ACK for up to 50 recent alarms</li><li>Single ACK and Acknowledge All are saved on the authoritative gateway</li><li>ACK state synchronizes immediately across connected Gateway and Remote-mode dashboards</li><li>The alarm table, badge, panel, sound, and inverter cards reconcile together</li><li>Sound triggers after <b>5 seconds</b> unacknowledged</li><li>Mute button silences audio only, not visual alerts</li></ul>
   <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
-<!-- 11. ENERGY -->
+<!-- 11. PARAMETERS -->
 <section id="s11">
-  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M13 2L3 14h7l-1 6 10-12h-7l1-6z" stroke="#fbbf24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div><h2>Energy Page</h2></div>
-  <p>5-minute interval energy records by inverter. Auto-refreshes when today is selected.</p>
-  <table><thead><tr><th>Tile</th><th>Meaning</th></tr></thead><tbody><tr><td>Date Total</td><td>Total MWh across all inverters</td></tr><tr><td>Average/Interval</td><td>Mean MWh per 5-min bucket</td></tr><tr><td>Peak Interval</td><td>Highest value with timestamp</td></tr><tr><td>Reporting Inverters</td><td>Count with data</td></tr><tr><td>Latest Interval End</td><td>Most recent interval close</td></tr></tbody></table>
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M13 2L3 14h7l-1 6 10-12h-7l1-6z" stroke="#fbbf24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div><h2>Parameters Page</h2></div>
+  <p>Per-node 5-minute parameter log for a single inverter at a time. Each tab on the page is one node; rows are 5-minute snapshots of every electrical and operational reading the dashboard captures. Renamed from <b>Energy</b> in v2.10.x &mdash; the underlying <code>energy_5min</code> / <code>inverter_5min</code> tables are untouched, while a new <code>inverter_5min_param</code> table feeds this view via <code>dailyAggregator.js</code>.</p>
+  <h3>Controls</h3>
+  <table><thead><tr><th>Control</th><th>Function</th></tr></thead><tbody>
+    <tr><td>Inverter</td><td>Pick which inverter to view. The page is blank until an inverter is selected.</td></tr>
+    <tr><td>Date</td><td>Today streams live 5-minute samples; past dates load from history.</td></tr>
+    <tr><td>Mode badge</td><td><code>LIVE</code> while today's slots are streaming; <code>HISTORY</code> once a past date is loaded.</td></tr>
+    <tr><td>Solar window</td><td>Right-side badge <code>Solar window: HH:MM&ndash;HH:MM</code> showing which slots are clipped.</td></tr>
+    <tr><td>Refresh</td><td>Re-fetch the selected day without changing the date.</td></tr>
+  </tbody></table>
+  <h3>Per-Node Columns (ISM-compatible)</h3>
+  <p><code>Pdc</code> &middot; <code>Vdc</code> &middot; <code>Idc</code> &middot; <code>Vac1..3</code> &middot; <code>Iac1..3</code> &middot; <code>Pac</code> &middot; <code>Cos&Phi;</code> &middot; <code>Freq</code> &middot; <code>parcE</code> (partial-energy hardware counter snapshot at slot end) &middot; <code>Alarm</code> (decoded hex active during the slot) &middot; <code>Temp</code> (when register mapping is published).</p>
+  <div class="info-card tip"><div class="info-card-label">Live behavior</div>For today's date the active node's table appends a new row at every 5-minute boundary; row count ticks up automatically. For past dates the page caches the data until you change the inverter, change the date, or press Refresh.</div>
+  <p>For a workbook-style export of the same data, see the Daily Data Export card on the Export page.</p>
   <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
@@ -1336,13 +1343,100 @@
   <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M11 3v12M7 11l4 4 4-4" stroke="#c084fc" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" stroke="#c084fc" stroke-width="1.8" stroke-linecap="round"/></svg></div><h2>Export Page</h2></div>
   <div class="feat-grid">
     <div class="feat-item"><h4>Alarm History</h4><p>Records with code, severity, duration, ACK state.</p></div>
-    <div class="feat-item"><h4>Energy Summary</h4><p>Daily energy by inverter and reporting node.</p></div>
+    <div class="feat-item"><h4>Energy Summary</h4><p>Daily energy by inverter and reporting node, with optional <code>Etotal_kWh</code> / <code>parcE_kWh</code> hardware-counter columns.</p></div>
+    <div class="feat-item"><h4>Daily Data <span style="color:#fbbf24;">(v2.10.x)</span></h4><p>Per-inverter Excel workbook, one sheet per node, ISM-compatible column order. Today is locked until the End-of-Day snapshot hour.</p></div>
     <div class="feat-item"><h4>Day-Ahead Comparison</h4><p>Forecast vs actual, standard and average table.</p></div>
     <div class="feat-item"><h4>Operational Data</h4><p>Interval-sampled inverter operating data.</p></div>
     <div class="feat-item"><h4>Operator Audit</h4><p>Command history with scope and result.</p></div>
     <div class="feat-item"><h4>Daily Performance</h4><p>Multi-day summary with availability and alarm counts.</p></div>
   </div>
   <ul><li>Exports written to configured export folder</li><li>Formats: Excel (.xlsx with styled headers) and CSV</li><li>Cancel button available during active exports</li><li>Result shows filename, size, and timestamp</li></ul>
+  <h3>Energy Summary &mdash; Hardware Counter Columns (v2.10.x)</h3>
+  <p>When the operator enables them, the Energy Summary export adds <code>Etotal_kWh</code> (lifetime hardware kWh counter at slot end) and <code>parcE_kWh</code> (partial-energy counter), plus <code>Counter_Source</code> (<code>eod_clean</code> / <code>poll</code> / <code>pac_seed</code>) and quarantine flags. Hardening rules:</p>
+  <ul>
+    <li><b>Today</b> &mdash; delta = current snapshot &minus; today's baseline regardless of source. Partial-day starts line up with PAC-integrated <code>Total_MWh</code> on the same row.</li>
+    <li><b>Today fallback</b> &mdash; if today's baseline row is missing, yesterday's <code>eod_clean</code> snapshot is used as the anchor.</li>
+    <li><b>Past day</b> &mdash; same-day <code>eod_clean</code> &minus; baseline preferred; if missing, the next day's open is used as the close-out anchor.</li>
+    <li><b>Sanity ceiling</b> &mdash; every accepted delta must be &ge; 0 and bounded by 9 000 kWh per unit per day. Outliers blank out and the day total NaN-propagates so the operator notices.</li>
+  </ul>
+  <div class="info-card tip"><div class="info-card-label">PAC remains authoritative</div>Hardware counters are reconciliation aids only &mdash; they never overwrite the running PAC integration. See <code>server/hwCounterDeltaCore.js</code> + <code>server/tests/hwCounterDeltaCore.test.js</code> for the locked rules.</div>
+  <h3>Daily Data Export (v2.10.x)</h3>
+  <p>Per-inverter workbook with one sheet per configured node, in ISM-compatible column order so historical data can be cross-referenced with the vendor software.</p>
+  <ul>
+    <li><b>Today is locked</b> until the dashboard reaches the End-of-Day snapshot hour (HTTP 423 returned otherwise). Until then only past dates may be exported.</li>
+    <li>Sheets named <code>Node 1</code>, <code>Node 2</code>, &hellip; built from the IP Configuration <code>units[invId]</code> map.</li>
+    <li>Slots are clipped to the configured solar window so dawn/dusk noise is excluded.</li>
+    <li>Streaming output via <code>ExcelJS.WorkbookWriter</code> keeps memory bounded; cancel safely stops the writer mid-stream.</li>
+    <li>Filename format matches every other export: <code>DD-MM-YY Inverter N Daily Data.xlsx</code> (single day) or <code>DD-MM-YY-DD-MM-YY Inverter N Daily Data.xlsx</code> (range).</li>
+    <li>The <code>Temp (&deg;C)</code> column is <b>blank by design in v2.10.x</b> &mdash; INGECON SUN does not expose inverter heatsink temperature on the standard FC04 register block. Schema reserves the column so a future register decode populates it without a migration.</li>
+  </ul>
+  <h3>Gap Detection (v2.10.x)</h3>
+  <p>Operators can confirm a date's export is complete <i>before</i> shipping the workbook by querying:</p>
+  <pre><code>GET /api/params/:inverter/:slave/coverage/:date</code></pre>
+  <p>The response reports expected vs present slots, the missing-slot list as plant-local <code>HH:MM</code> ranges, and a <code>status</code> of <code>complete</code> / <code>partial</code> / <code>empty</code>. Aggregator drop-sample reasons (<code>samplesDroppedOffline</code>, <code>samplesDroppedStaleTs</code>, <code>fieldClampCount</code>, &hellip;) are also surfaced under <code>aggregator.*</code> on <code>GET /api/system/heartbeat</code>, so a partial day can be traced back to inverter downtime, clock skew, or out-of-order frames.</p>
+  <h3>Anchor source &mdash; HW counter trust ladder (v2.10.x)</h3>
+  <p>The <code>Counter_Source</code> column on the Energy Summary export and the <code>Anchor</code> pill on Inverter Clocks &rarr; Per-Unit Counter Health report which data source today's baseline came from.</p>
+  <table>
+    <thead><tr><th>Pill</th><th>DB source</th><th>Meaning</th><th>Trust</th></tr></thead>
+    <tbody>
+      <tr><td><b>CLEAN</b></td><td><code>eod_clean</code> + today's snapshot captured</td><td>Yesterday's clean close anchored today AND today's EOD snapshot has been captured.</td><td>&starf;&starf;&starf;&starf; Best</td></tr>
+      <tr><td><b>EOD</b></td><td><code>eod_clean</code></td><td>Yesterday's clean close anchored today; today's EOD snapshot pending after the configured EOD hour.</td><td>&starf;&starf;&starf; Comparable</td></tr>
+      <tr><td><b>EOD-ONLY</b></td><td><code>eod_clean_only</code></td><td>Late-created row from a dark-window capture &mdash; morning baseline unknown so this day's own &Delta; is unknown. Used as tomorrow's anchor only. Self-heals to EOD/CLEAN tomorrow.</td><td>&starf; Day &Delta; unknown</td></tr>
+      <tr><td><b>POLL</b></td><td><code>poll</code></td><td>Today's baseline came from the first poll of the day, NOT yesterday's clean close. Etotal &Delta; undercounts today's energy by whatever the inverter produced before the first poll. PAC-integrated Total stays authoritative.</td><td>&starf;&starf; &Delta; undercounts</td></tr>
+      <tr><td><b>SEED</b></td><td><code>pac_seed</code></td><td>Reserved slot from the v2.9.0 design; no code path currently writes it.</td><td>n/a (unused)</td></tr>
+    </tbody>
+  </table>
+  <div class="info-card tip"><div class="info-card-label">Self-healing (v2.10.x)</div>The dark-window snapshot capture now uses INSERT-or-UPDATE so a fresh-boot gateway no longer loses yesterday's close. Right after a successful eod_clean write, the system re-evaluates today's row: if today is <code>POLL</code> and yesterday's eod_clean is now available, today's baseline is rewritten in-place to <code>eod_clean</code> and re-anchored to yesterday's true close &mdash; the pill flips from POLL to EOD within seconds. Day-total HW columns NaN-propagate for <code>EOD-ONLY</code> days so partial-coverage exports never silently report 0 kWh.</div>
+  <a href="#toc" class="back-top">&uarr; Back to Contents</a>
+</section>
+
+<!-- 14a. STOP REASONS + SERIAL NUMBER (v2.10.x Settings cards) -->
+<section id="sStopSerial">
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="3" y="3" width="16" height="16" rx="3" stroke="#c084fc" stroke-width="1.8"/><path d="M8 11h6M11 8v6" stroke="#c084fc" stroke-width="1.8" stroke-linecap="round"/></svg></div><h2>Stop Reasons &amp; Serial Number Setting (v2.10.x)</h2></div>
+  <p>Two new Settings cards expose vendor-FC diagnostics and writes that previously required the ISM laptop. Both surfaces auto-mirror in remote mode but execute their wire actions only on the gateway.</p>
+  <h3>Stop Reasons</h3>
+  <p>Per-node <code>StopReason</code> diagnostic captured via vendor FC <code>0x71</code> SCOPE peek. The card has two tabs:</p>
+  <ul>
+    <li><b>Captured Snapshots</b> &mdash; pick an inverter, hit <b>Refresh now</b> (read-only, no bulk-auth in v2.10.x). The dashboard also <b>auto-captures</b> a snapshot on every alarm transition (500 ms staging delay, 30-second per-node cooldown).</li>
+    <li><b>Lifetime Counters</b> &mdash; cached <code>ARRAYHISTMOTPARO</code> histogram of 30 stop motives plus <code>TOTAL</code>.</li>
+  </ul>
+  <p>Each captured row links back to its <code>alarm_id</code> via the <code>alarms.stop_reason_id</code> foreign key, so the alarm drilldown panel can pull the contextual stop reason without a second read.</p>
+  <h3>Serial Number Setting</h3>
+  <p>Mirrors ISM&apos;s <code>frmSetSerial</code> flow byte-for-byte. Four tabs:</p>
+  <ul>
+    <li><b>Read / Edit / Send</b> &mdash; FC11 <i>Report Slave ID</i> read mints a 5-minute session token. <i>Send</i> performs UNLOCK (<code>0xFFFA = 0x0065, 0x07A7</code>) &rarr; WRITE (<code>0x9C74</code>) &rarr; readback verify. Bulk-auth required, plus the active session token. <i>Verify Serial Number to send</i> (default-on) does a fleet-wide FC11 scan and rejects duplicates before the unlock frame.</li>
+    <li><b>Plant Serial Map</b> &mdash; parallel FC11 sweep across every <code>(inverter, slave)</code> with duplicate-detection badges. Honors a 5-minute cache; <i>Bypass cache</i> available.</li>
+    <li><b>Bulk Fix</b> &mdash; re-writes the whole plant against the <b>locked factory serial map</b>, generated 1:1 from the authoritative <code>docs/Fixed_Inverter_SerialNumbers.xlsx</code> (the permanent field guide). <i>Show target map</i> displays all 27 inverters (<code>T</code> is the nameplate, reference only; slaves 1&ndash;4 are written). <i>Scan &amp; diff</i> reads every node and classifies it <code>match</code> / <code>mismatch</code> / <code>unreachable</code> / <code>no live unit</code>, with an <b>Origin</b> per mismatch (<code>factory / unknown</code> or <code>&#x21C4; Inv X / Node Y</code> for a physically relocated module). Only mismatches are selectable. <i>Apply selected</i> writes each one sequentially with readback verify, logged to <code>serial_change_log</code> (scope <code>bulk</code>) with timestamp, operator, old&rarr;new, and a module-origin note. The per-write uniqueness scan is skipped because the factory map is pre-validated globally unique.</li>
+    <li><b>Firmware Map</b> &mdash; the nodes <b>within one inverter</b> should all run the <b>same firmware</b>; each inverter is judged only against <i>its own</i> nodes (per-inverter, never plant-wide). A <i>projection of the serial scan</i> (firmware rides the same FC11 payload &mdash; no extra bus traffic). The compared value is the <b>inverter firmware code</b> (<code>AAV1003xx</code>, the <b>Firmware</b> column) &mdash; verified 2026-05-19 by decompiling ISM&apos;s own FC11 parser (<code>IngeconModbusSlaveID_Freescale</code>: serial + one firmware code, no display-firmware field for this hardware). The <b>Aux ID 1/2</b> columns (the <code>AAS…</code> strings) are <i>unverified auxiliary identifiers</i> &mdash; diagnostics only, <b>not</b> compared. <i>Scan firmware</i> reads the fleet (bulk-auth, gateway-only); <i>Show last snapshot</i> and <i>Drift log</i> read the replicated <code>inverter_firmware_state</code> / <code>firmware_drift_log</code> and work in remote mode. Per-inverter pill: <b>all same</b> / <b>mixed nodes</b> (a node disagrees with its siblings &mdash; post-board-swap signature, dual of the serial relocation guard) / <b>partial read</b> / <b>no read</b>. Drift is logged only on a real inverter-firmware change of a previously-seen node (Aux-ID-only changes are never drift).</li>
+  </ul>
+  <div class="info-card warn"><div class="info-card-label">Override gate</div>Duplicate serials block the write before unlock; an intentional duplicate (e.g. RMA replacement) can be sent with <code>override_conflicts</code>. Both Motorola (12 ASCII) and Texas TI (32 ASCII) firmware formats are supported.</div>
+  <div class="info-card"><div class="info-card-label">Read-back is the source of truth</div>An identity write makes the inverter re-init its Modbus stack, so the FC16 write <i>response</i> is often lost even though the write landed. The pipeline always does the verify read-back (longer settle + retries when the write wasn&apos;t ACKed) and judges the result by what the unit actually reports: a confirmed read-back is <b>success</b> even with a lost ACK (flagged <code>write_ack_lost</code>); only an unchanged read-back is a real failure; if nothing can be read back the result is <code>write_unconfirmed</code> (never &ldquo;success&rdquo;) &mdash; rescan to confirm. This eliminates the false <code>write_failed</code> where a serial had actually been written.</div>
+  <div class="info-card"><div class="info-card-label">One credential, end to end</div>The whole Serial Number feature &mdash; single Read / Send, Read-all, Plant Serial Map, Bulk Fix plan/apply, and the duplicate override &mdash; uses <b>one</b> key: the authorization key (<code>adsiMM</code>) &mdash; the same rolling key used for every privileged action across the dashboard. Pure read surfaces (audit log, migration history, cached map, target map) need no key.</div>
+  <div class="info-card"><div class="info-card-label">Locked numbering &amp; module relocation</div>The xlsx is the single source of truth &mdash; fix it there and regenerate if a field serial is wrong. Every node&apos;s serial is fixed even when a physical node is absent (the serial stays reserved, never reused), which is what lets the dashboard recognise a <b>physically moved module</b> by its serial. When you transfer a power module (e.g. Inverter&nbsp;4&nbsp;/&nbsp;Node&nbsp;1 &rarr; Inverter&nbsp;27&nbsp;/&nbsp;Node&nbsp;2), Bulk Fix auto-detects it, requires the auto-shown <i>Acknowledge relocated module(s)</i> tick, and records the board&apos;s origin slot in the change log with correct timestamps for historical traceability.</div>
+  <div class="info-card"><div class="info-card-label">Measurement Board (Power Module) Migration History</div>The <i>Load migration history</i> button in the Bulk Fix tab shows the full chronological trail of relocated Measurement Boards &mdash; origin slot &rarr; where the board was found &rarr; the serial written, with timestamp, operator, and result. Structured origin columns (<code>origin_inverter</code>/<code>origin_node</code>) back the query, and even a detected-but-not-yet-acknowledged relocation is recorded so a board&apos;s movement is never lost. It captures relocations re-serialized via either Bulk Fix or the one-by-one Send tab. <i>Export</i> (with an Excel/CSV selector) saves the whole trail through the standard export pipeline &mdash; styled <code>.xlsx</code> or <code>.csv</code> in the usual Logs tree (<code>All Inverters\Audits\</code>) with the same date-aware filename as every other export, opening the folder when done. Read-only and available in remote mode (proxied + fetched locally just like the Alarms/Audit exports).</div>
+  <div class="info-card"><div class="info-card-label">Per-inverter only &amp; field check</div>Comparison is strictly <b>per inverter</b> &mdash; a node is &ldquo;different&rdquo; only when its inverter firmware code disagrees with the other nodes on the <b>same</b> inverter; there is no plant-wide firmware reference. An unreadable node never overwrites its stored snapshot. The Utility / Calibration Tool exposes a single-inverter <i>Firmware Check</i> for the connected unit (slaves 1&ndash;4), so a technician can confirm a freshly swapped board matches its siblings without a full plant scan.</div>
+  <a href="#toc" class="back-top">&uarr; Back to Contents</a>
+</section>
+
+<!-- 14b. FIRMWARE UPGRADE (EXPERIMENTAL) -->
+<section id="sFirmware">
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="4" y="3" width="14" height="16" rx="2" stroke="#f0883e" stroke-width="1.8"/><path d="M9 8h4M9 11h4M9 14h4" stroke="#f0883e" stroke-width="1.8" stroke-linecap="round"/></svg></div><h2>Firmware Upgrade (Experimental)</h2></div>
+  <div class="info-card warn"><div class="info-card-label">Irreversible &mdash; read first</div>Flashing rewrites the inverter DSP program and <b>cannot be undone</b>. A wrong or interrupted image can brick the unit. This feature is gated, experimental, and available <b>only in the standalone Utility Tool</b> (never the dashboard). Use it only with the manufacturer-supplied image for the exact unit, after operator sign-off.</div>
+  <p>A <b>FW Upgrade</b> button at the top-right of the per-node controls row (standalone calibrator only) opens the <b>Firmware Upgrade</b> dialog, presented as a guided <b>4-step wizard</b> &mdash; <i>File &rarr; Target &rarr; Dry-run &rarr; Flash</i>. A progress rail shows each step&apos;s status (done / current / locked) and a later step stays locked until its prerequisite is met, so the irreversible step cannot be reached by accident:</p>
+  <ol>
+    <li><b>Connect a transport</b> to the target inverter &mdash; <b>Ethernet</b> (Modbus-TCP via the transparent gateway) or <b>RS485-USB</b> (Modbus-RTU, the most-direct link to the node DSP). The flash uses whichever is connected; a serial flash takes exclusive ownership of the COM port for the duration (reconnect afterwards). The <code>0x96</code> baud-bump frame is never sent, so there is no baud-switch race.<br><b>Bus-lock note:</b> for an Ethernet flash the dashboard&apos;s live poller is a second Modbus master on the same gateway. The flash publishes a cross-process claim so the dashboard <b>automatically pauses polling of that one inverter</b> for the duration (shown as <i>maintenance</i>, not offline, and not counted as downtime) and resumes the moment the flash ends. This prevents the two-master collision that otherwise makes the DSP reject the start with <i>&ldquo;firmware load start (0x90) error code 2&rdquo;</i>. The claim self-expires (~2&nbsp;min) if the calibrator crashes, so polling can never be permanently silenced.<br><b>Transport status:</b> the dialog shows a transport-status line near the top &mdash; <b>green</b> when a link is open, <b>amber</b> with an inline <b>Connect&hellip;</b> shortcut when none is &mdash; so you know <i>before</i> clicking whether <b>Read Identity</b> and <b>FLASH (live)</b> can reach the unit; both guide you to connect rather than failing with a cryptic error. (Dry-Run is hardware-free and needs no transport.)</li>
+    <li><b>Browse&hellip; to the firmware file</b> via the native OS picker (or paste an absolute path). It must be a <code>.S</code> Motorola S-record whose filename follows the <code>LLLnnnn&hellip;</code> rule; the server still verifies it is a real <code>.S</code> file, size-capped, and SHA-256-pinned to the dry-run.</li>
+    <li><b>Set the target node</b> (1&ndash;247; broadcast/0 forbidden) and optionally <b>Read Identity</b> &mdash; an FC11 <i>Report Slave ID</i> showing the exact serial / model / running firmware of the unit you would flash. When a file is already chosen, the readout also states whether the flash is an <b>upgrade</b>, <b>downgrade</b>, or <b>no change</b> (unit version &rarr; file version), mirroring ISM&apos;s pre-flash advisory so you confirm the direction before arming.</li>
+    <li><b>Dry-Run (safe).</b> Simulates the entire flash against an in-memory DSP with <b>zero hardware contact</b>, displays the file&apos;s <b>SHA-256</b>, and verifies that the firmware <b>code embedded in the image matches the filename</b> (ISM&apos;s <code>VerificaFicheroFirmware</code> <i>&ldquo;Invalid firmware&rdquo;</i> guard), so a renamed or corrupt file is rejected here. A successful dry-run of the exact selected file/node/parameters is a hard precondition for arming the live flash; changing any of them re-disables it.</li>
+    <li><b>Arm.</b> The live block appears only after a passing dry-run. You must tick the irreversible-acknowledgement box and supply the authorization key (<code>adsiMM</code>).</li>
+    <li><b>FLASH (live).</b> The flash runs as a background job with a live progress bar, an audit-event log, and an <b>Abort</b> button.</li>
+  </ol>
+  <h3>Server-side gates</h3>
+  <p>Every gate is enforced server-side regardless of the UI. The live flash is refused unless <i>all</i> hold: explicit irreversible confirmation; a prior successful dry-run of the same SHA-256; exactly one link (a TCP host OR a serial COM port, never both/neither); a single non-broadcast node; a verified file (real regular file, <code>.S</code>, size-capped, ISM filename rule, SHA-256 match); the <b>embedded firmware-code match</b> (the code stored in the image must match the filename &mdash; ISM <code>VerificaFicheroFirmware</code>); an FC11 model/version compatibility check (apparent downgrades blocked unless <b>Allow downgrade</b> is ticked &mdash; downgrade <i>is</i> possible, see note below); an exclusive RS-485 bus lock; an audit sink; and a watchdog deadline.</p>
+  <div class="info-card tip"><div class="info-card-label">Bootloader preservation &amp; fail-safe abort</div>The loader never transmits the bootloader or reset-vector banks, so an interrupted or aborted application flash leaves the unit <b>re-flashable</b>. <b>Abort</b> is fail-safe and intentionally <i>not</i> behind an auth prompt so it is always immediately available. While a flash runs the dialog <b>cannot be closed</b> (X, backdrop, and Escape are blocked) so an in-progress irreversible operation is never hidden. After a successful flash the tool re-reads FC11 identity (ISM <code>Identifica</code>) and reports the firmware the unit now runs &mdash; read-only and best-effort, it never marks a successful flash as failed. Every attempt and outcome is appended to <code>firmware-audit.jsonl</code> under <code>%PROGRAMDATA%\InverterDashboard\</code> (<code>firmware.pre_flash.direction</code>, <code>firmware.live.start</code>/<code>.ok</code>/<code>.fail</code>, and <code>firmware.live.verify_ok</code>/<code>.verify_warn</code>).</div>
+  <h3>Downgrade</h3>
+  <p><b>Downgrading is possible.</b> The DSP bootloader and the on-wire protocol enforce <i>no</i> version monotonicity &mdash; the loader erases and writes whatever compatible image you send, older or newer. In ISM the upgrade-vs-downgrade decision lives entirely in its application layer (<code>QueHableAhoraOCalleParaSiempre(newCode, forceDowngrade)</code> / <code>CheckCanUpgradeFirmware</code>), bypassable with ISM&apos;s own <i>force</i> flag. This tool mirrors that exactly: the downgrade block compares the unit&apos;s <b>authoritative <code>model_code</code> version</b> (the <code>AAV1003xx</code> firmware FC11 actually reports) against the file&apos;s version trailer, lifted by ticking <b>Allow downgrade</b> under Advanced. Once ticked, an older image of the same product family will flash.</p>
+  <div class="info-card warn"><div class="info-card-label">Downgrade caveat</div>The comparison uses the authoritative <code>model_code</code> version, <i>not</i> the FC11 <code>AAS&hellip;</code> auxiliary IDs (which are not the running firmware). It does not change what the hardware accepts &mdash; the bootloader takes any compatible image. The file&harr;model compatibility prefix check (<code>AAV1003</code>&hellip;), the embedded firmware-code match, and the SHA-pinned dry-run still apply, and bootloader-bank preservation means even a mistaken-direction flash stays recoverable.</div>
   <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
@@ -1471,16 +1565,29 @@
   </ul>
 
   <h3>Separate Hikvision DVR Card</h3>
-  <p>The Hikvision DVR has its own draggable card, settings modal, native decoder bridge, and API routes. Its DVR-specific connection remains separate from Tapo. The compact modal groups device identity, local connection, channel/playback, stream profile, and native-decoder status into separate panels. Use the DVR&rsquo;s local username and password; Hik-Connect cloud credentials and camera access codes are not required.</p>
-  <div class="info-card note"><div class="info-card-label">Smooth Native Playback</div><p>Use <b>Smooth native playback</b> for normal operation. Hikvision LocalService decodes the selected DVR stream with the vendor&rsquo;s native hardware path, retaining the DVR&rsquo;s original quality and frame rate without an FFmpeg transcode. The native surface fills the Hikvision card, hides while the card is off-screen or a modal/Tapo fullscreen covers it, and resumes without restarting the stream. Open its configuration through <b>Tapo Camera Settings &gt; Hikvision DVR</b>. Double-click the native video to enter or leave Hikvision LocalService fullscreen; the card has no HTML Settings or Fullscreen buttons. Repeated unchanged geometry updates are suppressed so card tracking does not interrupt video decoding. Compatible snapshots remain a low-frame-rate fallback, while Direct HLS is retained for diagnostics.</p></div>
+  <p>The Hikvision DVR has its own draggable card, settings modal, browser stream, native decoder bridge, and API routes. Its DVR-specific connection remains separate from Tapo. The polished modal groups secure stream paths, device identity, DVR connection, channel/playback, stream profile, and playback status. Use the DVR&rsquo;s local username and password; Hik-Connect cloud credentials and camera access codes are not required. SDK/HTTP defaults to port <code>80</code> and RTSP to <code>554</code>.</p>
+  <div class="info-card note"><div class="info-card-label">Hybrid HLS + Native Viewer Window</div><p>Use <b>Hybrid HLS + native viewer window</b> for normal operation. The Inverters-page card uses browser-safe H.264 HLS. Expect roughly 2&ndash;3 seconds of latency and modest transcoding loss. The native-viewer control pauses card HLS and opens a standard Electron window like the Analytics popout. Hikvision LocalService fills its content area at the DVR&rsquo;s original quality and frame rate. Use the normal Windows title-bar controls to move, resize, minimize, maximize/restore, or close it. Closing the window stops native playback and resumes HLS automatically when Inverters is visible. Compatible snapshots and Direct HLS remain explicit diagnostic/fallback modes and use ordinary HTML fullscreen.</p></div>
+  <p>When you leave the Inverters page, the Hikvision card disappears completely and its HLS playback stops. Returning restores the card in its saved grid position and reconnects playback. The card provides <b>Settings</b> and <b>Open native viewer window</b> controls. If LocalService cannot start, the native viewer displays <b>Retry</b>; otherwise video fills the complete content area.</p>
+  <h4>Hikvision over Tailscale</h4>
+  <table><thead><tr><th>Playback Surface</th><th>Gateway Mode</th><th>Remote Mode</th></tr></thead><tbody>
+    <tr><td>Inverters-page card</td><td>Local H.264 HLS generated beside the DVR</td><td>Authenticated HLS/snapshot relay from the gateway over the configured gateway link</td></tr>
+    <tr><td>Native viewer</td><td>LocalService connects directly to the DVR over the plant LAN</td><td>LocalService connects directly through a Tailscale subnet route</td></tr>
+  </tbody></table>
+  <div class="info-card warn"><div class="info-card-label">Least-Privilege Route</div><p>Advertise only the DVR host from the gateway, for example <code>192.168.1.12/32</code>, rather than the complete plant subnet. Approve that route and grant only approved viewer devices access to the configured SDK/HTTP and RTSP ports (normally TCP <code>80</code> and <code>554</code>).</p></div>
+  <p>A Remote workstation does not start another transcoder. The gateway remains authoritative for the compact stream and keeps its DVR password. Native LocalService runs on the viewer, so the viewer stores its own DVR password locally; the gateway password is never returned through the API. Non-secret source fields synchronize so both paths target the same DVR and channel.</p>
+  <p>During a rolling deployment, an older gateway may not expose <code>/api/hikvision/*</code> yet. The viewer contains that HTML/404 response instead of sending it to the HLS parser or displaying markup in the card. Remote mode never starts a viewer-side transcoder: update or restart the gateway to enable compact playback.</p>
+  <p>The <b>Secure Stream Paths</b> panel and <b>Check Routes</b> button show whether the card is local or gateway-relayed, whether the DVR SDK port is reachable for native playback, whether Tailscale is connected, and which <code>/32</code> route is recommended. The check is read-only and never starts video or changes the DVR.</p>
   <table><thead><tr><th>Hikvision Control</th><th>Function</th></tr></thead><tbody>
-    <tr><td>Tapo Camera Settings &gt; Hikvision DVR</td><td>Opens the dedicated Hikvision DVR configuration modal.</td></tr>
-    <tr><td>Double-click Hikvision video</td><td>Enters or leaves Hikvision LocalService fullscreen playback.</td></tr>
-    <tr><td>Playback Mode</td><td>Selects smooth Hikvision LocalService playback, compatible snapshots, or diagnostic direct HLS.</td></tr>
-    <tr><td>Verify Connection</td><td>Saves the current fields and verifies native playback against the DVR.</td></tr>
+    <tr><td>Gear / Tapo Camera Settings &gt; Hikvision DVR</td><td>Opens the dedicated Hikvision DVR configuration modal.</td></tr>
+    <tr><td>Native viewer / double-click video</td><td>In recommended hybrid mode, pauses HLS and opens an Analytics-style framed, resizable LocalService window.</td></tr>
+    <tr><td>Windows title-bar controls</td><td>Move, resize, minimize, maximize/restore, or close the viewer; closing stops native playback and resumes HLS.</td></tr>
+    <tr><td>Playback Mode</td><td>Selects hybrid HLS/native playback, compatible snapshots, or diagnostic direct HLS.</td></tr>
+    <tr><td>SDK / HTTP</td><td>Configures the DVR port used by LocalService native playback; default <code>80</code>.</td></tr>
+    <tr><td>Secure Stream Paths / Check Routes</td><td>Shows gateway-relay, direct-native, and Tailscale readiness without starting playback.</td></tr>
+    <tr><td>Verify Connection</td><td>Saves the current fields and verifies browser-safe HLS against the DVR.</td></tr>
     <tr><td>Prepare H.264 Substream</td><td>Changes only the selected channel&rsquo;s xx02 profile to H.264 after confirmation.</td></tr>
     <tr><td>Save &amp; View</td><td>Persists the dedicated Hikvision configuration and reconnects the card.</td></tr>
-    <tr><td>Start / Stop</td><td>Starts or stops Hikvision LocalService native playback.</td></tr>
+    <tr><td>Start / Stop</td><td>Starts or stops the current Hikvision presentation.</td></tr>
   </tbody></table>
 
   <h3>Troubleshooting</h3>
@@ -1491,7 +1598,10 @@
     <tr><td>FFmpeg mode no video</td><td>FFmpeg not installed on server</td><td>Install FFmpeg and ensure it is on PATH</td></tr>
     <tr><td>Service section hidden</td><td>Remote mode active</td><td>Switch to Gateway mode in Settings &rarr; Connectivity</td></tr>
     <tr><td>Auto-restart stopped</td><td>3+ consecutive crashes</td><td>Check go2rtc logs, fix RTSP source, then manually restart</td></tr>
-    <tr><td>Hikvision card stays on &ldquo;Starting&rdquo;</td><td>Hikvision LocalService is unavailable, the DVR is unreachable, or the local DVR login failed</td><td>Confirm LocalService is running, verify the DVR/LAN connection, then use Verify Connection</td></tr>
+    <tr><td>Hikvision card stays on &ldquo;Starting&rdquo;</td><td>The media service is unavailable, the DVR is unreachable, or the local DVR login failed</td><td>Verify the DVR/LAN connection, then use Verify Connection</td></tr>
+    <tr><td>HLS works but the native viewer is blank</td><td>Hikvision LocalService is unavailable or blocked</td><td>Start LocalService and select Retry, or close the viewer with the normal Windows close button</td></tr>
+    <tr><td>Remote card works but native viewer is blocked</td><td>The gateway relay is healthy, but the viewer lacks an approved DVR route or viewer-local password</td><td>Advertise and approve the DVR <code>/32</code>, allow its SDK/RTSP ports, save the DVR password on the viewer, then use Check Routes</td></tr>
+    <tr><td>Secure Stream Paths reports Tailscale offline</td><td>Tailscale is stopped or signed out on the Remote workstation</td><td>Reconnect Tailscale and rerun Check Routes</td></tr>
     <tr><td>Hikvision profile unavailable</td><td>DVR IP, local RTSP account, or LAN route is incorrect</td><td>Verify DVR reachability, then use Test Stream</td></tr>
   </tbody></table>
   <a href="#toc" class="back-top">&uarr; Back to Contents</a>
@@ -1556,8 +1666,7 @@
   <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M3 6h16M3 11h16M3 16h16" stroke="#c084fc" stroke-width="1.8" stroke-linecap="round"/><circle cx="7" cy="6" r="2" fill="rgba(192,132,252,.2)" stroke="#c084fc" stroke-width="1.2"/><circle cx="12" cy="11" r="2" fill="rgba(192,132,252,.2)" stroke="#c084fc" stroke-width="1.2"/><circle cx="9" cy="16" r="2" fill="rgba(192,132,252,.2)" stroke="#c084fc" stroke-width="1.2"/></svg></div><h2>Standard Operating Workflows</h2></div>
   <div class="wf-card"><h4>Daily Startup Check</h4><ol class="steps"><li>Launch and sign in.</li><li>Wait for startup loading screen to finish.</li><li>If Remote and gateway unreachable, choose Gateway or retry in the Connection Mode picker.</li><li>Confirm license area is clear.</li><li>Check connection dot, clock, TOTAL PAC, and TODAY MWh.</li><li>Open Inverters page and confirm fleet status chips.</li></ol></div>
   <div class="wf-card"><h4>Live Control</h4><ol class="steps"><li>Open Inverters page.</li><li>Select target inverter or node.</li><li>Review alarm state and data freshness.</li><li>Send START or STOP action.</li><li>Confirm via status updates and audit log.</li></ol></div>
-  <div class="wf-card"><h4>Plant Output Cap</h4><ol class="steps"><li>Open the <b>Plant Cap</b> page from the navigation bar.</li><li>Set Upper/Lower Limit, Sequence, Cooldown, and Exemptions.</li><li>Click Preview Plan to review.</li><li>Click Enable Cap (authorization required).</li><li>Monitor Cap Status and Controlled Inverters Table.</li><li>Release: click Release Controlled. Disarm: click Disable Monitoring.</li></ol></div>
-  <div class="wf-card"><h4>Scheduled Auto-Cap</h4><ol class="steps"><li>Open the <b>Plant Cap</b> page.</li><li>Click <b>+ Add Schedule</b> in the toolbar.</li><li>Fill in Name, Start/Stop Time, and optional MW/Sequence overrides.</li><li>Enter the Auth Key and click Save.</li><li>Monitor schedule chips for state transitions (Waiting &rarr; Active &rarr; Completed).</li><li>Edit or delete schedules via the pencil icon on each chip.</li></ol></div>
+  <div class="wf-card"><h4>Plant Output Cap</h4><ol class="steps"><li>Show the Cap panel on Inverters page.</li><li>Set Upper/Lower Limit, Sequence, Cooldown, and Exemptions.</li><li>Click Preview Plan to review.</li><li>Click Enable Cap (authorization required).</li><li>Monitor Cap Status and Controlled Inverters Table.</li><li>Release: click Release Controlled. Disarm: click Disable Monitoring.</li></ol></div>
   <div class="wf-card"><h4>Daily Performance Review</h4><ol class="steps"><li>Open Analytics for interval review and day-ahead comparison.</li><li>Open Energy for interval detail.</li><li>Open Report for formal summary.</li><li>Export from Report or Export page.</li></ol></div>
   <div class="wf-card"><h4>Remote Standby Refresh</h4><ol class="steps"><li>Confirm Remote mode.</li><li>Open Settings &rarr; Connectivity &amp; Gateway Link.</li><li>Click Refresh Standby DB.</li><li>Allow preflight, then wait for snapshot transfer.</li><li>Restart to apply staged database.</li></ol></div>
   <div class="wf-card"><h4>Cloud Backup</h4><ol class="steps"><li>Configure and authorize provider.</li><li>Save settings and select scope.</li><li>Run Backup Now or rely on schedule.</li><li>Review backup history.</li></ol></div>
@@ -1565,21 +1674,21 @@
   <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
-<!-- 20. IP CONFIGURATION -->
+<!-- 20. GLOBAL CONFIGURATION -->
 <section id="s20">
-  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="3" y="6" width="16" height="10" rx="2" stroke="#fb923c" stroke-width="1.8"/><circle cx="7" cy="11" r="1.5" fill="#fb923c"/><path d="M11 9h5M11 13h4" stroke="#fb923c" stroke-width="1.5" stroke-linecap="round"/></svg></div><h2>IP Configuration</h2></div>
-  <p>Open via <b>Settings &rarr; IP Configuration</b> or <kbd>Ctrl</kbd>+<kbd>I</kbd>. Auth code required, 1-hour session.</p>
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="3" y="6" width="16" height="10" rx="2" stroke="#fb923c" stroke-width="1.8"/><circle cx="7" cy="11" r="1.5" fill="#fb923c"/><path d="M11 9h5M11 13h4" stroke="#fb923c" stroke-width="1.5" stroke-linecap="round"/></svg></div><h2>Global Configuration</h2></div>
+  <p>Open via <b>Settings &rarr; Global Configuration</b> or <kbd>Ctrl</kbd>+<kbd>I</kbd>. The window combines network addressing with core global settings. Auth code required, 1-hour session.</p>
   <p>Available in <b>both Gateway and Remote mode</b>. On a Remote viewer a banner notes that edits save to the gateway (authoritative) and mirror back locally, so addressing can be updated without remoting into the gateway PC. The local reachability scan and <b>Check Status</b> counter are suppressed in Remote mode (those inverters sit on the gateway LAN); the gateway keeps polling them.</p>
+  <table><thead><tr><th>Tab</th><th>Purpose</th></tr></thead><tbody><tr><td>Network &amp; IP</td><td>Inverter addressing, polling, enabled nodes, loss factors, reconnect, and device pages.</td></tr><tr><td>Plant &amp; Data</td><td>Plant identity, fleet sizing/layout, exports, retention, and forecast provider.</td></tr><tr><td>Hardware &amp; Clocks</td><td>Inverter-service endpoints and daily RTC synchronization schedule.</td></tr><tr><td>Connectivity &amp; Backup</td><td>Gateway/Remote access, live-link state, backup readiness, and gateway-only portable export.</td></tr></tbody></table>
   <table><thead><tr><th>Column</th><th>Description</th></tr></thead><tbody><tr><td>Inverter</td><td>Label</td></tr><tr><td>IP Address</td><td>Modbus TCP target</td></tr><tr><td>Polling Interval</td><td>Refresh rate (ms)</td></tr><tr><td>Enabled Units</td><td>Active nodes to poll</td></tr><tr><td>Loss %</td><td>Cable/connection loss (used by forecast engine)</td></tr></tbody></table>
-  <p>Additional: <b>Check Status</b> (test config), <b>Open Topology</b> (separate auth, 10-min session), <b>Theme toggle</b>.</p>
-  <p>Per-row actions: the <b>gear</b> icon opens the inverter comm board's own web page (on the gateway it opens directly; from a Remote viewer it is routed through the gateway automatically). The circular <b>Reconnect</b> button (next to Save) forces the gateway to drop and rebuild its Modbus connection to that inverter &mdash; use it when an inverter's nodes stop polling but the IP still pings. It changes no IP or setting and works from a Remote viewer too. The gateway also rebuilds a stalled connection on its own after ~30&nbsp;s, so this is usually only needed for an immediate nudge.</p>
+  <p><b>Save All Changes</b> commits pending editable settings across tabs and reports server validation failures in the bottom status bar. Saving one inverter row preserves unsaved edits in other rows. Additional actions: <b>Check Status</b>, <b>Topology</b> (Gateway mode only), <b>Export .adsibak</b> (Gateway mode only), and the light/dark theme toggle. License and application-update controls remain in the main <b>Settings</b> page because they are workstation-local rather than gateway-synchronized global settings.</p>
   <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
 <!-- 21. KEYBOARD SHORTCUTS -->
 <section id="s21">
   <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="2" y="7" width="18" height="10" rx="2" stroke="#94a3b8" stroke-width="1.8"/><path d="M6 11h2M10 11h2M14 11h2M8 14h6" stroke="#94a3b8" stroke-width="1.5" stroke-linecap="round"/></svg></div><h2>Keyboard Shortcuts &amp; Tips</h2></div>
-  <table><thead><tr><th>Shortcut</th><th>Function</th></tr></thead><tbody><tr><td><kbd>Ctrl</kbd>+<kbd>T</kbd></td><td>Topology window</td></tr><tr><td><kbd>Ctrl</kbd>+<kbd>I</kbd></td><td>IP Configuration</td></tr><tr><td><kbd>Ctrl</kbd>+<kbd>=</kbd></td><td>Zoom in</td></tr><tr><td><kbd>Ctrl</kbd>+<kbd>-</kbd></td><td>Zoom out</td></tr><tr><td><kbd>Ctrl</kbd>+<kbd>0</kbd></td><td>Reset zoom</td></tr><tr><td><kbd>Ctrl</kbd>+<kbd>L</kbd></td><td>Theme toggle (aux windows)</td></tr><tr><td><kbd>Ctrl</kbd>+<kbd>R</kbd></td><td>Force full data reload</td></tr></tbody></table>
+  <table><thead><tr><th>Shortcut</th><th>Function</th></tr></thead><tbody><tr><td><kbd>Ctrl</kbd>+<kbd>T</kbd></td><td>Topology window</td></tr><tr><td><kbd>Ctrl</kbd>+<kbd>I</kbd></td><td>Global Configuration</td></tr><tr><td><kbd>Ctrl</kbd>+<kbd>=</kbd></td><td>Zoom in</td></tr><tr><td><kbd>Ctrl</kbd>+<kbd>-</kbd></td><td>Zoom out</td></tr><tr><td><kbd>Ctrl</kbd>+<kbd>0</kbd></td><td>Reset zoom</td></tr><tr><td><kbd>Ctrl</kbd>+<kbd>L</kbd></td><td>Theme toggle (aux windows)</td></tr><tr><td><kbd>Ctrl</kbd>+<kbd>R</kbd></td><td>Force full data reload</td></tr></tbody></table>
   <ul><li><b>Alarm notifications</b>: sidebar <code>ALARMS</code> badge shows the count (navigation); the bottom-right hub pill opens the quick-ACK panel</li><li><b>Sidebar</b>: collapses to icons on narrow windows; hover for tooltips</li><li><b>Inverter cards</b>: click to expand detail panel</li><li><b>Message bubble</b>: bottom corner, opens operator messaging</li></ul>
   <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
@@ -1600,15 +1709,20 @@
     <tr><td>Cloud restore unavailable</td><td>Provider not ready</td><td>Refresh list, verify auth</td></tr>
     <tr><td>Topology blocked</td><td>Remote mode (IP Config now works remotely; Topology stays Gateway-only)</td><td>Use gateway workstation for Topology</td></tr>
     <tr><td>IP Config change not applied</td><td>Gateway unreachable or rejected the save</td><td>Verify gateway URL/token online; the save banner shows the gateway error</td></tr>
-    <tr><td>Inverter nodes stop polling but the IP still pings</td><td>The gateway's Modbus session to that inverter has wedged; a ping can't detect it</td><td>Wait for auto-recovery (~30 s), or click <b>Reconnect</b> on that inverter's row in IP Configuration</td></tr>
-    <tr><td>"Open device web page" does nothing from a remote viewer</td><td>The comm board is on the gateway LAN, not reachable from the remote PC</td><td>Use the gear icon in IP Configuration &mdash; it routes the device page through the gateway</td></tr>
     <tr><td>Silent alarms</td><td>Muted or no audio</td><td>Re-enable sound, check audio</td></tr>
     <tr><td>Export fails</td><td>Path/date/format issue</td><td>Verify folder, filters, mode</td></tr>
     <tr><td>High WAPE</td><td>Stale Solcast or retraining needed</td><td>Check Performance Monitor</td></tr>
     <tr><td>Camera &ldquo;Stream failed&rdquo;</td><td>go2rtc not running or wrong IP</td><td>Open Camera Settings, verify IP/port, Start service</td></tr>
     <tr><td>go2rtc won&rsquo;t start</td><td>Port 1984/8555 in use</td><td>Stop conflicting process or change ports</td></tr>
     <tr><td>Camera service hidden</td><td>Remote mode active</td><td>Switch to Gateway mode</td></tr>
+    <tr><td>Inverter nodes stop polling but the IP still pings</td><td>The gateway's Modbus session to that inverter has wedged (stale socket / comm-board TCP queue), which a ping cannot detect</td><td>Wait for auto-recovery, or click the <b>Reconnect</b> button on that inverter's row in <b>IP Configuration</b></td></tr>
+    <tr><td>"Open device web page" does nothing from a remote viewer</td><td>The comm board lives on the gateway LAN and is not reachable from the remote PC</td><td>Use the gear icon in <b>IP Configuration</b> &mdash; it now routes the device page through the gateway automatically</td></tr>
   </tbody></table>
+  <h3>Inverter polling stalls while the IP still pings (v2.11.x)</h3>
+  <p>An inverter can keep answering <code>ping</code> while its Modbus polling fails &mdash; ping only proves the comm board's network chip is alive, not that the Modbus session behind it is healthy. On the Ingeteam <b>AAX0041</b> Ethernet&rarr;RS-485 comm board, the board accepts the TCP connection and queues requests, so a stale or wedged session can leave the dashboard's per-inverter connection stuck even though the IP is reachable. Historically the only field fix was to change the inverter's IP, which forced the gateway to build a brand-new connection.</p>
+  <div class="info-card tip"><div class="info-card-label">Automatic recovery</div>The gateway now watches each inverter's connection. After ~30&nbsp;seconds with no successful read, it automatically discards the wedged Modbus client and builds a fresh one (rate-limited to once per minute per inverter) &mdash; no operator action and no IP change needed. This makes the old &ldquo;change the IP&rdquo; workaround unnecessary in normal operation.</div>
+  <div class="info-card"><div class="info-card-label">Manual Reconnect</div>To force it immediately, open <b>IP Configuration</b> and click the circular <b>Reconnect</b> button on that inverter's row (next to Save). This drops and rebuilds only that inverter's gateway socket &mdash; it changes no inverter setting and no IP. It works from a remote viewer too (the request is routed to the gateway). If the inverter recovers after a manual reconnect but never on its own, the fault is likely upstream of the gateway (a duplicate IP, or a stale ARP / connection-tracking entry on the network switch/router) rather than the comm board itself.</div>
+  <div class="info-card"><div class="info-card-label">Open device web page (gateway &amp; remote)</div>The gear icon on each <b>IP Configuration</b> row opens the comm board's own web page. On the gateway it opens directly on the plant LAN; from a <b>remote viewer</b> it is routed through the gateway automatically (the device is not reachable from the remote PC). The remote route is byte-for-byte, so the device's HTML, styles, scripts and images all render. Tailscale note: the inverter's LAN IP is <i>not</i> reachable directly over Tailscale unless a subnet router is configured &mdash; the gateway proxy is what makes the page work remotely without one.</div>
   <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
@@ -1618,7 +1732,7 @@
   <h3>Defaults &amp; Constants</h3>
   <table><thead><tr><th>Item</th><th>Value</th></tr></thead><tbody><tr><td>Default Credentials</td><td><code>admin</code> / <code>1234</code></td></tr><tr><td>Plant Name</td><td>ADSI Plant</td></tr><tr><td>Inverter Rated (Pmax) / Dependable (Pnom)</td><td>997.64 kW / 906.92 kW</td></tr><tr><td>Nodes per Inverter</td><td>4 (249.41 kW Pmax / 226.73 kW Pnom each)</td></tr><tr><td>Solar Window</td><td>5:00 AM &ndash; 6:00 PM</td></tr><tr><td>Alarm Sound Threshold</td><td>5 seconds sustained</td></tr><tr><td>Ports</td><td>3500 (Express), 9000 (FastAPI)</td></tr><tr><td>ML Features</td><td>68 columns (with tri-band)</td></tr></tbody></table>
   <h3>Page Quick Finder</h3>
-  <table><thead><tr><th>Need</th><th>Best Page</th></tr></thead><tbody><tr><td>Live status</td><td>Inverters</td></tr><tr><td>Plant output capping</td><td>Plant Cap</td></tr><tr><td>Cap schedules</td><td>Plant Cap &rarr; Scheduled Auto-Cap</td></tr><tr><td>Interval analysis</td><td>Analytics + Energy</td></tr><tr><td>Day-ahead comparison</td><td>Analytics + Export</td></tr><tr><td>Forecast setup</td><td>Forecast</td></tr><tr><td>Forecast accuracy</td><td>Forecast Performance Monitor</td></tr><tr><td>Alarm review</td><td>Alarms</td></tr><tr><td>Action traceability</td><td>Audit</td></tr><tr><td>Daily summary</td><td>Report</td></tr><tr><td>File generation</td><td>Export</td></tr><tr><td>Mode / sync</td><td>Settings &rarr; Connectivity</td></tr><tr><td>License / updates</td><td>Settings &rarr; License / Updates</td></tr><tr><td>Backup</td><td>Settings &rarr; Cloud Backup</td></tr><tr><td>Network config</td><td>IP Configuration</td></tr><tr><td>Messaging</td><td>Floating bubble</td></tr><tr><td>Live camera feed</td><td>Camera card (Dashboard)</td></tr><tr><td>Camera / go2rtc config</td><td>Camera Settings modal</td></tr></tbody></table>
+  <table><thead><tr><th>Need</th><th>Best Page</th></tr></thead><tbody><tr><td>Live status</td><td>Inverters</td></tr><tr><td>Interval analysis</td><td>Analytics + Energy</td></tr><tr><td>Day-ahead comparison</td><td>Analytics + Export</td></tr><tr><td>Forecast setup</td><td>Forecast</td></tr><tr><td>Forecast accuracy</td><td>Forecast Performance Monitor</td></tr><tr><td>Alarm review</td><td>Alarms</td></tr><tr><td>Action traceability</td><td>Audit</td></tr><tr><td>Daily summary</td><td>Report</td></tr><tr><td>File generation</td><td>Export</td></tr><tr><td>Mode / sync</td><td>Settings &rarr; Connectivity</td></tr><tr><td>License / updates</td><td>Settings &rarr; License / Updates</td></tr><tr><td>Backup</td><td>Settings &rarr; Cloud Backup</td></tr><tr><td>Network config</td><td>IP Configuration</td></tr><tr><td>Messaging</td><td>Floating bubble</td></tr><tr><td>Live camera feed</td><td>Camera card (Dashboard)</td></tr><tr><td>Camera / go2rtc config</td><td>Camera Settings modal</td></tr></tbody></table>
   <h3>Data Units</h3>
   <table><thead><tr><th>Item</th><th>Unit</th></tr></thead><tbody><tr><td>PAC / PDC</td><td>W or kW</td></tr><tr><td>Energy</td><td>MWh</td></tr><tr><td>Duration</td><td>sec / min / hrs</td></tr><tr><td>WAPE</td><td>%</td></tr></tbody></table>
   <h3>Status Terms</h3>
@@ -1632,7 +1746,7 @@
 
 <!-- FOOTER -->
 <div class="guide-footer">
-  <p><b>ADSI Inverter Dashboard</b> v2.11.7</p>
+  <p><b>ADSI Inverter Dashboard</b> v2.12.4</p>
   <p>Designed &amp; Developed by Engr. Clariden Monta&ntilde;o REE</p>
   <p>&copy; 2026 Engr. Clariden Monta&ntilde;o REE. All rights reserved.</p>
 </div>

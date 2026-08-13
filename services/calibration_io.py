@@ -34,7 +34,6 @@ from services.calibration_decoder import (
     VALID_CFG_CODE_EXPECTED,
 )
 
-
 # ─── Wire constants (shared with serial_io) ─────────────────────────────────
 
 UNLOCK_REGISTER = 0xFFFA
@@ -57,21 +56,17 @@ DEFAULT_TIMEOUT_S = 3.0
 VERIFY_TOLERANCE_PCT       = 5.0
 VERIFY_TOLERANCE_ABS_UNITS = 10
 
-
 # ─── Errors ────────────────────────────────────────────────────────────────
 
 class CalibIoError(Exception):
     """Operational failure during the calibration pipeline."""
 
-
 class CalibRangeError(CalibIoError):
     """Caller asked us to write outside the allowed offset window or with
     a value far outside the current value (range guard)."""
 
-
 class CalibPreflightError(CalibIoError):
     """Sentinel / safety preflight failed; do NOT write."""
-
 
 # ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -83,20 +78,16 @@ _FIELD_INDEX: Dict[int, Tuple[str, bool, str]] = {
 
 ALLOWED_OFFSETS = frozenset(_FIELD_INDEX.keys())   # {81..94}
 
-
 def is_writable_offset(off: int) -> bool:
     return int(off) in ALLOWED_OFFSETS
-
 
 def field_for_offset(off: int) -> Optional[str]:
     e = _FIELD_INDEX.get(int(off))
     return e[0] if e else None
 
-
 def is_signed_offset(off: int) -> bool:
     e = _FIELD_INDEX.get(int(off))
     return bool(e and e[1])
-
 
 def _u16(value: int) -> int:
     """Encode a Python int (possibly signed) as a UInt16 the wire wants."""
@@ -105,11 +96,9 @@ def _u16(value: int) -> int:
         v = (v + 0x10000) & 0xFFFF
     return v & 0xFFFF
 
-
 def _signed16(u: int) -> int:
     u = int(u) & 0xFFFF
     return u - 0x10000 if u >= 0x8000 else u
-
 
 # ─── Modbus operations (sync — caller MUST hold lock) ──────────────────────
 
@@ -125,7 +114,6 @@ def _do_unlock(client, slave: int) -> None:
     if r is None or r.isError():
         raise CalibIoError(f"unlock_modbus_error: {r}")
 
-
 def _do_write_one(client, slave: int, offset: int, value_u16: int) -> None:
     try:
         # Single-register write via FC16 (write_registers with one value)
@@ -140,7 +128,6 @@ def _do_write_one(client, slave: int, offset: int, value_u16: int) -> None:
     if r is None or r.isError():
         raise CalibIoError(f"write_modbus_error: {r}")
 
-
 def _do_write_bulk(client, slave: int, base_offset: int, values_u16: List[int]) -> None:
     try:
         r = client.write_registers(
@@ -152,7 +139,6 @@ def _do_write_bulk(client, slave: int, base_offset: int, values_u16: List[int]) 
         raise CalibIoError(f"write_bulk_exception: {exc}") from exc
     if r is None or r.isError():
         raise CalibIoError(f"write_bulk_modbus_error: {r}")
-
 
 def _do_read_block(client, slave: int, base: int, count: int) -> List[int]:
     """Read `count` UInt16s starting at `base`. Raises on Modbus failure."""
@@ -166,7 +152,6 @@ def _do_read_block(client, slave: int, base: int, count: int) -> List[int]:
     if len(regs) < count:
         raise CalibIoError(f"read_short_frame: got {len(regs)}/{count}")
     return [int(v) & 0xFFFF for v in regs]
-
 
 def _preflight(client, slave: int) -> Dict[str, object]:
     """Read offset 80 + 81-94. Returns the full read; raises if sentinel
@@ -183,7 +168,6 @@ def _preflight(client, slave: int) -> Dict[str, object]:
         "regs":      regs,
         "by_offset": {VALID_CFG_OFFSET + i: regs[i] for i in range(len(regs))},
     }
-
 
 # ─── Range guard ───────────────────────────────────────────────────────────
 
@@ -223,7 +207,6 @@ def validate_value(offset: int, new_value: int, current_value: Optional[int],
             f"(guard {max_delta_pct:.1f}%); pass `max_delta_pct=null` to force"
         )
 
-
 # ─── Public write APIs ─────────────────────────────────────────────────────
 
 @dataclass
@@ -239,7 +222,6 @@ class WriteOneResult:
     error:          Optional[str]
     sentinel_before: Optional[int]
     sentinel_after:  Optional[int]
-
 
 def write_one_with_lock(
     client,
@@ -376,7 +358,6 @@ def write_one_with_lock(
                 f"by {delta_units} units ({delta_pct:.2f} %), beyond ±{tol_units}-unit tolerance"
             )
         return out
-
 
 def write_bulk_with_lock(
     client,
@@ -532,7 +513,6 @@ def write_bulk_with_lock(
         )
         return out
 
-
 def preflight_read_with_lock(client, lock: threading.Lock, slave: int) -> dict:
     """Caller-friendly preflight: reads 80-94, returns sentinel + values."""
     out = {
@@ -562,7 +542,6 @@ def preflight_read_with_lock(client, lock: threading.Lock, slave: int) -> dict:
             out["error"] = str(exc)
         return out
 
-
 # ─── Active Power Control (APC) — Continuous %P Setpoint ────────────────────
 # Verified protocol 2026-05-04: FC16 → reg 0x03E8 (1000)
 #   opcode 0x0005 = STOP  |  0x0006 = START  |  0x0003 = SET-ACTIVE-PCT
@@ -576,12 +555,10 @@ APC_OPCODE_STOP  = 0x0005
 APC_OPCODE_START = 0x0006
 APC_Q15_MAX      = 0x7FFF
 
-
 def _q15_from_pct(pct: float) -> int:
     """Convert 0..100 % to Q15 integer (0x0000..0x7FFF). Clamps at bounds."""
     v = int(round((max(0.0, min(100.0, float(pct))) / 100.0) * APC_Q15_MAX))
     return max(0, min(APC_Q15_MAX, v))
-
 
 def _consign_apc_sync(client, lock: threading.Lock, slave: int, pct: float) -> dict:
     """Write SET-ACTIVE-PCT (opcode 0x0003) with Q15 setpoint. Blocking.
@@ -608,7 +585,6 @@ def _consign_apc_sync(client, lock: threading.Lock, slave: int, pct: float) -> d
         out["error"] = f"exception: {exc}"
         return out
 
-
 def consign_apc_with_lock(client, lock: threading.Lock, slave: int, pct: float) -> dict:
     """Write APC setpoint for reactive calibration consign @ specified percent.
 
@@ -627,7 +603,6 @@ def consign_apc_with_lock(client, lock: threading.Lock, slave: int, pct: float) 
             "error": f"percent must be 0..100, got {pct_f}",
         }
     return _consign_apc_sync(client, lock, int(slave), pct_f)
-
 
 # ─── L2 config block writes (Utility Tool tabs B/C/D/I) ──────────────────────
 # Mirrors write_one_with_lock above but operates on the broader L2 config

@@ -23,7 +23,6 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-
 # ─── Block geometry ────────────────────────────────────────────────────────
 
 # Whole config block as exported by ISM.  FC03 from offset 0, length 177.
@@ -87,13 +86,11 @@ CONTEXT_FIELDS: List[tuple] = [
 # writes MUST refuse to proceed until an operator confirms via on-site spike.
 VALID_CFG_CODE_EXPECTED = 0x1F1F
 
-
 # ─── Decoders for the typed firmware attribute helpers ─────────────────────
 
 def _signed16(u: int) -> int:
     u = int(u) & 0xFFFF
     return u - 0x10000 if u >= 0x8000 else u
-
 
 def _decode_value(raw: int, decoder: str) -> Any:
     """Map ISM HR_*Attribute decorations onto Python primitives.
@@ -118,7 +115,6 @@ def _decode_value(raw: int, decoder: str) -> Any:
         return u * 10
     raise ValueError(f"unknown decoder: {decoder}")
 
-
 # ─── Pure decode ───────────────────────────────────────────────────────────
 
 @dataclass
@@ -131,7 +127,6 @@ class CalibrationField:
     signed:    int
     is_signed: bool
     desc:      str
-
 
 def decode_calibration_block(regs: List[int],
                              base_offset: int = CALIBRATION_BLOCK_BASE) -> Dict[str, Any]:
@@ -168,7 +163,6 @@ def decode_calibration_block(regs: List[int],
         "valid_cfg_code_ok":   valid_cfg_raw == VALID_CFG_CODE_EXPECTED,
         "incomplete":          incomplete,
     }
-
 
 # ─── Full grouped settings (Utility Tool read-only tabs) ───────────────────
 #
@@ -207,7 +201,6 @@ _BOOL_ENUM_PATTERNS = [
     (re.compile(r"^eDeshabilitado(\d)Habilitado(\d)$"),    ("disabled", "ENABLED")),
 ]
 
-
 def _decode_enum_bit(enum_name: Optional[str], bit_val: int) -> str:
     if enum_name and enum_name in _CURATED_ENUMS:
         return _CURATED_ENUMS[enum_name].get(bit_val, str(bit_val))
@@ -232,7 +225,6 @@ def _decode_enum_bit(enum_name: Optional[str], bit_val: int) -> str:
         if m:
             return "disabled" if bit_val == int(m.group(1)) else "ENABLED"
     return str(bit_val)
-
 
 def _decode_one(regs: List[int], f: Dict[str, Any]) -> Dict[str, Any]:
     off = int(f["offset"])
@@ -288,7 +280,6 @@ def _decode_one(regs: List[int], f: Dict[str, Any]) -> Dict[str, Any]:
         "writable": False,
     }
 
-
 def decode_full_settings(regs: List[int]) -> Dict[str, Any]:
     """Decode the full categorized settings map for the Utility Tool tabs.
 
@@ -307,7 +298,6 @@ def decode_full_settings(regs: List[int]) -> Dict[str, Any]:
         "group_titles": dict(getattr(_cfg_map, "GROUP_TITLES", {})),
         "groups": groups,
     }
-
 
 def decode_config_block(regs: List[int]) -> Dict[str, Any]:
     """Decode the full 177-register config block when the caller requests it.
@@ -354,7 +344,6 @@ def decode_config_block(regs: List[int]) -> Dict[str, Any]:
         "full":       decode_full_settings(regs),
         "block_len":   n,
     }
-
 
 # ─── Convenience: fleet-wide aggregation helper (Node-side will call this) ─
 

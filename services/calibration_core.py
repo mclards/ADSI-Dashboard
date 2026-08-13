@@ -23,7 +23,6 @@ from services import calibration_decoder as _calib_dec
 _CALIB_READ_BASE  = _calib_dec.CALIBRATION_BLOCK_BASE   # 80
 _CALIB_READ_COUNT = _calib_dec.CALIBRATION_BLOCK_LEN    # 15
 
-
 # ─── Core sync functions (blocking, Modbus client injected) ────────────────
 
 def _read_calibration_block_sync(client, lock, slave: int,
@@ -47,7 +46,6 @@ def _read_calibration_block_sync(client, lock, slave: int,
         return {"ok": True, "regs": regs, "base": base, "count": count}
     except Exception as exc:
         return {"ok": False, "error": f"exception: {exc}"}
-
 
 def _read_live_for_calibration_sync(client, lock, slave: int) -> dict:
     """Read the input registers that pair with each calibration scale factor.

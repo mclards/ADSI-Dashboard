@@ -19,7 +19,6 @@ import unittest
 
 from services import firmware_buslock as bl
 
-
 class FirmwareBusLockTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.mkdtemp(prefix="fwlock-test-")
@@ -94,7 +93,6 @@ class FirmwareBusLockTest(unittest.TestCase):
         self.assertEqual(bl.filter_active(None, now), [])
         self.assertEqual(bl.filter_active({"claims": "x"}, now), [])
         self.assertEqual(bl.filter_active({}, now), [])
-
 
 if __name__ == "__main__":
     unittest.main()

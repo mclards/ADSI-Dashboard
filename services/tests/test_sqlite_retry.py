@@ -29,11 +29,9 @@ if str(_REPO_ROOT) not in sys.path:
 
 from services import forecast_engine as fe  # noqa: E402
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # S4 (docstring-locked for future P2): _is_retryable_sqlite_error coverage
 # ─────────────────────────────────────────────────────────────────────────────
-
 
 class TestIsRetryableSqliteError:
     """Current behavior of the retry classifier (locks in present state so a
@@ -100,11 +98,9 @@ class TestIsRetryableSqliteError:
             sqlite3.OperationalError("no such column: spread_pct_cap_locked")
         )
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # S1: _persist_qa_comparison retry loop
 # ─────────────────────────────────────────────────────────────────────────────
-
 
 @pytest.fixture
 def temp_db(tmp_path, monkeypatch):
@@ -136,7 +132,6 @@ def temp_db(tmp_path, monkeypatch):
     monkeypatch.setattr(fe, "APP_DB_FILE", db_path)
     return db_path
 
-
 class TestPersistQaComparisonRetry:
     """S1 regression: transient lock on first attempt retries and succeeds."""
 
@@ -152,7 +147,6 @@ class TestPersistQaComparisonRetry:
         assert fe.SQLITE_RETRY_BACKOFF_SEC > 0, \
             "backoff must be positive"
 
-
 class TestWriteForecastRunAuditRetry:
     """S2 regression: transient lock on first attempt retries and succeeds."""
 
@@ -166,7 +160,6 @@ class TestWriteForecastRunAuditRetry:
             "_write_forecast_run_audit_from_python missing retry classifier"
         assert "_sleep_sqlite_retry" in src, \
             "_write_forecast_run_audit_from_python missing backoff sleep"
-
 
 class TestPersistQaComparisonRetryLoopPresence:
     """S1 static check: the retry loop is structurally present."""
@@ -183,11 +176,9 @@ class TestPersistQaComparisonRetryLoopPresence:
         # Verify the success-path return exists so the retry loop terminates
         assert "# v2.8 S1:" in src
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # M2: write connections set synchronous = NORMAL
 # ─────────────────────────────────────────────────────────────────────────────
-
 
 class TestSleepSqliteRetry:
     """v2.8 O1: exponential backoff with 2.0s cap."""
@@ -226,7 +217,6 @@ class TestSleepSqliteRetry:
         monkeypatch.setattr("time.sleep", lambda s: captured.append(s))
         fe._sleep_sqlite_retry(0)
         assert captured == [0.35]
-
 
 class TestOpenSqlitePragmaTuning:
     """Lock in the pragma state of readonly vs write connections (E7 + M2)."""

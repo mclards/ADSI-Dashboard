@@ -32,12 +32,10 @@ import os
 import re
 import unittest
 
-
 def _read_source(path):
     """Read a Python source file as text."""
     with open(path, "r", encoding="utf-8") as fh:
         return fh.read()
-
 
 def _extract_function_body(source, func_name):
     """
@@ -68,7 +66,6 @@ def _extract_function_body(source, func_name):
         end_idx = len(source)
 
     return source[start_idx:end_idx]
-
 
 class PollFirmwareGuardOrderTest(unittest.TestCase):
     """Ensure firmware_flash_active guard appears before detect_units_async."""
@@ -148,7 +145,6 @@ class PollFirmwareGuardOrderTest(unittest.TestCase):
             f"to prevent unguarded probe collision on cold-start with active flash; "
             f"if someone moved the outer guard inside the inner loop, collision is possible",
         )
-
 
 if __name__ == "__main__":
     unittest.main()

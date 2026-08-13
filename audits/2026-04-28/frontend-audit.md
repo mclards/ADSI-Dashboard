@@ -1,8 +1,8 @@
 # Frontend Audit — 2026-04-28
 
-**Auditor:** Claude Code (read-only audit)  
-**Scope:** `public/js/app.js` (22,237 lines), `public/index.html`, `public/css/style.css`  
-**Status:** READ-ONLY — no edits applied  
+**Auditor:** Claude Code (read-only audit)
+**Scope:** `public/js/app.js` (22,237 lines), `public/index.html`, `public/css/style.css`
+**Status:** READ-ONLY — no edits applied
 **Date:** 2026-04-28
 
 ---
@@ -10,8 +10,8 @@
 ## Critical
 
 ### 1. Inverter Clock Section First-Open Freeze — Root Cause Found
-**Location:** `public/js/app.js:19747-19749`  
-**Severity:** CRITICAL (UX freeze on first tab open)  
+**Location:** `public/js/app.js:19747-19749`
+**Severity:** CRITICAL (UX freeze on first tab open)
 
 ```javascript
 // Line 19747-19749 in initInverterClockSection():
@@ -41,8 +41,8 @@ invClockRefreshLog();        // ← async, not awaited
 ## High
 
 ### 2. Three XSS Vulnerabilities — Unescaped Error Messages in innerHTML
-**Locations:** Lines 19922, 20102, 20878  
-**Severity:** HIGH (low CVSS, operator-only context)  
+**Locations:** Lines 19922, 20102, 20878
+**Severity:** HIGH (low CVSS, operator-only context)
 
 ```javascript
 // Line 19922 - Stop Reasons page:
@@ -67,8 +67,8 @@ host.innerHTML = `<div class="srn-empty">Failed to load: ${escapeHtml(String(err
 ---
 
 ### 3. Missing `await` on Async Operations in StopReasons Init
-**Location:** Line 19841 (in `initStopReasonsSection`)  
-**Severity:** HIGH (same pattern as clock freeze, different symptom)  
+**Location:** Line 19841 (in `initStopReasonsSection`)
+**Severity:** HIGH (same pattern as clock freeze, different symptom)
 
 ```javascript
 // Line 19838-19841:
@@ -86,8 +86,8 @@ if (picker.options.length > 0 && !StopReasonsUI.selectedInverter) {
 ---
 
 ### 4. Missing Escape in PAC Unit Convention — Inconsistent Formatting
-**Location:** Multiple places, esp. lines 9836, 10036, 10184  
-**Severity:** HIGH (data correctness)  
+**Location:** Multiple places, esp. lines 9836, 10036, 10184
+**Severity:** HIGH (data correctness)
 
 **Background:** Memory `project_pac_units_convention` states: `parsed.pac` / `frame.pac` is in **WATTS** after `poller.parseRow:596`. Every downstream consumer must NOT re-multiply.
 
@@ -109,8 +109,8 @@ pacEl.textContent = (pac / 1000).toFixed(2);
 ## Medium
 
 ### 5. Fire-and-Forget Promises in Event Handlers (Intentional Pattern, but Risky)
-**Locations:** Lines 12718–12719 (sync-clock handler), line 19720 (clock refresh), multiple others  
-**Severity:** MEDIUM (pattern issue, not a bug)  
+**Locations:** Lines 12718–12719 (sync-clock handler), line 19720 (clock refresh), multiple others
+**Severity:** MEDIUM (pattern issue, not a bug)
 
 ```javascript
 // Line 12718-12720:
@@ -132,8 +132,8 @@ invClockRefreshUnits().catch(err => {
 ---
 
 ### 6. Duplicate Class Definitions in CSS
-**Locations:** `public/css/style.css` — 20+ duplicate class selectors found  
-**Severity:** MEDIUM (maintenance hazard)  
+**Locations:** `public/css/style.css` — 20+ duplicate class selectors found
+**Severity:** MEDIUM (maintenance hazard)
 
 **Examples:**
 - `.card-table` defined 2×
@@ -148,8 +148,8 @@ invClockRefreshUnits().catch(err => {
 ---
 
 ### 7. Stale Event Listener Attachment Pattern in initInverterClockSection
-**Location:** Lines 19731–19735  
-**Severity:** MEDIUM (potential memory leak if called multiple times)  
+**Location:** Lines 19731–19735
+**Severity:** MEDIUM (potential memory leak if called multiple times)
 
 ```javascript
 if (!InvClock.inited) {
@@ -168,9 +168,9 @@ if (!InvClock.inited) {
 ## Low / Dirty Code
 
 ### 8. Console.warn Statements (Expected, but 89 instances)
-**Location:** Scattered throughout `app.js`  
-**Count:** 89 `console.warn` / `console.error` / `console.info` calls  
-**Severity:** LOW (informational, not a bug)  
+**Location:** Scattered throughout `app.js`
+**Count:** 89 `console.warn` / `console.error` / `console.info` calls
+**Severity:** LOW (informational, not a bug)
 
 **Sample:**
 - Line 1134: `console.warn("[app] license check failed:", err.message)`
@@ -181,8 +181,8 @@ if (!InvClock.inited) {
 ---
 
 ### 9. Missing Null Checks on Optional Elements
-**Locations:** Lines 19806–19809, 20455, similar patterns  
-**Severity:** LOW (defensive programming, not a bug)  
+**Locations:** Lines 19806–19809, 20455, similar patterns
+**Severity:** LOW (defensive programming, not a bug)
 
 ```javascript
 const picker = document.getElementById("srnInverterPicker");
@@ -196,8 +196,8 @@ if (!picker || !refreshBtn || !histBtn) return;
 ---
 
 ### 10. Settings Read-Only Reference (Not a Bug, Cosmetic)
-**Location:** Lines 19303–19312, repeated in loadSettings()  
-**Severity:** LOW (code duplication)  
+**Location:** Lines 19303–19312, repeated in loadSettings()
+**Severity:** LOW (code duplication)
 
 The `inverterClockAutoSyncEnabled`, `inverterClockAutoSyncAt`, `inverterClockDriftThresholdS` settings are read twice:
 1. In `invClockLoadSettings()` (line 19303+)
@@ -221,7 +221,7 @@ The Inverter Clocks first-open freeze is caused by **synchronous DOM manipulatio
 **Other Performance Observations:**
 
 ### 11. querySelectorAll in Loops (27 instances found)
-**Severity:** LOW–MEDIUM (context-dependent)  
+**Severity:** LOW–MEDIUM (context-dependent)
 
 Examples:
 - Line 4418: `nav.querySelectorAll(".nav-btn").forEach(...)`

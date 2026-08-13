@@ -7,11 +7,9 @@ from datetime import date, datetime, time, timedelta, timezone
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from services.forecast_engine import APP_DB_FILE, _open_sqlite, forecast_qa
 
-
 def _epoch_ms_noon_utc(day_value: date) -> int:
     dt = datetime.combine(day_value, time(12, 0), tzinfo=timezone.utc)
     return int(dt.timestamp() * 1000)
-
 
 def _ensure_learning_audit_rows(days_to_backfill: int, dry_run: bool) -> None:
     today = date.today()
@@ -64,7 +62,6 @@ def _ensure_learning_audit_rows(days_to_backfill: int, dry_run: bool) -> None:
         if not dry_run:
             conn.commit()
 
-
 def _run_qa_backfill(days_to_backfill: int, dry_run: bool) -> None:
     if dry_run:
         print("[dry-run] Skipping forecast_qa execution.")
@@ -82,7 +79,6 @@ def _run_qa_backfill(days_to_backfill: int, dry_run: bool) -> None:
             forecast_qa(qa_input_date)
         except Exception as e:
             print(f"Error evaluating {target_str}: {e}")
-
 
 def _print_latest_comparison(limit: int = 5) -> None:
     print("\nLatest forecast_error_compare_daily rows:")
@@ -111,7 +107,6 @@ def _print_latest_comparison(limit: int = 5) -> None:
             f"| variant={str(r[2] or ''):<22} | FC={fc:.1f} | ACT={act:.1f} | WAPE={wape:.1f}%"
         )
 
-
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Backfill forecast comparison history by creating missing learning audit rows and rerunning forecast_qa."
@@ -126,7 +121,6 @@ def main() -> int:
     _run_qa_backfill(days_to_backfill, bool(args.dry_run))
     _print_latest_comparison(5)
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

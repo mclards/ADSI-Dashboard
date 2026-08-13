@@ -10,10 +10,8 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "services" / "inverter_engine.py"
-
 
 def _extract(fn_name, src):
     marker = f"def {fn_name}("
@@ -30,14 +28,12 @@ def _extract(fn_name, src):
         buf.append(line)
     return "".join(buf)
 
-
 def _load_helpers():
     src = MODULE_PATH.read_text(encoding="utf-8")
     ns = {}
     exec("from datetime import datetime, timedelta", ns)
     exec(_extract("_check_bulk_auth", src), ns)
     return ns
-
 
 class BulkAuthTests(unittest.TestCase):
     @classmethod
@@ -76,7 +72,6 @@ class BulkAuthTests(unittest.TestCase):
     def test_bearer_prefix_ok(self):
         now = datetime.now()
         self.assertTrue(self.ns["_check_bulk_auth"](f"Bearer adsi{now.minute:02d}"))
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -2256,9 +2256,22 @@ const stmts = {
   clearAlarm: db.prepare(
     `UPDATE alarms SET cleared_ts=? WHERE inverter=? AND unit=? AND cleared_ts IS NULL`,
   ),
-  ackAlarm: db.prepare(`UPDATE alarms SET acknowledged=1 WHERE id=?`),
+  getMaxAlarmUpdatedTs: db.prepare(
+    `SELECT COALESCE(MAX(updated_ts), 0) AS updated_ts FROM alarms`,
+  ),
+  // ACK mutations carry an explicit, monotonically increasing replication
+  // timestamp.  The generic UPDATE trigger remains a safety net, while this
+  // stamp guarantees an ACK cannot share the remote cursor's millisecond and
+  // disappear from a later incremental gateway/standby merge.
+  ackAlarm: db.prepare(
+    `UPDATE alarms
+        SET acknowledged=1, updated_ts=?
+      WHERE id=? AND acknowledged=0`,
+  ),
   // Keep semantics aligned with per-row ACK: acknowledge every unacked alarm row.
-  ackAllAlarms: db.prepare(`UPDATE alarms SET acknowledged=1 WHERE acknowledged=0`),
+  ackAllAlarms: db.prepare(
+    `UPDATE alarms SET acknowledged=1, updated_ts=? WHERE acknowledged=0`,
+  ),
   getSetting: db.prepare(`SELECT value FROM settings WHERE key=?`),
   setSetting: db.prepare(
     `INSERT INTO settings(key,value,updated_ts) VALUES(?,?,?)
@@ -6049,7 +6062,6 @@ function findStopReasonByAlarmIdArchiveAware(alarmId) {
   }
   return null;
 }
-
 
 async function pruneOldData(options = {}) {
   const opts =

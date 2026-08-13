@@ -53,7 +53,6 @@ except Exception as exc:
     print("        Install it with: pip install \"pymodbus<3\"", file=sys.stderr)
     sys.exit(2)
 
-
 # ───────────────────────────────────────────────────────────────
 # Constants
 # ───────────────────────────────────────────────────────────────
@@ -67,7 +66,6 @@ PRIMARY_READ_COUNT = 26              # same as production — covers Etotal@0-1,
 PAC_MAX_DT_S = 30.0                   # same cap as production engine
 PAC_SCALE = 10.0                      # production engine multiplies reg(18) by 10 → Watts
 PAC_CLAMP_W = 260_000                 # same cap as production engine
-
 
 # ───────────────────────────────────────────────────────────────
 # ipconfig loader (simple file-based; NOT using the dashboard DB)
@@ -94,7 +92,6 @@ def find_ipconfig(explicit: Optional[str]) -> Path:
         "Could not locate ipconfig.json. Pass --ipconfig <path> explicitly."
     )
 
-
 def load_ipconfig(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
@@ -119,7 +116,6 @@ def load_ipconfig(path: Path) -> dict:
         plan.append((inv_num, str(ip), unit_nums))
     plan.sort(key=lambda r: r[0])
     return {"plan": plan, "source": str(path)}
-
 
 # ───────────────────────────────────────────────────────────────
 # Per-(inv,unit) PAC integrator — mirrors services/inverter_engine.py
@@ -170,7 +166,6 @@ class PacIntegrator:
             "pac_w": pac_w,
             "date": pe["date"],
         }
-
 
 # ───────────────────────────────────────────────────────────────
 # Per-inverter thread: connect once, poll all units on a cadence
@@ -356,7 +351,6 @@ class InverterPoller(threading.Thread):
 
         self._close(client)
 
-
 # ───────────────────────────────────────────────────────────────
 # Writer thread: drains the queue into JSONL + logs progress
 # ───────────────────────────────────────────────────────────────
@@ -399,7 +393,6 @@ class JsonlWriter(threading.Thread):
                     # Never die on write errors — just log to stderr.
                     print(f"[WRITER] write error: {exc}", file=sys.stderr)
 
-
 # ───────────────────────────────────────────────────────────────
 # Periodic progress printer
 # ───────────────────────────────────────────────────────────────
@@ -416,7 +409,6 @@ def print_progress(start_ms: int, deadline_ms: int, pollers: list[InverterPoller
         f"samples_written={writer.samples}  polls_ok={ok}  polls_fail={fail}",
         flush=True,
     )
-
 
 # ───────────────────────────────────────────────────────────────
 # Entry point
@@ -528,7 +520,6 @@ def main() -> int:
     print(f"  polls ok: {ok}   fail: {fail}")
     print(f"  output: {out_path}")
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -25,11 +25,9 @@ import os
 import re
 import unittest
 
-
 def _read_source(path):
     with open(path, "r", encoding="utf-8") as fh:
         return fh.read()
-
 
 class CalibratorFlashRouteGuardTest(unittest.TestCase):
     @classmethod
@@ -87,7 +85,6 @@ class CalibratorFlashRouteGuardTest(unittest.TestCase):
             "the /firmware/flash starter must NOT be guarded by "
             "_fw_flash_in_progress() — it would deadlock flashing entirely",
         )
-
 
 if __name__ == "__main__":
     unittest.main()

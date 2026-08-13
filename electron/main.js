@@ -397,7 +397,7 @@ function makeSafeConsoleWriter(method) {
       }
     }
   };
-  
+
 }
 
 console.log = makeSafeConsoleWriter("log");
@@ -595,6 +595,10 @@ let loginWin = null;
 let topologyWin = null;
 let globalConfigWin = null;
 let calibratorWin = null;
+let hikvisionNativeViewerWin = null;
+let hikvisionNativeViewerRequester = null;
+let hikvisionNativeViewerClosing = false;
+let allowHikvisionNativeViewerClose = false;
 // Pop-out windows: keyed by page name (analytics, alarms, forecast, igbt-health).
 // Using a Map prevents duplicate windows and allows focus-on-reclick.
 const popoutWindows = new Map();
@@ -1808,6 +1812,7 @@ async function shutdownChildWebServerGracefully(proc) {
 async function stopRuntimeServices(reason = "application shutdown") {
   isAppShuttingDown = true;
   allowMainWindowClose = true;
+  try { await closeHikvisionNativeViewer({ reason }); } catch (_) {}
   try { await hikvisionNativePlayer.stop(); } catch (_) {}
   // Destroy any open pop-out windows gracefully before tearing down services.
   for (const [, win] of popoutWindows) {
@@ -5732,17 +5737,133 @@ function getHikvisionNativeConfig() {
   return manager.loadLocalConfigFallback() || manager.defaults();
 }
 
-ipcMain.handle("hikvision-native-start", async (event, rect) => {
+function getTrustedHikvisionOwner(event) {
   const owner = BrowserWindow.fromWebContents(event.sender);
+  const frameUrl = String(event.senderFrame?.url || event.sender.getURL() || "");
+  if (!owner || owner.isDestroyed() || !frameUrl.startsWith(`${SERVER_URL}/`)) {
+    throw new Error("Untrusted Hikvision native player request");
+  }
+  return owner;
+}
+
+function notifyHikvisionNativeViewerRequester(channel) {
+  const requester = hikvisionNativeViewerRequester;
+  if (!requester || requester.isDestroyed()) return;
+  try { requester.send(channel); } catch (_) {}
+}
+
+async function closeHikvisionNativeViewer(options = {}) {
+  const win = hikvisionNativeViewerWin;
+  if (!win || win.isDestroyed()) return { ok: true, already: true };
+  if (hikvisionNativeViewerClosing) return { ok: true, closing: true };
+  hikvisionNativeViewerClosing = true;
+  try {
+    await hikvisionNativePlayer.stop(win).catch(() => {});
+  } finally {
+    allowHikvisionNativeViewerClose = true;
+    try { if (!win.isDestroyed()) win.destroy(); } catch (_) {}
+    allowHikvisionNativeViewerClose = false;
+  }
+  return { ok: true, reason: String(options.reason || "closed") };
+}
+
+function openHikvisionNativeViewer(requester, theme = "dark") {
+  if (hikvisionNativeViewerWin && !hikvisionNativeViewerWin.isDestroyed()) {
+    focusWindow(hikvisionNativeViewerWin);
+    return { ok: true, already: true };
+  }
+
+  const safeTheme = ["dark", "light", "classic", "midnight"].includes(String(theme || "").trim())
+    ? String(theme).trim()
+    : "dark";
+  const win = new BrowserWindow({
+    width: 1280,
+    height: 820,
+    minWidth: 900,
+    minHeight: 600,
+    icon: APP_ICON,
+    title: "ADSI \u2013 Hikvision Native Viewer",
+    frame: true,
+    autoHideMenuBar: true,
+    backgroundColor: "#000000",
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      nodeIntegration: false,
+      contextIsolation: true,
+      webSecurity: true,
+    },
+  });
+  hikvisionNativeViewerWin = win;
+  hikvisionNativeViewerRequester = requester.webContents;
+  hikvisionNativeViewerClosing = false;
+  allowHikvisionNativeViewerClose = false;
+
+  const onRequesterClosed = () => {
+    closeHikvisionNativeViewer({ reason: "requester-closed" }).catch(() => {});
+  };
+  requester.once("closed", onRequesterClosed);
+
+  win.setMenuBarVisibility(false);
+  win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  win.webContents.on("will-navigate", (event, url) => {
+    const allowed = `${SERVER_URL}/hikvision-native-viewer.html`;
+    if (!String(url || "").startsWith(allowed)) event.preventDefault();
+  });
+  win.on("close", (event) => {
+    if (allowHikvisionNativeViewerClose || isAppShuttingDown) return;
+    event.preventDefault();
+    closeHikvisionNativeViewer({ reason: "window-close" }).catch(() => {});
+  });
+  win.on("closed", () => {
+    try { requester.removeListener("closed", onRequesterClosed); } catch (_) {}
+    if (hikvisionNativeViewerWin === win) hikvisionNativeViewerWin = null;
+    hikvisionNativeViewerClosing = false;
+    allowHikvisionNativeViewerClose = false;
+    if (!isAppShuttingDown) notifyHikvisionNativeViewerRequester("hikvision-native-viewer-closed");
+    hikvisionNativeViewerRequester = null;
+  });
+  win.webContents.on("render-process-gone", () => {
+    closeHikvisionNativeViewer({ reason: "renderer-gone" }).catch(() => {});
+  });
+  win.once("ready-to-show", () => {
+    if (!win.isDestroyed()) {
+      focusWindow(win);
+    }
+  });
+
+  notifyHikvisionNativeViewerRequester("hikvision-native-viewer-opened");
+  const url = `${SERVER_URL}/hikvision-native-viewer.html?theme=${encodeURIComponent(safeTheme)}`;
+  win.loadURL(url).catch((err) => {
+    console.error("[hikvision] native viewer load failed:", err.message);
+    closeHikvisionNativeViewer({ reason: "load-failed" }).catch(() => {});
+  });
+  return { ok: true };
+}
+
+ipcMain.handle("hikvision-native-viewer-open", (event, { theme } = {}) => {
+  const requester = getTrustedHikvisionOwner(event);
+  return openHikvisionNativeViewer(requester, theme);
+});
+ipcMain.handle("hikvision-native-viewer-status", (event) => {
+  const requester = getTrustedHikvisionOwner(event);
+  return {
+    open: Boolean(hikvisionNativeViewerWin && !hikvisionNativeViewerWin.isDestroyed()),
+    requester: Boolean(hikvisionNativeViewerRequester && hikvisionNativeViewerRequester.id === requester.webContents.id),
+  };
+});
+
+ipcMain.handle("hikvision-native-start", async (event, rect) => {
+  const owner = getTrustedHikvisionOwner(event);
   return hikvisionNativePlayer.start(owner, getHikvisionNativeConfig(), rect);
 });
 ipcMain.handle("hikvision-native-update", async (event, rect) => {
-  const owner = BrowserWindow.fromWebContents(event.sender);
+  const owner = getTrustedHikvisionOwner(event);
   return hikvisionNativePlayer.update(owner, rect);
 });
-ipcMain.handle("hikvision-native-stop", () => hikvisionNativePlayer.stop());
-ipcMain.handle("hikvision-native-hide", () => hikvisionNativePlayer.hide());
-ipcMain.handle("hikvision-native-show", () => hikvisionNativePlayer.show());
+ipcMain.handle("hikvision-native-stop", (event) => hikvisionNativePlayer.stop(getTrustedHikvisionOwner(event)));
+ipcMain.handle("hikvision-native-hide", (event) => hikvisionNativePlayer.hide(getTrustedHikvisionOwner(event)));
+ipcMain.handle("hikvision-native-show", (event) => hikvisionNativePlayer.show(getTrustedHikvisionOwner(event)));
 ipcMain.handle("hikvision-native-status", () => hikvisionNativePlayer.status());
 
 ipcMain.on("show-nav-context-menu", (event, { page, theme }) => {

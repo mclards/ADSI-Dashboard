@@ -1,4 +1,4 @@
-# ADSI Dashboard — Comprehensive Bug Sweep v2.8.8
+# ADSI Dashboard ï¿½ Comprehensive Bug Sweep v2.8.8
 
 Date: 2026-04-14
 Baseline: v2.8.7
@@ -6,72 +6,72 @@ Status: 30 total findings across Node/Express, Electron, and validation
 
 ---
 
-## Track 1 — Node/Express Core (10 findings)
+## Track 1 ï¿½ Node/Express Core (10 findings)
 
-### CRITICAL T1.1 — SQL injection in replication merge
+### CRITICAL T1.1 ï¿½ SQL injection in replication merge
 - File: server/index.js:2664-2667
 - Symptom: Malicious tableName in replication payload executes arbitrary SQL
 - Root: String interpolation without validation
 - Fix: Whitelist allowed replication tables before SQL generation
 - Risk: Data corruption; violates priority #2
 
-### CRITICAL T1.2 — Event loop blocking in exportAlarms/Audit  
+### CRITICAL T1.2 ï¿½ Event loop blocking in exportAlarms/Audit
 - File: server/exporter.js:1362-1364, 1614-1616
 - Symptom: 366-day exports block event loop, drop poll data
 - Root: .all() queries without yieldToEventLoop()
 - Fix: Add await yieldToEventLoop() before each query
 - Risk: Silent data loss; BLOCKS v2.8.8 (v2.8.7 regression)
 
-### HIGH T1.3 — Type coercion: loose != instead of strict !==
+### HIGH T1.3 ï¿½ Type coercion: loose != instead of strict !==
 - File: server/db.js:1797-1804
 - Symptom: Forecast values of 0 coerced to null
 - Root: JavaScript != coercion on falsy values
 - Fix: Replace != with !==, use nullish coalescing ??
 - Risk: Forecast corruption; WESM FAS audit failures
 
-### HIGH T1.4 — Unhandled rejection in pressure-retry
+### HIGH T1.4 ï¿½ Unhandled rejection in pressure-retry
 - File: server/poller.js:830
 - Symptom: Async error in setTimeout callback silently swallowed
 - Root: No error handling on flushPersistBacklog() call
 - Fix: Add try-catch or .catch() with logging
 - Risk: Energy backlog stalls; data loss
 
-### HIGH T1.5 — Missing AbortController cleanup in concurrent calls
+### HIGH T1.5 ï¿½ Missing AbortController cleanup in concurrent calls
 - File: server/index.js:6399, 6271-6500
 - Symptom: Concurrent fetches leak resources (no cleanup of prior abort controller)
 - Root: Module-level controller overwritten without abort
 - Fix: Abort before reassigning; null after use
 - Risk: Resource leak; remote mode instability
 
-### HIGH T1.6 — Race in reconnect timer without cancellation
+### HIGH T1.6 ï¿½ Race in reconnect timer without cancellation
 - File: server/index.js:6151-6154
 - Symptom: Multiple reconnect calls cause 50+ concurrent attempts
 - Root: Each call registers new timer, no prior cancellation
 - Fix: Track timeout ID, cancel before new schedule
 - Risk: Connection storms; bridge instability
 
-### MEDIUM T1.7 — Prepared statement cache eviction without .free()
+### MEDIUM T1.7 ï¿½ Prepared statement cache eviction without .free()
 - File: server/index.js:2512-2522
 - Symptom: Evicted statements not finalized, memory accumulates
 - Root: FIFO eviction removes from Map but doesn't call .free()
 - Fix: Call .free() on evicted statement
 - Risk: Memory leak; prepared statement exhaustion
 
-### MEDIUM T1.8 — Energy backlog retry counter never resets
+### MEDIUM T1.8 ï¿½ Energy backlog retry counter never resets
 - File: server/poller.js:825-834
 - Symptom: Successful retry doesn't reset counter, causes long delays next time
 - Root: Counter incremented on retry, never reset on success
 - Fix: Reset to 0 when flush succeeds
 - Risk: Suboptimal recovery; slow response to backlog
 
-### MEDIUM T1.9 — Missing error context in db.transaction()
+### MEDIUM T1.9 ï¿½ Missing error context in db.transaction()
 - File: server/db.js:1710-1752
 - Symptom: Transaction failure loses batch without logging failed row
 - Root: No error context preservation
 - Fix: Attach failedRowIndex and failedRowData to error
 - Risk: Silent data loss; poor diagnostics
 
-### LOW T1.10 — Inconsistent error handling in cloud backup/token
+### LOW T1.10 ï¿½ Inconsistent error handling in cloud backup/token
 - File: server/tokenStore.js, server/cloudBackup.js
 - Symptom: OAuth failures don't trigger fallback, backup silently disabled
 - Root: Inconsistent error handling across async
@@ -80,93 +80,93 @@ Status: 30 total findings across Node/Express, Electron, and validation
 
 ---
 
-## Track 6 — Electron + Build (15 findings)
+## Track 6 ï¿½ Electron + Build (15 findings)
 
-### CRITICAL T6.1 — No single-instance lock
+### CRITICAL T6.1 ï¿½ No single-instance lock
 - File: electron/main.js:1451
 - Symptom: Multiple instances run simultaneously
 - Fix: Add app.requestSingleInstanceLock()
 - Risk: Data corruption, port collisions
 
-### CRITICAL T6.2 — URL injection in open-ip handler
+### CRITICAL T6.2 ï¿½ URL injection in open-ip handler
 - File: electron/main.js:4566-4587
 - Symptom: User-controlled IP passed to loadURL without scheme validation
 - Fix: Validate only http:// and https://
 - Risk: Arbitrary file read, code execution
 
-### CRITICAL T6.3 — autoUpdater signature verification bypassed
+### CRITICAL T6.3 ï¿½ autoUpdater signature verification bypassed
 - File: electron/main.js:633-642
 - Symptom: verifyUpdateCodeSignature overridden
 - Fix: Document SHA-512 in latest.yml as trust anchor
 - Risk: Malicious asset substitution
 
-### CRITICAL T6.4 — Missing spawn listener on backend
+### CRITICAL T6.4 ï¿½ Missing spawn listener on backend
 - File: electron/main.js:3278-3303
 - Symptom: App hangs on spawn failure
 - Fix: Add spawn listener and restart scheduling
 - Risk: Silent startup failure
 
-### CRITICAL T6.5 — shell.openExternal without URL validation
+### CRITICAL T6.5 ï¿½ shell.openExternal without URL validation
 - File: electron/main.js:3614-3616
 - Symptom: setWindowOpenHandler passes unsanitized URL
 - Fix: Validate only http: and https:
 - Risk: Local file access, JavaScript execution
 
-### CRITICAL T6.6 — Version mismatch in docs
+### CRITICAL T6.6 ï¿½ Version mismatch in docs
 - File: package.json, SKILL.md, CLAUDE.md
 - Symptom: package.json=2.8.7, SKILL.md=2.8.6
 - Fix: Update SKILL.md to 2.8.7
 - Risk: Documentation inconsistency
 
-### HIGH T6.7 — No unhandledRejection handler
+### HIGH T6.7 ï¿½ No unhandledRejection handler
 - File: electron/main.js:60-70
 - Symptom: Promise rejections crash silently
 - Fix: Add process.on('unhandledRejection')
 - Risk: Mysterious crashes
 
-### HIGH T6.8 — Storage migration not atomic
+### HIGH T6.8 ï¿½ Storage migration not atomic
 - File: electron/storageConsolidationMigration.js:142-225
 - Symptom: Crash mid-migration forces re-run
 - Fix: Optimize with partial progress tracking (safe as-is)
 - Risk: Slow startup (harmless)
 
-### HIGH T6.9 — Backend not restarted on unexpected exit
+### HIGH T6.9 ï¿½ Backend not restarted on unexpected exit
 - File: electron/main.js:3294-3303
 - Symptom: backendProc.on(exit) logs only, no restart
 - Fix: Add restart scheduling
 - Risk: App hangs
 
-### HIGH T6.10 — OAuth authUrl not validated
+### HIGH T6.10 ï¿½ OAuth authUrl not validated
 - File: electron/main.js:4601-4625
 - Symptom: ipcMain.handle accepts all schemes
 - Fix: Whitelist only http: and https:
 - Risk: Credential harvesting
 
-### HIGH T6.11 — pick-folder allows any directory
+### HIGH T6.11 ï¿½ pick-folder allows any directory
 - File: electron/main.js:4276-4288
 - Symptom: No directory sandboxing
 - Fix: Add defaultPath: app.getPath('documents')
 - Risk: User confusion
 
-### MEDIUM T6.12 — File dialog may return relative paths
+### MEDIUM T6.12 ï¿½ File dialog may return relative paths
 - File: electron/main.js:4312-4333
 - Symptom: No path.resolve() on returned filePath
 - Fix: Normalize and validate
 - Risk: Directory traversal
 
-### MEDIUM T6.13 — execFile taskkill without error handling
+### MEDIUM T6.13 ï¿½ execFile taskkill without error handling
 - File: electron/main.js:3449
 - Symptom: Async callback not awaited
 - Fix: Use execFileSync or await
 - Risk: EADDRINUSE errors
 
-### MEDIUM T6.14 — Forecast sync timer not unref'd
+### MEDIUM T6.14 ï¿½ Forecast sync timer not unref'd
 - File: electron/main.js
 - Symptom: Timer may block exit
 - Fix: Call unref()
 - Risk: App won't exit cleanly
 
-### MEDIUM T6.15 — Error context lost in console.error
+### MEDIUM T6.15 ï¿½ Error context lost in console.error
 - File: electron/main.js:4308, 4330+
 - Symptom: Only err.message logged
 - Fix: Log full error object
@@ -174,7 +174,7 @@ Status: 30 total findings across Node/Express, Electron, and validation
 
 ---
 
-## Track 7 — Validation Results
+## Track 7 ï¿½ Validation Results
 
 INFO T7.1: All JS/Python syntax clean
 INFO T7.2: Python tests 107/107 pass
@@ -194,10 +194,10 @@ INFO: 5
 TOTAL: 30
 
 BLOCKING v2.8.8 (must fix first):
-1. T1.2 — Event loop blocking
-2. T1.1 — SQL injection
-3. T1.4 — Unhandled rejection
-4. T6.1-T6.6 — Electron critical path
+1. T1.2 ï¿½ Event loop blocking
+2. T1.1 ï¿½ SQL injection
+3. T1.4 ï¿½ Unhandled rejection
+4. T6.1-T6.6 ï¿½ Electron critical path
 
 Estimated remediation: 80 minutes
 
@@ -357,7 +357,6 @@ _(NOTE: The earlier stray T2.1 entry between lines ~115-122 of this file is a du
 - **File:** `server/bulkControlAuth.js:25-35`
 - **Recommendation:** Long-term, replace time-rotating keys with `HMAC(server_secret, minute) + anti-replay nonce`.
 
-
 ---
 
 ## Track 3 â€” Python inverter engine (24 findings, reconstructed after agent file-overwrite incident)
@@ -489,7 +488,6 @@ _Reconstructed from completion-summary of the re-run Track 3 agent (agent wrote 
 - **Symptom:** Metrics list grows without bound during long runs.
 - **Fix:** Use `collections.deque(maxlen=N)` or prune by age.
 
-
 ---
 
 ## Track 4 â€” Python forecast engine (20 findings)
@@ -598,7 +596,6 @@ _Reconstructed from completion-summary of the re-run Track 3 agent (agent wrote 
 ### [LOW] T4.20 â€” Unused variables in residual normalization
 - **File:** `services/forecast_engine.py:~2166`
 - **Fix:** Remove unused locals; no functional impact.
-
 
 ---
 
@@ -710,7 +707,6 @@ _Reconstructed from completion-summary of the re-run Track 3 agent (agent wrote 
 
 ### [INFO] T5.23 â€” AbortController lifecycle generally correct
 - **Finding:** Aside from T5.5 (mode-switch) and T5.7 (timeout), fetches wire AbortController correctly.
-
 
 ---
 

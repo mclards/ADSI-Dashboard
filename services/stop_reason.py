@@ -21,7 +21,6 @@ from typing import Optional
 
 from services.vendor_pdu import VendorPduError, vendor_scope_peek
 
-
 # ─── Per-node SCOPE addresses (Trifasico::LeeMotivosDeParo) ─────────────────
 NODE_BASE_ADDR = 0xFEB5
 NODE_STRIDE = 0x19
@@ -32,7 +31,6 @@ ARRAYHIST_COUNT_WORDS = 31
 
 STOP_REASON_COUNT_WORDS = 25
 STOP_REASON_BYTES = 50   # 25 * 2
-
 
 # ─── StopReason record ─────────────────────────────────────────────────────
 
@@ -123,11 +121,9 @@ class StopReasonRecord:
         )
         return hashlib.sha1(key).hexdigest()[:16]
 
-
 def _i16(u: int) -> int:
     """Reinterpret an unsigned 16-bit value as signed."""
     return u - 0x10000 if u & 0x8000 else u
-
 
 def parse_stop_reason(raw: bytes) -> StopReasonRecord:
     """Decode the 50-byte FC 0x71 SCOPE response payload."""
@@ -183,7 +179,6 @@ def parse_stop_reason(raw: bytes) -> StopReasonRecord:
         debug_desc=w[24],
     )
 
-
 def to_capture_payload(record: StopReasonRecord, *, raw: bytes,
                        inverter_ip: str, slave: int, node: int,
                        read_at_ms: int,
@@ -210,7 +205,6 @@ def to_capture_payload(record: StopReasonRecord, *, raw: bytes,
     })
     return d
 
-
 # ─── ARRAYHISTMOTPARO (lifetime stop-motive counters) ──────────────────────
 
 @dataclass(frozen=True)
@@ -234,13 +228,11 @@ class StopMotiveHistogram:
             "raw_hex": self.raw[:62].hex(),
         }
 
-
 def parse_arrayhist(raw: bytes) -> StopMotiveHistogram:
     if len(raw) < 62:
         raise ValueError(f"ARRAYHISTMOTPARO raw too short: {len(raw)}b (need 62)")
     counters = struct.unpack(">31H", raw[:62])
     return StopMotiveHistogram(counters=counters, raw=bytes(raw[:62]))
-
 
 # ─── Modbus read helpers (sync — caller must hold thread_locks[ip]) ────────
 
@@ -261,7 +253,6 @@ def read_node_stop_reason(client, slave: int, node: int,
                              timeout_s=timeout_s)
     return raw, parse_stop_reason(raw)
 
-
 def read_arrayhistmotparo(client, slave: int,
                            timeout_s: float = 3.0) -> StopMotiveHistogram:
     """Read the 31-counter lifetime histogram via FC 0x71 SCOPE peek.
@@ -271,7 +262,6 @@ def read_arrayhistmotparo(client, slave: int,
     raw = vendor_scope_peek(client, slave, ARRAYHIST_ADDR,
                              ARRAYHIST_COUNT_WORDS, timeout_s=timeout_s)
     return parse_arrayhist(raw)
-
 
 def read_all_nodes(client, slave: int, *, max_node: int = NODE_MAX_SUPPORTED,
                     timeout_s: float = 3.0) -> list[tuple[int, bytes, StopReasonRecord]]:
@@ -286,7 +276,6 @@ def read_all_nodes(client, slave: int, *, max_node: int = NODE_MAX_SUPPORTED,
         raw, rec = read_node_stop_reason(client, slave, node, timeout_s=timeout_s)
         out.append((node, raw, rec))
     return out
-
 
 # ─── Lock-holding orchestrator ─────────────────────────────────────────────
 

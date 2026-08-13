@@ -1,9 +1,9 @@
 # NGCP Grid Compliance Research — Solar Plant Inverters
 
-**Date:** 2026-05-10  
-**Status:** Research summary — for planning and dashboard feature input  
-**Scope:** NGCP transmission-connected utility-scale solar PV in the Philippines  
-**Grid:** 60 Hz nominal  
+**Date:** 2026-05-10
+**Status:** Research summary — for planning and dashboard feature input
+**Scope:** NGCP transmission-connected utility-scale solar PV in the Philippines
+**Grid:** 60 Hz nominal
 **Plant Reference:** Alterpower Digos Solar (~24.84 MW, 27 × Ingeteam INGECON SUN, Mindanao)
 
 ---
@@ -289,7 +289,7 @@ As of May 2026, **most Philippine solar plants do NOT have direct real-time SCAD
 
 1. **Test plan** (pre-test, approved by NGCP): objective, procedure, acceptance criteria, instruments, witness schedule
 2. **Live test log:** CSV with timestamp, P, Q, V, f, inverter alarms, setpoint changes
-3. **Summary report (PDF):** 
+3. **Summary report (PDF):**
    - Test date, witnesses, weather, plant condition
    - Pass/fail determination per acceptance criterion
    - Time-series plots (V vs t, P vs t, Q vs t, f vs t)
@@ -376,8 +376,8 @@ Reactive power test (Q(V) sweep):
     Hold ≥ 1 min at each step
     Log 30069 response at 1 Hz
 
-Note: Frequency and voltage withstand tests are *observational only* — the test 
-authority (e.g., utility service truck with programmable voltage source) applies 
+Note: Frequency and voltage withstand tests are *observational only* — the test
+authority (e.g., utility service truck with programmable voltage source) applies
 the disturbance; the dashboard measures the response.
 ```
 
@@ -496,6 +496,6 @@ The dashboard's **Settings → Grid Compliance** section (future) should expose:
 
 **End of Research Summary**
 
-*Prepared: 2026-05-10*  
-*Sources: PGC 2016, local NGCP documentation, Ingeteam vendor specs, IRENA/IEC/IEEE references*  
+*Prepared: 2026-05-10*
+*Sources: PGC 2016, local NGCP documentation, Ingeteam vendor specs, IRENA/IEC/IEEE references*
 *For: Alterpower Digos Solar grid compliance planning*

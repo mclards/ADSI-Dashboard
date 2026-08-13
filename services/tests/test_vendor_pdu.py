@@ -16,7 +16,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
 
-
 ROOT = Path(__file__).resolve().parents[2]
 import sys
 if str(ROOT) not in sys.path:
@@ -32,7 +31,6 @@ from services.vendor_pdu import (  # noqa: E402
     vendor_scope_peek,
 )
 
-
 # ─── Frame builders for synthesizing fake server responses ──────────────────
 
 def _mbap_wrap(txn_id: int, slave: int, fc: int, body_after_fc: bytes) -> bytes:
@@ -41,12 +39,10 @@ def _mbap_wrap(txn_id: int, slave: int, fc: int, body_after_fc: bytes) -> bytes:
     length = 1 + len(pdu)
     return struct.pack(">HHHB", txn_id, 0x0000, length, slave) + pdu
 
-
 def _make_fc71_response_body(addr: int, data_bytes: bytes) -> bytes:
     """Build FC 0x71 response body (post-FC): [addr_hi][addr_lo][bc_words][data]."""
     bc_words = len(data_bytes) // 2
     return bytes([(addr >> 8) & 0xFF, addr & 0xFF, bc_words]) + data_bytes
-
 
 # ─── Hardware-derived StopReason payload (.109 slave=2, captured 2026-04-27) ─
 
@@ -84,7 +80,6 @@ STOP_REASON_50B_NODE1 = struct.pack(
 )
 assert len(STOP_REASON_50B_NODE1) == 50
 
-
 # ─── ARRAYHISTMOTPARO fixture (31 UINT16 counters, TOTAL=62292 in last slot) ─
 
 ARRAYHIST_62B = struct.pack(
@@ -93,7 +88,6 @@ ARRAYHIST_62B = struct.pack(
     62292,         # TOTAL slot
 )
 assert len(ARRAYHIST_62B) == 62
-
 
 # ─── FC11 Report Slave ID fixture (102-byte INGECON Motorola payload) ───────
 
@@ -115,12 +109,10 @@ def _build_fc11_payload(serial_ascii: str, model_ascii: str,
     buf[86:95] = fw_aux_b[:9]
     return bytes(buf)
 
-
 FC11_PAYLOAD_109_SLAVE2 = _build_fc11_payload(
     "400152A17R52", "AAV1003BA", "AAS1091AA", "AAS1092_F"
 )
 assert len(FC11_PAYLOAD_109_SLAVE2) == 102
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # build_fc71_peek_pdu
@@ -157,7 +149,6 @@ class BuildFc71PeekPduTests(unittest.TestCase):
             build_fc71_peek_pdu(0xFEB5, 0)
         with self.assertRaises(VendorPduError):
             build_fc71_peek_pdu(0xFEB5, 0x80)
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # parse_fc71_response_pdu
@@ -198,7 +189,6 @@ class ParseFc71ResponsePduTests(unittest.TestCase):
         with self.assertRaises(VendorPduError):
             parse_fc71_response_pdu(b"\xFE", 0xFEB5)
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # parse_fc11_slave_id
 # ──────────────────────────────────────────────────────────────────────────────
@@ -236,7 +226,6 @@ class ParseFc11SlaveIdTests(unittest.TestCase):
         info = parse_fc11_slave_id(bytes(buf))
         self.assertEqual(info.serial_format, "unknown")
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # vendor_scope_peek — end-to-end with a mock socket
 # ──────────────────────────────────────────────────────────────────────────────
@@ -263,7 +252,6 @@ class FakeSocket:
     def close(self):
         pass
 
-
 def _build_full_response_for_scope(slave: int, addr: int, data: bytes) -> bytes:
     """The exact bytes a real inverter would put on the wire for an FC 0x71 reply.
 
@@ -273,14 +261,12 @@ def _build_full_response_for_scope(slave: int, addr: int, data: bytes) -> bytes:
     """
     raise NotImplementedError("use _make_response_echoing_request instead")
 
-
 def _make_response_echoing_request(req_bytes: bytes, addr: int, data: bytes) -> bytes:
     """Build an FC 0x71 response that echoes the request's txn_id."""
     txn_id = struct.unpack(">H", req_bytes[0:2])[0]
     slave = req_bytes[6]
     body = _make_fc71_response_body(addr, data)
     return _mbap_wrap(txn_id, slave, 0x71, body)
-
 
 class VendorScopePeekIntegrationTests(unittest.TestCase):
     """Drives vendor_scope_peek() against a fake socket, asserting wire format."""
@@ -393,7 +379,6 @@ class VendorScopePeekIntegrationTests(unittest.TestCase):
         with self.assertRaises(VendorPduError):
             vendor_scope_peek(client, slave=2, addr=0xFEB5, count_words=25)
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # read_slave_id — end-to-end FC11
 # ──────────────────────────────────────────────────────────────────────────────
@@ -458,7 +443,6 @@ class ReadSlaveIdIntegrationTests(unittest.TestCase):
         with self.assertRaises(VendorPduError) as ctx:
             read_slave_id(client, slave=2)
         self.assertIn("exception", str(ctx.exception).lower())
-
 
 if __name__ == "__main__":
     unittest.main()

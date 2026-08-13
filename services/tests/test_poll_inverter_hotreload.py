@@ -26,7 +26,6 @@ import unittest
 
 import services.inverter_engine as engine
 
-
 class PollInverterHotReloadTests(unittest.IsolatedAsyncioTestCase):
     """Lock the contract: ipconfig unit-list changes propagate without restart."""
 
@@ -231,7 +230,6 @@ class PollInverterHotReloadTests(unittest.IsolatedAsyncioTestCase):
                 await task
             except asyncio.CancelledError:
                 pass
-
 
 if __name__ == "__main__":
     unittest.main()

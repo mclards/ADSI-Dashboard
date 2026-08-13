@@ -1743,9 +1743,9 @@
                   <span>Open Folder</span>
                 </button>
                 <div class="settings-utility-sep" aria-hidden="true"></div>
-                <button id="btnOpenIpConfig" class="btn btn-outline settings-utility-wide" title="Open the IP Configuration editor to manage inverter network addresses and polling parameters.">
+                <button id="btnOpenIpConfig" class="btn btn-outline settings-utility-wide" title="Open Global Configuration for inverter addressing, plant data, hardware clocks, connectivity, and backup.">
                   <span class="mdi mdi-lan-connect" aria-hidden="true"></span>
-                  <span>IP Configuration</span>
+                  <span>Global Configuration</span>
                 </button>
                 <button id="btnOpenCalibrator" class="btn btn-outline settings-utility-wide" title="Open the isolated Utility Tool (calibration + inverter settings viewer) with COM vs Ethernet transport selector.">
                   <span class="mdi mdi-tune-variant" aria-hidden="true"></span>
@@ -4009,9 +4009,9 @@ Hover any pill in the column for the row-specific explanation.">Anchor</th>
         <div class="cam-settings-header hik-settings-header">
           <div class="hik-title-wrap">
             <span class="hik-title-icon"><span class="mdi mdi-cctv"></span></span>
-            <span>
-              <span class="cam-settings-title" id="hikSettingsTitle">Hikvision DVR</span>
-              <span class="hik-title-subtitle">Live-view card and local DVR connection</span>
+              <span>
+                <span class="cam-settings-title" id="hikSettingsTitle">Hikvision DVR</span>
+              <span class="hik-title-subtitle" id="hikTitleSubtitle">Secure camera routing and playback</span>
             </span>
           </div>
           <div class="hik-header-actions">
@@ -4022,7 +4022,7 @@ Hover any pill in the column for the row-specific explanation.">Anchor</th>
         <div class="cam-settings-body">
           <div class="hik-config-note">
             <span class="mdi mdi-shield-lock-outline"></span>
-            <span>Uses the DVR's local account. Hik-Connect cloud credentials and camera access codes are not required.</span>
+            <span id="hikDeliveryNote">Uses the DVR's local account. Hik-Connect cloud credentials and camera access codes are not required.</span>
           </div>
 
           <div class="hik-identity-row">
@@ -4037,6 +4037,34 @@ Hover any pill in the column for the row-specific explanation.">Anchor</th>
             </label>
           </div>
 
+          <section class="hik-route-panel" id="hikRoutePanel" data-state="checking">
+            <div class="hik-route-heading">
+              <span class="hik-panel-icon mdi mdi-shield-link-variant-outline"></span>
+              <span><strong>Secure Stream Paths</strong><small id="hikRouteSummary">Checking local and Tailscale connectivity...</small></span>
+              <button class="btn btn-outline btn-sm" id="btnHikRouteCheck" type="button"><span class="mdi mdi-access-point-network"></span> Check Routes</button>
+            </div>
+            <div class="hik-route-grid">
+              <div class="hik-route-item">
+                <span class="hik-route-icon mdi mdi-view-dashboard-outline"></span>
+                <span><small>Dashboard Card</small><strong id="hikCompactPath">Checking...</strong></span>
+                <span class="hik-route-state" id="hikCompactState">--</span>
+              </div>
+              <div class="hik-route-item">
+                <span class="hik-route-icon mdi mdi-monitor-eye"></span>
+                <span><small>Native Viewer</small><strong id="hikNativePath">Checking...</strong></span>
+                <span class="hik-route-state" id="hikNativeState">--</span>
+              </div>
+              <div class="hik-route-item">
+                <span class="hik-route-icon mdi mdi-vpn"></span>
+                <span><small>Tailscale</small><strong id="hikTailscalePath">Checking...</strong></span>
+                <span class="hik-route-state" id="hikTailscaleState">--</span>
+              </div>
+            </div>
+            <div class="hik-route-guidance" id="hikRouteGuidance">
+              The native viewer connects directly to the DVR. In Remote mode, advertise only the DVR host as a Tailscale subnet route.
+            </div>
+          </section>
+
           <div class="hik-settings-layout">
             <section class="hik-settings-panel">
               <div class="hik-panel-heading">
@@ -4047,6 +4075,10 @@ Hover any pill in the column for the row-specific explanation.">Anchor</th>
                 <div class="hik-grow-2">
                   <label class="cam-field-label">DVR IP / Host</label>
                   <input type="text" id="hikHost" class="cam-field-input" value="192.168.1.12" autocomplete="off" />
+                </div>
+                <div>
+                  <label class="cam-field-label">SDK / HTTP</label>
+                  <input type="number" id="hikHttpPort" class="cam-field-input" value="80" min="1" max="65535" />
                 </div>
                 <div>
                   <label class="cam-field-label">RTSP Port</label>
@@ -4097,13 +4129,13 @@ Hover any pill in the column for the row-specific explanation.">Anchor</th>
               </div>
               <label class="cam-field-label">Playback Mode</label>
               <select id="hikPlaybackMode" class="cam-field-input hik-playback-select">
-                <option value="localservice">Smooth native playback (recommended)</option>
+                <option value="localservice">Hybrid HLS + native viewer window (recommended)</option>
                 <option value="compatible">Compatible HD snapshots</option>
                 <option value="hls">Direct HLS (diagnostic)</option>
               </select>
               <div class="hik-mode-summary" id="hikModeSummary">
                 <span class="mdi mdi-video-wireless-outline"></span>
-                <span><strong>Smooth native playback</strong><small>Uses Hikvision LocalService hardware decoding at the DVR's original quality and frame rate.</small></span>
+                <span><strong>Hybrid HLS + native viewer</strong><small>Uses H.264 HLS in the card and opens LocalService at original quality in a standard resizable window.</small></span>
               </div>
             </section>
           </div>
@@ -4125,7 +4157,7 @@ Hover any pill in the column for the row-specific explanation.">Anchor</th>
 
           <section class="hik-service-panel">
             <div class="hik-service-title">
-              <span><span class="mdi mdi-cog-play-outline"></span> Hikvision Native Decoder</span>
+              <span><span class="mdi mdi-cog-play-outline"></span> Hikvision Playback</span>
               <label class="cam-auto-start-label">
                 <input type="checkbox" id="hikAutoStart" />
                 <span>Start with dashboard</span>
@@ -4134,7 +4166,7 @@ Hover any pill in the column for the row-specific explanation.">Anchor</th>
             <div class="hik-service-content">
               <div class="cam-service-grid hik-service-grid">
                 <div class="cam-service-item"><div class="cam-service-label">Status</div><div class="cam-service-value" id="hikServiceStatus">-</div></div>
-                <div class="cam-service-item"><div class="cam-service-label">Process ID</div><div class="cam-service-value" id="hikServicePid">-</div></div>
+                <div class="cam-service-item"><div class="cam-service-label">Engine</div><div class="cam-service-value" id="hikServicePid">-</div></div>
                 <div class="cam-service-item"><div class="cam-service-label">Connection</div><div class="cam-service-value" id="hikServiceHealth">-</div></div>
               </div>
               <div class="cam-service-btns hik-service-btns">

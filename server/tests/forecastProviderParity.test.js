@@ -18,7 +18,7 @@ function run() {
   assert(!indexSrc.includes('const result = await generateDayAheadWithMl(1);'), "Fallback cron still hardcodes ML generation");
   // 4. Assert internal auto generation route exists
   assert(indexSrc.includes('app.post("/api/internal/forecast/generate-auto"'), "Internal auto-generation route is missing");
-  
+
   // 5. Assert Python scheduler uses HTTP delegation
   assert(engineSrc.includes('def _delegate_run_dayahead(target_date: date, trigger: str = "auto_service") -> dict | None:'), "Python missing delegation helper");
   assert(engineSrc.includes('url = f"http://127.0.0.1:{port}/api/internal/forecast/generate-auto"'), "Python not targeting correct internal endpoint");

@@ -1,4 +1,4 @@
-﻿"use strict";
+"use strict";
 
 /**
  * criticalAlarmPatternsCore.test.js â€” pure-function tests for the forensic

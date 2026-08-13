@@ -1,6 +1,6 @@
 # Everything Claude Code (ECC) — Usage Guide for ADSI Dashboard
 
-Source: [affaan-m/everything-claude-code](https://github.com/affaan-m/everything-claude-code) v1.8.0  
+Source: [affaan-m/everything-claude-code](https://github.com/affaan-m/everything-claude-code) v1.8.0
 Additional plugins: `ui-ux-pro-max`, `claude-mem`, `skill-creator`
 
 ECC skills expand into detailed prompt instructions that shape how Claude approaches a task.

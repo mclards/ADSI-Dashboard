@@ -30,7 +30,6 @@ SETTINGS_KEYS = (
     "plantLongitude",
 )
 
-
 def read_settings():
     uri = f"file:{DB_PATH}?mode=ro"
     conn = sqlite3.connect(uri, uri=True, timeout=5.0)
@@ -44,7 +43,6 @@ def read_settings():
         return {r["key"]: r["value"] for r in rows}
     finally:
         conn.close()
-
 
 def extract_js_array_literal(html: str, name: str) -> str:
     """Extract `name = [ ... ]` from JS, returning the raw literal string.
@@ -82,14 +80,12 @@ def extract_js_array_literal(html: str, name: str) -> str:
         i += 1
     return ""
 
-
 def scan_keywords(html: str, keywords):
     results = {}
     lower = html.lower()
     for kw in keywords:
         results[kw] = lower.count(kw.lower())
     return results
-
 
 def summarize_first_record(literal: str, label: str):
     """Try to pull the first record's field names out of a JS array literal.
@@ -135,7 +131,6 @@ def summarize_first_record(literal: str, label: str):
     print(f"  {label} inferred keys ({len(keys)}): {keys}")
     preview = first_rec[:400].replace("\n", " ")
     print(f"  {label} first-record preview: {preview}")
-
 
 def try_view(session: requests.Session, base_url: str, site_type: str, site_id: str,
              view: str, hours: int, period: str, dump_dir: str):
@@ -197,7 +192,6 @@ def try_view(session: requests.Session, base_url: str, site_type: str, site_id: 
     print(f"all JS array names seen in HTML: {unique_arrays}")
 
     return {"url": url, "html_path": dump_path, "keyword_hits": counts}
-
 
 def main():
     print("=" * 72)
@@ -298,7 +292,6 @@ def main():
     print(f"  {dump_dir}")
     print("=" * 72)
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

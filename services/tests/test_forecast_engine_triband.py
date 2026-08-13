@@ -25,7 +25,6 @@ from services.forecast_engine import (
     SOLAR_END_SLOT,
 )
 
-
 class TestTriBandSnapshotLoading:
     """Test load_solcast_snapshot() tri-band exposure."""
 
@@ -40,7 +39,6 @@ class TestTriBandSnapshotLoading:
         # This test requires a test database with NULL lo/hi
         # Placeholder for integration test
         pass
-
 
 class TestTriBandFeatureConstruction:
     """Test build_features() tri-band feature construction."""
@@ -152,7 +150,6 @@ class TestTriBandFeatureConstruction:
         assert np.all(features["solcast_spread_ratio"] >= -1.0)
         assert np.all(features["solcast_spread_ratio"] <= 1.0)
 
-
 class TestTrainingDataWithTriBand:
     """Test training data collection handles tri-band mix."""
 
@@ -192,7 +189,6 @@ class TestTrainingDataWithTriBand:
         change so the tripwire stays meaningful.
         """
         assert len(FEATURE_COLS) == 72, f"Expected 72 features, got {len(FEATURE_COLS)}"
-
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

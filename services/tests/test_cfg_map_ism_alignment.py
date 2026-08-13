@@ -18,11 +18,9 @@ import pytest
 
 from services.cfg_trif_map import FIELDS
 
-
 _TSV_PATH = os.path.join(
     os.path.dirname(__file__), "..", "..", "_spike", "cfg_trif_AU_map.tsv"
 )
-
 
 # Map our `kind` to the ISM HR_*Attribute or HREnumAsBitArray family.
 _KIND_TO_ISM = {
@@ -36,7 +34,6 @@ _KIND_TO_ISM = {
     "byte":  {"Byte", "ByteLo", "ByteHi"},
     "bits":  {"BitArray"},
 }
-
 
 def _parse_ism_tsv():
     """Return dict[field] = (offset, ism_kind_token). Pure parser."""
@@ -72,7 +69,6 @@ def _parse_ism_tsv():
                 out[field] = (int(dt.group(1)), "DateTime")
     return out
 
-
 def test_every_committed_field_matches_ism_offset():
     ism = _parse_ism_tsv()
     for f in FIELDS:
@@ -88,7 +84,6 @@ def test_every_committed_field_matches_ism_offset():
             f"offset={ism_off}"
         )
 
-
 def test_every_committed_field_matches_ism_kind():
     ism = _parse_ism_tsv()
     for f in FIELDS:
@@ -102,7 +97,6 @@ def test_every_committed_field_matches_ism_kind():
             f"{sorted(allowed)}) disagrees with ISM kind={ism_kind!r}"
         )
 
-
 def test_reactive_y_coords_are_unsigned():
     """Pin the 2026-05-20 audit fix in place."""
     by_field = {f["field"]: f for f in FIELDS}
@@ -114,7 +108,6 @@ def test_reactive_y_coords_are_unsigned():
             f"distorts any register value >= 32768 into a large negative."
         )
         assert meta["signed"] is False, f"{name}.signed must be False"
-
 
 def test_calibration_decoder_y_coords_are_unsigned():
     """Same guarantee on the calibration write path (offsets 92, 94)."""
@@ -129,7 +122,6 @@ def test_calibration_decoder_y_coords_are_unsigned():
             f"calibration_decoder offset {off} ({name}) must be unsigned "
             f"(ISM declares UInt16)"
         )
-
 
 def test_can_kind_is_off_by_one_against_raw():
     """ISM HR_PutoNodoCanAttribute stores (display + 1) in the register.

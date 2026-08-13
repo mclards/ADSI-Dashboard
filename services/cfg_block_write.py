@@ -29,10 +29,8 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-
 class CfgEncodeError(ValueError):
     """Encoder refused the user-supplied value for a config field."""
-
 
 # Kinds the v1 encoder does NOT support. The Python endpoint should
 # return a 400 with a clear message rather than attempting to encode.
@@ -56,7 +54,6 @@ NON_WRITABLE_FIELDS = frozenset({
     "NumeroNodoModbus",
 })
 
-
 def is_writable_field(field_meta: Dict[str, Any]) -> bool:
     """Return True iff this field's (kind, field name) is eligible for
     a Utility Tool write. The actual transport write still requires the
@@ -72,7 +69,6 @@ def is_writable_field(field_meta: Dict[str, Any]) -> bool:
         # (audit CFG-001, 2026-05-31)
         return False
     return kind not in UNSUPPORTED_KINDS
-
 
 def encode_value(field_meta: Dict[str, Any], value: Any) -> int:
     """Turn a user-supplied value into the raw uint16 to write.
@@ -172,7 +168,6 @@ def encode_value(field_meta: Dict[str, Any], value: Any) -> int:
     except (TypeError, ValueError) as exc:
         raise CfgEncodeError(f"{field}: {exc}") from exc
 
-
 def merge_bit(current_register: int, bit_spec: str, new_bits: int) -> int:
     """For kind=bits — fold `new_bits` into the current 16-bit register.
 
@@ -197,7 +192,6 @@ def merge_bit(current_register: int, bit_spec: str, new_bits: int) -> int:
     mask = ((1 << width) - 1) << start
     return ((cur & ~mask) | ((int(new_bits) & ((1 << width) - 1)) << start)) & 0xFFFF
 
-
 # ── internal helpers ──────────────────────────────────────────────────────
 
 def _to_int(v: Any, kind: str) -> int:
@@ -214,7 +208,6 @@ def _to_int(v: Any, kind: str) -> int:
         raise CfgEncodeError(f"{kind} value is empty")
     return int(s, 0)  # supports "100", "0x64", "0b1100100"
 
-
 def _to_float(v: Any, kind: str) -> float:
     if isinstance(v, (int, float)):
         return float(v)
@@ -222,7 +215,6 @@ def _to_float(v: Any, kind: str) -> float:
     if not s:
         raise CfgEncodeError(f"{kind} value is empty")
     return float(s)
-
 
 def _check_range(v, lo, hi, field, label):
     if v < lo or v > hi:

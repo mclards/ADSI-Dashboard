@@ -1,8 +1,8 @@
 # Critical Fixes Applied — v2.10.0 Release Hardening
 
-**Date:** 2026-04-28 18:47 UTC  
-**Commit:** 4712027 (main branch)  
-**Author:** Claude (continuation of consistency audit)  
+**Date:** 2026-04-28 18:47 UTC
+**Commit:** 4712027 (main branch)
+**Author:** Claude (continuation of consistency audit)
 **Test Status:** 42/43 smoke tests pass
 
 ---
@@ -15,7 +15,7 @@ Three critical bugs discovered during the cross-module consistency audit (consis
 
 ## Critical Fix #1: Remote-Mode Proxy for Counter-State Endpoints
 
-**Files Modified:** server/index.js  
+**Files Modified:** server/index.js
 **Lines:** 12503–12510, 12568–12575, 12625–12632
 
 ### Problem
@@ -80,7 +80,7 @@ Same pattern applied to `/api/counter-state/summary` and `/api/clock-sync-log`.
 
 ## Critical Fix #2: Timezone Handling in Substation Validator
 
-**Files Modified:** server/index.js  
+**Files Modified:** server/index.js
 **Lines:** 15378–15400
 
 ### Problem
@@ -147,7 +147,7 @@ function validateSubstationDate(dateStr) {
 
 ## Secondary Fix #3: Added Remote-Mode Documentation Comments
 
-**Files Modified:** server/index.js (comment additions, no code change)  
+**Files Modified:** server/index.js (comment additions, no code change)
 **Lines:** 12502, 12568, 12625
 
 ### Purpose

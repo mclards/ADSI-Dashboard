@@ -10,10 +10,8 @@ import re
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "services" / "inverter_engine.py"
-
 
 def _extract(fn_name, src):
     marker = f"def {fn_name}("
@@ -30,12 +28,10 @@ def _extract(fn_name, src):
         buf.append(line)
     return "".join(buf)
 
-
 def _const(name, src):
     m = re.search(rf"^{name}\s*=\s*([0-9.]+)", src, re.MULTILINE)
     assert m, f"could not find constant {name}"
     return float(m.group(1))
-
 
 def _load():
     src = MODULE_PATH.read_text(encoding="utf-8")
@@ -45,7 +41,6 @@ def _load():
     }
     exec(_extract("should_rebuild_client", src), ns)
     return ns
-
 
 class TestShouldRebuildClient(unittest.TestCase):
     @classmethod
@@ -101,7 +96,6 @@ class TestShouldRebuildClient(unittest.TestCase):
 
     def test_just_before_rebuild_interval_rate_limited(self):
         self.assertFalse(self._call(last_rebuild=10_000.0 - (self.MININT - 0.01)))
-
 
 if __name__ == "__main__":
     unittest.main()

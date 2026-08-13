@@ -2,8 +2,8 @@
 
 # Implementation Plan: IGBT Health Page (Phase 1 MVP)
 
-**Date:** 2026-05-10  
-**Status:** TDD-ready implementation specification  
+**Date:** 2026-05-10
+**Status:** TDD-ready implementation specification
 **Version:** v2.11.0 (target release)
 
 ## § 1 Scope & Success Criteria
@@ -217,7 +217,7 @@ for (const invRecord of ipCfg.inverters) {
   const inverter = invRecord.inverter;  // 1–27
   const ip = invRecord.ip;              // "192.168.1.101" etc.
   const units = invRecord.units || [];  // per-inverter slave list
-  
+
   for (const unit of units) {
     nodes.push({
       inverter,
@@ -239,7 +239,7 @@ for (const invRecord of ipCfg.inverters) {
   - `imbal_score = 0`
   - Other scores computed from stop-reason history if available
   - If no stop reasons exist either: `score = null` (not 0)
-  
+
 - If an inverter is missing from `ipconfig` entirely:
   - Do NOT enumerate it (trust ipconfig as the source of truth)
   - Orphaned rows in `inverter_stop_reasons_std` are ignored
@@ -310,10 +310,10 @@ const rows = db.prepare(`
 const imbalances = rows.map(row => {
   const iacs = [row.iac1_a, row.iac2_a, row.iac3_a].filter(i => Number.isFinite(i));
   if (iacs.length < 3) return null;  // skip incomplete rows
-  
+
   const avg = iacs.reduce((a, b) => a + b) / 3;
   if (avg === 0) return null;  // skip zero-power samples
-  
+
   const maxDev = Math.max(...iacs.map(i => Math.abs(i - avg)));
   return (maxDev / avg) * 100;
 });
@@ -336,7 +336,7 @@ return median;
   - `imbalance_pct = null`
   - Component score = 0 (no visible imbalance)
   - Drilldown shows "offline in last hour; no imbalance data"
-  
+
 - If all rows have `iac1_a / iac2_a / iac3_a` as NaN or zero:
   - Treat as "inverter not producing" (night, disconnected, or start-up phase)
   - `imbalance_pct = null`
@@ -777,13 +777,13 @@ async function loadAndRenderIgbtHealthPage() {
     const resp = await fetch("/api/igbt/fleet", { method: "GET" });
     if (!resp.ok) throw new Error(`${resp.status}: ${resp.statusText}`);
     const data = await resp.json();
-    
+
     if (!data.ok) throw new Error(data.error);
-    
+
     // Render page
     renderIgbtFleetTable(data.nodes);
     renderIgbtSummary(data.summary, data.generated_at_ms);
-    
+
     // Attach event listeners
     attachTierFilterListeners();
     attachFleetTableClickListeners();
@@ -798,10 +798,10 @@ async function loadAndRenderIgbtHealthPage() {
 function renderIgbtFleetTable(nodes) {
   const tbody = $("igbtFleetTableBody");
   if (!tbody) return;
-  
+
   tbody.innerHTML = nodes.map((node, idx) => `
-    <tr 
-      class="igbt-fleet-row" 
+    <tr
+      class="igbt-fleet-row"
       data-tier="${node.tier || 'offline'}"
       data-row-idx="${idx}"
       title="Click to view node details"
@@ -852,17 +852,17 @@ function attachTierFilterListeners() {
   document.querySelectorAll(".tier-chip").forEach(chip => {
     chip.addEventListener("click", (e) => {
       const selectedTier = e.target.dataset.tier;
-      
+
       // Update UI state
       document.querySelectorAll(".tier-chip").forEach(c => {
         c.dataset.selected = c.dataset.tier === selectedTier ? "true" : "false";
       });
-      
+
       // Filter table
       const rows = document.querySelectorAll(".igbt-fleet-row");
       rows.forEach(row => {
         const rowTier = row.dataset.tier;
-        row.style.display = 
+        row.style.display =
           selectedTier === "all" || rowTier === selectedTier ? "" : "none";
       });
     });
@@ -876,15 +876,15 @@ function attachTierFilterListeners() {
 function attachExportListeners() {
   const btn = $("btnExportIgbtCsv");
   if (!btn) return;
-  
+
   btn.addEventListener("click", async () => {
     try {
       btn.disabled = true;
       btn.textContent = "Exporting...";
-      
+
       const resp = await fetch("/api/igbt/fleet.csv?format=csv");
       if (!resp.ok) throw new Error(`${resp.status}: Export failed`);
-      
+
       // Download CSV
       const blob = await resp.blob();
       const url = URL.createObjectURL(blob);
@@ -895,7 +895,7 @@ function attachExportListeners() {
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
-      
+
       showSuccess("Fleet health CSV exported.");
     } catch (err) {
       showError("Export failed: " + err.message);
@@ -913,7 +913,7 @@ function attachExportListeners() {
 function attachRefreshListeners() {
   const btn = $("btnRefreshIgbt");
   if (!btn) return;
-  
+
   btn.addEventListener("click", async () => {
     await loadAndRenderIgbtHealthPage();
   });
@@ -933,7 +933,7 @@ function attachRefreshListeners() {
 
 /**
  * igbtHealth.js — IGBT health score computation (pure functions, no I/O)
- * 
+ *
  * All functions are deterministic, side-effect-free, and testable in isolation.
  * No database access, no HTTP calls, no timestamps beyond explicit parameters.
  */
@@ -942,14 +942,14 @@ const { MOTIVO_PARO_LABELS, MOTIVO_PARO_ENGLISH } = require("./motiveLabels");
 
 /**
  * computeHealthScore(inputs) → {score, tier, breakdown}
- * 
+ *
  * @param {Object} inputs
  *   @param {number} inputs.thermal_count — # of thermal stops in 90-day window
  *   @param {number} inputs.frama_count — # of FRAMA stops (all branches)
  *   @param {number} inputs.pi_ana_count — # of PI saturation stops
  *   @param {number} inputs.imbalance_pct — phase current imbalance percentage (null if offline)
  *   @param {number} inputs.rolling_window_days — (optional, default 90) for audit
- * 
+ *
  * @returns {Object} {score, tier, breakdown: {thermal_score, frama_score, pi_ana_score, imbal_score}}
  */
 function computeHealthScore(inputs) {
@@ -972,7 +972,7 @@ function computeHealthScore(inputs) {
   }
 
   // Composite: 30% thermal, 30% FRAMA, 20% PI, 20% imbalance
-  const score = 
+  const score =
     0.30 * thermal_score +
     0.30 * frama_score +
     0.20 * pi_ana_score +
@@ -994,7 +994,7 @@ function computeHealthScore(inputs) {
 
 /**
  * tierForScore(score) → 'healthy' | 'watch' | 'aging' | 'eol' | null
- * 
+ *
  * Null if score is null/undefined.
  */
 function tierForScore(score) {
@@ -1007,20 +1007,20 @@ function tierForScore(score) {
 
 /**
  * aggregateMotiveCounts(stopReasonRows, motiveCodesArray) → count
- * 
+ *
  * Count rows matching any motive code in the array.
  */
 function aggregateMotiveCounts(stopReasonRows, motiveCodesArray) {
   if (!Array.isArray(stopReasonRows)) return 0;
   if (!Array.isArray(motiveCodesArray)) return 0;
-  
+
   const codes = new Set(motiveCodesArray.map(c => Number(c)));
   return stopReasonRows.filter(row => codes.has(Number(row?.motive_code))).length;
 }
 
 /**
  * medianImbalance(param5minRows) → number | null
- * 
+ *
  * Compute median phase-current imbalance from 5-min parameter rows.
  * Each row must have iac1_a, iac2_a, iac3_a.
  * Returns null if no valid samples.
@@ -1032,12 +1032,12 @@ function medianImbalance(param5minRows) {
     .map(row => {
       const iacs = [row?.iac1_a, row?.iac2_a, row?.iac3_a]
         .filter(v => typeof v === "number" && Number.isFinite(v));
-      
+
       if (iacs.length < 3) return null;
-      
+
       const avg = iacs.reduce((a, b) => a + b, 0) / 3;
       if (avg === 0) return null;
-      
+
       const maxDev = Math.max(...iacs.map(v => Math.abs(v - avg)));
       return (maxDev / avg) * 100;
     })
@@ -1249,14 +1249,14 @@ test("computeHealthScore breakdown consistency", (assert) => {
     imbalance_pct: 2.5,
   });
   const bd = result.breakdown;
-  
+
   // Verify weights sum correctly
-  const weighted = 
+  const weighted =
     0.30 * bd.thermal_score +
     0.30 * bd.frama_score +
     0.20 * bd.pi_ana_score +
     0.20 * bd.imbal_score;
-  
+
   assert.ok(Math.abs(weighted - result.score) < 0.1, `breakdown mismatch: ${weighted} vs ${result.score}`);
 });
 
@@ -1308,12 +1308,12 @@ process.exitCode = 0;
 
 ### 11.4 Test Expectations
 
-**Total test count:** 15+ unit tests in `igbtHealthCore.test.js` (all pure functions)  
+**Total test count:** 15+ unit tests in `igbtHealthCore.test.js` (all pure functions)
 **Test file locations:**
 - [server/tests/igbtHealthCore.test.js](server/tests/igbtHealthCore.test.js) — pure-function core
 - [server/tests/igbtFleetEndpoint.test.js](server/tests/igbtFleetEndpoint.test.js) — endpoint integration (optional Phase 1, full in Phase 2)
 
-**Branch coverage target:** ≥90% for health-score logic  
+**Branch coverage target:** ≥90% for health-score logic
 **Running tests:**
 ```bash
 cd D:\ADSI-Dashboard

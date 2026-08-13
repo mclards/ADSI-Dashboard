@@ -34,7 +34,7 @@ Python will **merge slow data into the existing fast-poll frame** and push both 
 - Node receives: one unified frame per cycle with both `fast_fields` and `slow_fields` (slow fields are sparse — present only after slow-poll updates)
 - Backward-compat: when slow-poll hasn't run yet, slow fields default to `null` in the frame
 
-**Rationale:** 
+**Rationale:**
 1. Single POST per 1–2 s keeps the WS bridge simple
 2. Aggregator sees all fields in one place → natural for 5-min averaging
 3. Remote mode proxy works unchanged (one GET, one response)
@@ -98,14 +98,14 @@ async def read_slow_async(client, unit, ip):
     """
     Read 53 diagnostic input registers (addr 64–116).
     Runs on a slow cadence (default 30 s per SLOW_POLL_INTERVAL_S setting).
-    
+
     Returns a dict keyed to slow-field names, or None on failure.
     Safe defaults (0 or None) for missing regs preserve backward-compat if
     the device doesn't support the full range.
-    
+
     Wire format: read_input_registers(address=64, count=53, unit=unit)
       Modbus addresses 30065–30117 (PDF §2 p6–9)
-    
+
     Field decode (per PDF + plan §2 register map):
       addr 64-65  30065-30066  Instantaneous alarms        UInt32 hi-lo
       addr 66-67  30067-30068  Maintained alarms            UInt32 hi-lo
@@ -122,7 +122,7 @@ async def read_slow_async(client, unit, ip):
       addr 109    30110        Time-to-connect total        UInt16 seconds
       addr 110-115 30111-30115 (skip: MS mirrors, dynamic on this site)
       addr 116    30117        Power-reduction status bits   UInt16 bitfield
-    
+
     Notes:
       - TempINT (addr 72) threshold 80 °C; newly captured, not yet surfaced in UI
       - Estado (addr 73) decoded by Slice γ; Slice β just captures raw bitfield
@@ -132,37 +132,37 @@ async def read_slow_async(client, unit, ip):
     if is_write_pending(ip):
         await asyncio.sleep(min(READ_SPACING, 0.01))
         return None
-    
+
     regs = await safe_read(_threaded_read_input, client, 64, 53, unit, ip)
     if not regs:
         return None
-    
+
     def reg(i):
         return regs[i] if len(regs) > i else 0
-    
+
     # Instantaneous alarms (regs 0-1 in the read, offset 64 in the device)
     try:
         alarms_inst_32 = _u32_hi_lo(regs, 0)   # regs[0:2] → addr 64-65
     except ValueError:
         alarms_inst_32 = 0
-    
+
     # Maintained alarms (regs 2-3 in the read, offset 66 in the device)
     try:
         alarms_maint_32 = _u32_hi_lo(regs, 2)  # regs[2:4] → addr 66-67
     except ValueError:
         alarms_maint_32 = 0
-    
+
     # QAC reactive power (addr 68, reg index 4 in this read) — Int16 signed
     # Per PDF: signed, units ÷10 → reactive W
     qac_raw = int(reg(4) or 0)
     if qac_raw & 0x8000:
         qac_raw -= 0x10000
     qac_var = qac_raw / 10.0 if qac_raw != 0 else None  # None = offline/silent
-    
+
     # Impedances
     zpos_kohm = int(reg(5) or 0)   # addr 69, unsigned
     zneg_kohm = int(reg(6) or 0)   # addr 70, unsigned
-    
+
     # Control electronics temperature (addr 72, reg index 8 in this read) — Int16 signed
     tempint_raw = int(reg(8) or 0)
     if tempint_raw & 0x8000:
@@ -170,24 +170,24 @@ async def read_slow_async(client, unit, ip):
     # Threshold: 80 °C per PDF. Unlike TempCI, no -1 offset or -14 sentinel documented.
     # Store as-is; UI can apply thresholds.
     tempint_c = tempint_raw if tempint_raw != 0 else None
-    
+
     # Estado inverter state (addr 73, reg index 9) — UInt16 bitfield, decoded by Slice γ
     inverter_state_raw = int(reg(9) or 0)
-    
+
     # Solar field voltages (addr 74-75, reg indices 10-11)
     vpv_n_v = int(reg(10) or 0)   # Negative-earth
     vpv_p_v = int(reg(11) or 0)   # Positive-earth
-    
+
     # Nominal power ÷10 (addr 76, reg index 12) — UInt16, units = tens of W
     nominal_power_w = int((reg(12) or 0) * 10)  # Convert tens to watts
-    
+
     # Time-to-connect counters (addr 108-109, reg indices 44-45)
     time_to_connect_s = int(reg(44) or 0)        # Remaining
     time_to_connect_total_s = int(reg(45) or 0)  # Configured total
-    
+
     # Power-reduction status bits (addr 116, reg index 52 in this read)
     power_reduction_bits = int(reg(52) or 0)
-    
+
     return {
         "ts":                   int(time.time() * 1000),
         # ─── Alarm windows ───
@@ -216,37 +216,37 @@ async def slow_poll_inverter(ip):
     """
     Background task: poll slow-diagnostic registers every SLOW_POLL_INTERVAL_S.
     Merges results into shared[ip] by attaching slow-field keys to the latest frame.
-    
+
     Runs in parallel with poll_inverter; neither blocks the other.
     Per-inverter task (not per-unit within inverter).
     """
     slow_interval_key = f"slowPollIntervalS_{ip}"
-    
+
     print(f"[SLOW-POLL] Started  {ip}")
-    
+
     while True:
         try:
             # Get current slow-poll cadence from settings (tunable at runtime)
             # Default 30 s; set to 0 to disable slow-poll for this IP.
             slow_interval_s = float(_load_poll_config_sync().get(slow_interval_key, 30))
-            
+
             if slow_interval_s <= 0:
                 # Slow-poll disabled for this IP
                 await asyncio.sleep(1)
                 continue
-            
+
             # Wait for a live client
             client = clients.get(ip)
             if not client:
                 await asyncio.sleep(0.5)
                 continue
-            
+
             # Discover units (same as fast-poll)
             units = await detect_units_async(ip)
             if not units:
                 await asyncio.sleep(1)
                 continue
-            
+
             # Slow-poll each unit
             out_slow = []
             for u in units:
@@ -254,7 +254,7 @@ async def slow_poll_inverter(ip):
                 if slow_data:
                     slow_data["unit"] = u
                     out_slow.append(slow_data)
-            
+
             # Merge slow data into shared[ip] by attaching slow-field keys
             # to the most recent frame for each unit.
             if out_slow:
@@ -268,10 +268,10 @@ async def slow_poll_inverter(ip):
                                 # Attach slow fields
                                 fast_frame.update(slow_frame)
                                 break
-            
+
             # Sleep for the configured interval
             await asyncio.sleep(slow_interval_s)
-        
+
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -357,51 +357,51 @@ asyncio.create_task(slow_poll_inverter(ip))  # Parallel slow-poll per IP
     qac_var_min REAL;
   ALTER TABLE IF NOT EXISTS inverter_5min_param ADD COLUMN IF NOT EXISTS
     qac_var_max REAL;
-  
+
   ALTER TABLE IF NOT EXISTS inverter_5min_param ADD COLUMN IF NOT EXISTS
     zpos_kohm_last INTEGER;  -- Last reading in slot
   ALTER TABLE IF NOT EXISTS inverter_5min_param ADD COLUMN IF NOT EXISTS
     zneg_kohm_last INTEGER;
-  
+
   ALTER TABLE IF NOT EXISTS inverter_5min_param ADD COLUMN IF NOT EXISTS
     tempint_c_avg REAL;  -- Average over slot
   ALTER TABLE IF NOT EXISTS inverter_5min_param ADD COLUMN IF NOT EXISTS
     tempint_c_min REAL;
   ALTER TABLE IF NOT EXISTS inverter_5min_param ADD COLUMN IF NOT EXISTS
     tempint_c_max REAL;
-  
+
   ALTER TABLE IF NOT EXISTS inverter_5min_param ADD COLUMN IF NOT EXISTS
     inverter_state_raw_last INTEGER;  -- Decoded by Slice γ; raw stored here for audit
-  
+
   ALTER TABLE IF NOT EXISTS inverter_5min_param ADD COLUMN IF NOT EXISTS
     vpv_n_v_avg REAL;  -- Solar field voltage N
   ALTER TABLE IF NOT EXISTS inverter_5min_param ADD COLUMN IF NOT EXISTS
     vpv_n_v_min REAL;
   ALTER TABLE IF NOT EXISTS inverter_5min_param ADD COLUMN IF NOT EXISTS
     vpv_n_v_max REAL;
-  
+
   ALTER TABLE IF NOT EXISTS inverter_5min_param ADD COLUMN IF NOT EXISTS
     vpv_p_v_avg REAL;  -- Solar field voltage P
   ALTER TABLE IF NOT EXISTS inverter_5min_param ADD COLUMN IF NOT EXISTS
     vpv_p_v_min REAL;
   ALTER TABLE IF NOT EXISTS inverter_5min_param ADD COLUMN IF NOT EXISTS
     vpv_p_v_max REAL;
-  
+
   ALTER TABLE IF NOT EXISTS inverter_5min_param ADD COLUMN IF NOT EXISTS
     nominal_power_w_last INTEGER;  -- Device-reported rated power (cross-check vs configured)
-  
+
   ALTER TABLE IF NOT EXISTS inverter_5min_param ADD COLUMN IF NOT EXISTS
     time_to_connect_s_last INTEGER;  -- Last observed countdown
-  
+
   ALTER TABLE IF NOT EXISTS inverter_5min_param ADD COLUMN IF NOT EXISTS
     power_reduction_bits_last INTEGER;  -- Bit field snapshot
-  
+
   -- Alarm windows
   ALTER TABLE IF NOT EXISTS inverter_5min_param ADD COLUMN IF NOT EXISTS
     alarms_inst_32_max INTEGER;  -- Bitwise OR of all instantaneous alarms in slot
   ALTER TABLE IF NOT EXISTS inverter_5min_param ADD COLUMN IF NOT EXISTS
     alarms_maint_32_max INTEGER;  -- Bitwise OR of all maintained alarms
-  
+
   -- AAP0016 analog inputs (gated behind settings toggle, default off)
   ALTER TABLE IF NOT EXISTS inverter_5min_param ADD COLUMN IF NOT EXISTS
     analog_in_1_avg REAL;
@@ -443,7 +443,7 @@ function _newBucket(ip, slave, dateLocal, slotIndex, tsMs) {
   // ... existing fields ...
   return {
     // ... existing bucket fields ...
-    
+
     // Slice β slow-poll aggregates
     sumQac: 0, nQac: 0,
     sumTempint: 0, nTempint: 0,
@@ -455,11 +455,11 @@ function _newBucket(ip, slave, dateLocal, slotIndex, tsMs) {
     nominalPowerLast: null,
     ttcLast: null,
     prBitsLast: null,
-    
+
     // Alarm windows (bitwise OR)
     alarmsInst: 0,
     alarmsMaint: 0,
-    
+
     // AAP0016 analog (sum for averaging)
     sumAnalog1: 0, nAnalog1: 0,
     sumAnalog2: 0, nAnalog2: 0,
@@ -467,7 +467,7 @@ function _newBucket(ip, slave, dateLocal, slotIndex, tsMs) {
     sumAnalog4: 0, nAnalog4: 0,
     sumPt100_1: 0, nPt100_1: 0,
     sumPt100_2: 0, nPt100_2: 0,
-    
+
     sampleCount: 0,  // (moved here for visual clarity)
   };
 }
@@ -477,7 +477,7 @@ function _newBucket(ip, slave, dateLocal, slotIndex, tsMs) {
 ```javascript
 function _accum(b, row) {
   // ... existing field handling ...
-  
+
   // Slice β slow-poll fields
   const qac = _vRange(row, "qac_var", _RANGES.qac);
   const tempint = _vRange(row, "tempint_c", _RANGES.tempint);
@@ -497,7 +497,7 @@ function _accum(b, row) {
   const pt2 = _vRange(row, "pt100_2", _RANGES.analog);
   const aInst = Math.trunc(Number(row?.alarms_inst_32) || 0);
   const aMaint = Math.trunc(Number(row?.alarms_maint_32) || 0);
-  
+
   let touched = 0;
   if (qac != null)    { b.sumQac += qac;      b.nQac++; touched++; }
   if (tempint != null){ b.sumTempint += tempint; b.nTempint++; touched++; }
@@ -520,7 +520,7 @@ function _accum(b, row) {
   if (ai4 != null) { b.sumAnalog4 += ai4; b.nAnalog4++; touched++; }
   if (pt1 != null) { b.sumPt100_1 += pt1; b.nPt100_1++; touched++; }
   if (pt2 != null) { b.sumPt100_2 += pt2; b.nPt100_2++; touched++; }
-  
+
   if (touched > 0) {
     b.sampleCount += 1;
     // (rest of existing touched logic)
@@ -641,7 +641,7 @@ Rendering logic:
 function renderParametersTable(data, showAdvanced = false) {
   const thead = document.querySelector("#parametersTable thead");
   const tbody = document.querySelector("#parametersTable tbody");
-  
+
   // Show/hide advanced columns
   document.querySelectorAll("th[data-advanced='true']").forEach(th => {
     th.style.display = showAdvanced ? "" : "none";
@@ -649,7 +649,7 @@ function renderParametersTable(data, showAdvanced = false) {
   document.querySelectorAll("td[data-advanced='true']").forEach(td => {
     td.style.display = showAdvanced ? "" : "none";
   });
-  
+
   // Render rows with new column values from inverter_5min_param
   data.forEach(row => {
     const tr = document.createElement("tr");
@@ -682,7 +682,7 @@ Add the toggle near the top of the Parameters section:
     <input type="checkbox" id="parametersAdvancedToggle">
     Show advanced columns
   </label>
-  
+
   <table id="parametersTable" class="parameters-table">
     <thead>
       <tr>
@@ -831,14 +831,14 @@ async def test_read_slow_async_full_frame():
         # Power-reduction status (reg 52 = addr 116)
         0x0003,  # Bit 0 = limited (1), Bit 1 = Modbus reduction active (1)
     ]
-    
+
     # Mock client that returns the fixture regs
     class MockClient:
         pass
-    
+
     client = MockClient()
     # (Would normally mock the safe_read to return the regs fixture)
-    
+
     result = await read_slow_async(client, 1, "192.168.1.109")
     assert result is not None
     assert result["alarms_inst_32"] == 0x00010002
@@ -902,9 +902,9 @@ describe("parseRow — Slice β slow fields", () => {
       nominal_power_w: 10000,
       power_reduction_bits: 0x0001,
     };
-    
+
     const result = parseRow(row);
-    
+
     expect(result.qac_var).toBe(-100);
     expect(result.zpos_kohm).toBe(50);
     expect(result.tempint_c).toBe(35);
@@ -920,9 +920,9 @@ describe("parseRow — Slice β slow fields", () => {
       ts: Date.now(),
       // No slow fields
     };
-    
+
     const result = parseRow(row);
-    
+
     expect(result.qac_var).toBeNull();
     expect(result.zpos_kohm).toBe(0);  // UInt16 defaults to 0
     expect(result.inverter_state_raw).toBe(0);
@@ -937,9 +937,9 @@ describe("parseRow — Slice β slow fields", () => {
       zpos_kohm: 200000,  // Unrealistic, should clamp or be flagged
       tempint_c: 200,     // > 150 °C industrial envelope
     };
-    
+
     const result = parseRow(row);
-    
+
     // qac_var: pass through (diagnostics — no clamp)
     expect(result.qac_var).toBe(-100);
     // zpos_kohm: pass through, let aggregator reject
@@ -957,9 +957,9 @@ describe("parseRow — Slice β slow fields", () => {
       analog_in_2: 2345,
       pt100_1: 3456,
     };
-    
+
     const result = parseRow(row);
-    
+
     expect(result.analog_in_1).toBe(1234);
     expect(result.analog_in_2).toBe(2345);
     expect(result.pt100_1).toBe(3456);
@@ -981,10 +981,10 @@ describe("dailyAggregator — slow fields (Slice β)", () => {
       { qac_var: -110, /* other fields */ },
       { qac_var: null, /* offline */ },
     ];
-    
+
     // Ingest samples
     samples.forEach(s => ingestLiveSample(s));
-    
+
     // Flush slot
     const flushed = getCurrentBucket();
     expect(flushed.qac_var_avg).toBe(-105);  // (-100 + -110) / 2
@@ -997,7 +997,7 @@ describe("dailyAggregator — slow fields (Slice β)", () => {
       { tempint_c: 35 },
     ];
     samples.forEach(s => ingestLiveSample(s));
-    
+
     const flushed = getCurrentBucket();
     expect(flushed.tempint_c_min).toBe(30);
     expect(flushed.tempint_c_max).toBe(45);
@@ -1011,7 +1011,7 @@ describe("dailyAggregator — slow fields (Slice β)", () => {
       { alarms_inst_32: 0x0004 },
     ];
     samples.forEach(s => ingestLiveSample(s));
-    
+
     const flushed = getCurrentBucket();
     expect(flushed.alarms_inst_32_max).toBe(0x0007);  // 0x0001 | 0x0002 | 0x0004
   });
@@ -1022,7 +1022,7 @@ describe("dailyAggregator — slow fields (Slice β)", () => {
       { zpos_kohm: 51, inverter_state_raw: 0x0201 },
     ];
     samples.forEach(s => ingestLiveSample(s));
-    
+
     const flushed = getCurrentBucket();
     expect(flushed.zpos_kohm_last).toBe(51);  // Last reading
     expect(flushed.inverter_state_raw_last).toBe(0x0201);
@@ -1057,7 +1057,7 @@ describe("DB migration — Slice β slow fields", () => {
 
     // Check that all new columns exist
     const columns = db.pragma("table_info(inverter_5min_param)").map(c => c.name);
-    
+
     expect(columns).toContain("qac_var_avg");
     expect(columns).toContain("zpos_kohm_last");
     expect(columns).toContain("tempint_c_avg");
@@ -1136,15 +1136,15 @@ describe("Parameters page — advanced columns toggle (Slice β)", () => {
     const toggle = document.getElementById("parametersAdvancedToggle");
     toggle.checked = false;
     toggle.dispatchEvent(new Event("change"));
-    
+
     const advCols = document.querySelectorAll("th[data-advanced='true']");
     advCols.forEach(col => {
       expect(col.style.display).toBe("none");
     });
-    
+
     toggle.checked = true;
     toggle.dispatchEvent(new Event("change"));
-    
+
     advCols.forEach(col => {
       expect(col.style.display).not.toBe("none");
     });
@@ -1154,12 +1154,12 @@ describe("Parameters page — advanced columns toggle (Slice β)", () => {
     const toggle = document.getElementById("parametersAdvancedToggle");
     toggle.checked = true;
     toggle.dispatchEvent(new Event("change"));
-    
+
     expect(localStorage.getItem("parametersAdvancedColumnsEnabled")).toBe("1");
-    
+
     toggle.checked = false;
     toggle.dispatchEvent(new Event("change"));
-    
+
     expect(localStorage.getItem("parametersAdvancedColumnsEnabled")).toBe("0");
   });
 });

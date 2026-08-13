@@ -463,7 +463,6 @@ function ensureTodayEnergyBaseline(ts = Date.now()) {
   return todayEnergyBaselineByInv;
 }
 
-
 function integratePacToday(parsed) {
   const now = parsed.ts || Date.now();
   resetPacTodayIfNeeded(now);

@@ -203,7 +203,6 @@ class TransportRegistry:
         self._serial_port = None
         self._serial_cfg = None
 
-
 _registry = TransportRegistry()
 
 # ─── Calibration lockdown state (per-service instance) ────────────────────
@@ -233,7 +232,6 @@ async def health():
         "serial_port": _registry.get_serial_port(),
     }
 
-
 def _validate_ipv4(ip_str: str) -> bool:
     """FIX E: Validate IPv4 dotted-quad format (each octet 0-255)."""
     import re
@@ -247,7 +245,6 @@ def _validate_ipv4(ip_str: str) -> bool:
         if int(octet) > 255:
             return False
     return True
-
 
 def _validate_serial_port(port_str: str, allowed_ports: list = None) -> bool:
     """FIX E: Validate COM port format or presence in current port list.
@@ -273,7 +270,6 @@ def _validate_serial_port(port_str: str, allowed_ports: list = None) -> bool:
 
     return False
 
-
 def _validate_baud_and_params(baudrate: int, parity: str, stopbits: int, bytesize: int) -> bool:
     """FIX E: Validate serial parameters are in acceptable ranges."""
     valid_bauds = {1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200}
@@ -287,7 +283,6 @@ def _validate_baud_and_params(baudrate: int, parity: str, stopbits: int, bytesiz
         and stopbits in valid_stopbits
         and bytesize in valid_bytesize
     )
-
 
 @app.post("/transport/select")
 async def transport_select(req: Request):
@@ -374,7 +369,6 @@ async def transport_select(req: Request):
         "message": f"Active transport: {transport}",
     }
 
-
 @app.get("/serial/ports")
 async def serial_ports():
     """List available serial ports (for UI port selector)."""
@@ -384,7 +378,6 @@ async def serial_ports():
         return {"ok": True, "ports": ports}
     except Exception as exc:
         return {"ok": False, "error": str(exc), "ports": []}
-
 
 @app.get("/calibration/state/{slave}")
 async def api_calibration_state(slave: int):
@@ -457,7 +450,6 @@ async def api_calibration_state(slave: int):
     except Exception as exc:
         return {"ok": False, "error": str(exc), "slave": int(slave)}
 
-
 @app.post("/calibration/write")
 async def api_calibration_write(req: Request):
     """Write a single calibration register.
@@ -500,7 +492,6 @@ async def api_calibration_write(req: Request):
         return result
     except Exception as exc:
         raise HTTPException(500, f"executor_error: {exc}")
-
 
 @app.post("/calibration/write-bulk")
 async def api_calibration_write_bulk(req: Request):
@@ -555,7 +546,6 @@ async def api_calibration_write_bulk(req: Request):
         return result
     except Exception as exc:
         raise HTTPException(500, f"executor_error: {exc}")
-
 
 @app.post("/calibration/config-write")
 async def api_calibration_config_write(req: Request):
@@ -639,7 +629,6 @@ async def api_calibration_config_write(req: Request):
     except Exception as exc:
         raise HTTPException(500, f"executor_error: {exc}")
 
-
 @app.post("/calibration/consign")
 async def api_calibration_consign(req: Request):
     """Drive APC setpoint (opcode 0x0003) to specified percent for calibration consign.
@@ -679,7 +668,6 @@ async def api_calibration_consign(req: Request):
         client, lock, int(slave), float(pct),
     )
 
-
 @app.get("/calibration/preflight/{slave}")
 async def api_calibration_preflight(slave: int):
     """Read sentinel + calibration block for preflight validation.
@@ -704,7 +692,6 @@ async def api_calibration_preflight(slave: int):
         return result
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
-
 
 @app.get("/calibration/full-config/{slave}")
 async def api_calibration_full_config(slave: int):
@@ -767,7 +754,6 @@ async def api_calibration_full_config(slave: int):
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
-
 @app.get("/calibration/cfg-map")
 async def api_calibration_cfg_map():
     """Return the STATIC Utility Tool field map (offsets, kinds, groups,
@@ -785,7 +771,6 @@ async def api_calibration_cfg_map():
         }
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
-
 
 @app.get("/calibration/scan/{ip}/{slave}")
 async def api_calibration_scan(ip: str, slave: int):
@@ -854,7 +839,6 @@ async def api_calibration_scan(ip: str, slave: int):
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
-
 @app.post("/calibration/lockdown")
 async def api_calibration_lockdown(req: Request):
     """Sync calibration session lockdown state.
@@ -896,7 +880,6 @@ async def api_calibration_lockdown(req: Request):
     )
     return {"ok": True, "state": dict(_calibration_lockdown)}
 
-
 # ═══════════════════════════════════════════════════════════════════════════
 #  EXPERIMENTAL — Gated per-node firmware upgrade (Phase 3 wiring)
 #
@@ -934,7 +917,6 @@ _fw_jobs_lock = threading.Lock()
 _FW_JOB_TTL_S = 3600          # finished jobs purge-able after 1 h
 _FW_JOB_MAX = 64              # hard cap on retained job records
 
-
 def _fw_flash_in_progress() -> bool:
     """True while any firmware flash job is live. The flash worker holds the
     registry per-IP lock (`with bus_lock:`) for the ENTIRE multi-minute
@@ -945,7 +927,6 @@ def _fw_flash_in_progress() -> bool:
     threads). Cheap, read-only, lock-guarded snapshot."""
     with _fw_jobs_lock:
         return any(j.get("done") is False for j in _fw_jobs.values())
-
 
 def _fw_prune_jobs() -> None:
     """Bound _fw_jobs memory: drop finished jobs past the TTL, and if the
@@ -964,7 +945,6 @@ def _fw_prune_jobs() -> None:
             for j in finished[:len(_fw_jobs) - _FW_JOB_MAX]:
                 _fw_jobs.pop(j["id"], None)
 
-
 def _fw_audit_path() -> str:
     """JSONL audit sink. Python is read-only for adsi.db (Node owns DB
     writes), so the irreversible-operation trail is a flat append-only file
@@ -977,7 +957,6 @@ def _fw_audit_path() -> str:
     except OSError:
         d = os.path.dirname(__file__)
     return os.path.join(d, "firmware-audit.jsonl")
-
 
 def _fw_make_audit(sink_events: list):
     """Build an audit(event, detail) callable that fans out to (1) the
@@ -995,7 +974,6 @@ def _fw_make_audit(sink_events: list):
             pass  # audit file best-effort; never block/raise the flash on it
 
     return _audit
-
 
 def _fw_resolve(body: dict):
     """Resolve the firmware image the operator chose.
@@ -1033,7 +1011,6 @@ def _fw_resolve(body: dict):
         return os.path.join(_FW_DIR, name), _FW_DIR
     raise HTTPException(400, "firmware path or file required")
 
-
 @app.get("/firmware/files")
 async def api_firmware_files():
     """List candidate .S firmware images in the confined directory.
@@ -1052,7 +1029,6 @@ async def api_firmware_files():
         return {"ok": True, "dir": _FW_DIR, "files": entries}
     except OSError as exc:
         return {"ok": False, "error": str(exc), "dir": _FW_DIR, "files": []}
-
 
 @app.get("/firmware/identity/{slave}")
 async def api_firmware_identity(slave: int):
@@ -1122,7 +1098,6 @@ async def api_firmware_identity(slave: int):
     except Exception as exc:
         return {"ok": False, "slave": int(slave), "error": str(exc)}
 
-
 @app.post("/firmware/dryrun")
 async def api_firmware_dryrun(req: Request):
     """Hardware-free full flash simulation (the DEFAULT, safe mode).
@@ -1183,7 +1158,6 @@ async def api_firmware_dryrun(req: Request):
         }
 
     return await loop.run_in_executor(None, _run)
-
 
 def _fw_live_worker(job_id: str, path: str, node: int, slave: int,
                     arg_dsp: int, frame_len: int, legacy50: bool,
@@ -1361,7 +1335,6 @@ def _fw_live_worker(job_id: str, path: str, node: int, slave: int,
         except Exception:
             pass
 
-
 @app.post("/firmware/flash")
 async def api_firmware_flash(req: Request):
     """Arm + start the IRREVERSIBLE live flash (background job).
@@ -1530,7 +1503,6 @@ async def api_firmware_flash(req: Request):
     return {"ok": True, "job_id": job_id, "node": node, "slave": slave,
             "host": link_label, "file": os.path.basename(path)}
 
-
 @app.get("/firmware/job/{job_id}")
 async def api_firmware_job(job_id: str):
     """Poll a live-flash job: progress, audit events, and terminal result."""
@@ -1546,7 +1518,6 @@ async def api_firmware_job(job_id: str):
         "result": job["result"], "verify": job.get("verify"),
     }
 
-
 @app.post("/firmware/job/{job_id}/abort")
 async def api_firmware_job_abort(job_id: str):
     """Cooperative abort. Takes effect at the next inter-frame boundary —
@@ -1558,7 +1529,6 @@ async def api_firmware_job_abort(job_id: str):
     job["abort"] = True
     return {"ok": True, "id": job_id, "aborting": True,
             "done": job["done"]}
-
 
 # ─── Entry point ────────────────────────────────────────────────────────
 
@@ -1573,7 +1543,6 @@ async def main():
     )
     server = uvicorn.Server(config)
     await server.serve()
-
 
 if __name__ == "__main__":
     try:

@@ -235,7 +235,6 @@ Updated feature count must match active ML bundles; legacy 62-feature models aut
 - `solcast_lo_vs_physics` and `solcast_hi_vs_physics` capture quantile-specific physics alignment
 - Under-cloud conditions: spread features aid model detection of high-variance regimes
 
-
 ---
 
 ## Forecast Tunables (operator settings, v2.11.x — option A, 2026-05-30)
@@ -257,7 +256,6 @@ engine default is used. **Validate any change with a `--train` + 30-day backtest
 Transmission loss is already operator-configurable per-inverter in `ipconfig.json` under
 `losses: { "1": 2.5, ... }` (default 2.5%) — calibrate there for the measured 2.5–3.6% range;
 no separate setting key is needed.
-
 
 ---
 

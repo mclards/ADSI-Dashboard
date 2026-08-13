@@ -80,7 +80,7 @@ function generateCsvBundle(run, steps, samples, outDir) {
   const lines = [];
   // BOM + the widest header (samples) so Excel column count matches the
   // widest section. Narrower sections pad with empty trailing cells.
-  lines.push("﻿" + _csvRow(SAMPLE_COLUMNS));
+  lines.push("\uFEFF" + _csvRow(SAMPLE_COLUMNS));
 
   // Meta block (3 columns padded to widest). Only the witness-relevant
   // fields. The full summary blob lives in the PDF / compliance_run table —

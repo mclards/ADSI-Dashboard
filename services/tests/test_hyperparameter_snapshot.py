@@ -21,7 +21,6 @@ if str(_REPO_ROOT) not in sys.path:
 
 from services import forecast_engine as fe  # noqa: E402
 
-
 class TestErrorMemoryConstants:
     """Scalar hyperparameters for `compute_error_memory` and its downstream."""
 
@@ -51,7 +50,6 @@ class TestErrorMemoryConstants:
             "ERR_MEMORY_REGIME_PENALTY_MATRIX."
         )
 
-
 class TestErrorMemoryDaysByRegime:
     """Per-regime lookback window overrides."""
 
@@ -74,7 +72,6 @@ class TestErrorMemoryDaysByRegime:
         assert d["clear"] <= d["mixed"] <= d["overcast"] <= d["rainy"], (
             "Per-regime lookbacks must be non-decreasing from clear→rainy"
         )
-
 
 class TestRegimePenaltyMatrix:
     """Graduated penalty matrix for cross-regime error memory weighting."""
@@ -123,7 +120,6 @@ class TestRegimePenaltyMatrix:
         }
         assert dict(fe.ERR_MEMORY_REGIME_PENALTY_MATRIX) == expected
 
-
 class TestRegimeBlendConstants:
     """LightGBM regime-blend parameters."""
 
@@ -139,7 +135,6 @@ class TestRegimeBlendConstants:
     def test_blend_ordering(self):
         assert fe.REGIME_BLEND_BASE < fe.REGIME_BLEND_MAX
 
-
 class TestMinUsableSlotsForEligibility:
     """v2.8 H3: named constant derived from SOLAR_SLOTS."""
 
@@ -154,7 +149,6 @@ class TestMinUsableSlotsForEligibility:
         # Snapshot the current value for a tripwire on SOLAR_SLOTS changes
         assert fe.MIN_USABLE_SLOTS_FOR_ELIGIBILITY == 132
 
-
 class TestSolcastCoverageThresholds:
     """v2.8 C1 (Solcast reliability audit): named coverage thresholds."""
 
@@ -166,7 +160,6 @@ class TestSolcastCoverageThresholds:
 
     def test_threshold_ordering(self):
         assert fe.SOLCAST_COVERAGE_USABLE_THRESHOLD < fe.SOLCAST_COVERAGE_FRESH_THRESHOLD
-
 
 class TestSQLiteRetryConstants:
     """SQLite retry budget."""

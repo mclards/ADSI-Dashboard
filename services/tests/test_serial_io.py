@@ -40,12 +40,10 @@ from services.serial_io import (  # noqa: E402
 )
 from services.vendor_pdu import SlaveIdInfo  # noqa: E402
 
-
 # ─── Fixtures (shared with test_vendor_pdu.py) ─────────────────────────────
 
 MOTOROLA_SERIAL = "400152A17R52"  # .109 slave=2, captured 2026-04-27
 EKI_MOTOROLA_SERIAL = "400152A18R44"  # .133 slave=4 EKI fallback
-
 
 def _build_fc11_payload(serial_ascii: str, model_ascii: str = "AAV1003BA",
                          fw_main: str = "AAS1091AA",
@@ -63,7 +61,6 @@ def _build_fc11_payload(serial_ascii: str, model_ascii: str = "AAV1003BA",
     buf[86:95] = fwa[:9]
     return bytes(buf)
 
-
 def _make_slave_id_info(serial: str = MOTOROLA_SERIAL) -> SlaveIdInfo:
     """Build a SlaveIdInfo without going through the byte-level parser."""
     payload = _build_fc11_payload(serial)
@@ -76,7 +73,6 @@ def _make_slave_id_info(serial: str = MOTOROLA_SERIAL) -> SlaveIdInfo:
         live_snapshot_raw=bytes(payload[14:34]),
         raw_payload=payload,
     )
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # validate_serial_format
@@ -119,7 +115,6 @@ class ValidateSerialFormatTests(unittest.TestCase):
         with self.assertRaises(SerialFormatError):
             validate_serial_format(12345, "motorola")  # type: ignore[arg-type]
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # serial_to_registers — wire-level packing
 # ──────────────────────────────────────────────────────────────────────────────
@@ -151,7 +146,6 @@ class SerialToRegistersTests(unittest.TestCase):
         with self.assertRaises(SerialFormatError):
             serial_to_registers("SHORT", "motorola")
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Wire constants — regression guard
 # ──────────────────────────────────────────────────────────────────────────────
@@ -171,7 +165,6 @@ class WireConstantsTests(unittest.TestCase):
     def test_register_counts(self):
         self.assertEqual(SERIAL_REG_COUNT["motorola"], 6)
         self.assertEqual(SERIAL_REG_COUNT["tx"], 16)
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # read_serial_with_lock — full lock-held FC11 read
@@ -269,7 +262,6 @@ class ReadSerialWithLockTests(unittest.TestCase):
         self.assertFalse(out["ok"])
         self.assertIn("exception", out["error"].lower())
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # write_serial_with_lock — UNLOCK + WRITE + VERIFY pipeline
 # ──────────────────────────────────────────────────────────────────────────────
@@ -279,7 +271,6 @@ class FakeWriteRegistersResponse:
 
     def isError(self):
         return self._error
-
 
 class WriteSerialWithLockTests(unittest.TestCase):
 
@@ -515,7 +506,6 @@ class WriteSerialWithLockTests(unittest.TestCase):
         self.assertIsNone(out["readback"])
         self.assertIn("rescan", out["error"])
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # info_to_dict — HTTP serialization
 # ──────────────────────────────────────────────────────────────────────────────
@@ -531,7 +521,6 @@ class InfoToDictTests(unittest.TestCase):
         self.assertEqual(bytes.fromhex(d["live_snapshot_hex"]), info.live_snapshot_raw)
         self.assertEqual(bytes.fromhex(d["raw_payload_hex"]), info.raw_payload)
         self.assertEqual(len(d["raw_payload_hex"]), 102 * 2)
-
 
 if __name__ == "__main__":
     unittest.main()

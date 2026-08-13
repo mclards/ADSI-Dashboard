@@ -29,7 +29,6 @@ from services.vendor_pdu import (
     read_slave_id,
 )
 
-
 # ─── Wire constants (decompiled from frmSetSerial.SetMotorola/TexasSerialNumber) ─
 
 UNLOCK_REGISTER = 0xFFFA
@@ -51,14 +50,11 @@ WRITE_ACK_LOST_SETTLE_S = 2.5   # extra settle when the write wasn't ACKed
 VERIFY_READ_ATTEMPTS = 4        # read-back tries before giving up
 VERIFY_READ_BACKOFF_S = 1.0     # between verify-read attempts
 
-
 class SerialIoError(Exception):
     """Operational failure during a serial read / write / verify pipeline."""
 
-
 class SerialFormatError(SerialIoError):
     """Operator-supplied serial doesn't match the chosen format."""
-
 
 # ─── Small helpers ─────────────────────────────────────────────────────────
 
@@ -82,7 +78,6 @@ def validate_serial_format(new_serial: str, fmt: str) -> None:
                 f"serial contains non-printable byte: 0x{ord(ch):02X}"
             )
 
-
 def serial_to_registers(new_serial: str, fmt: str) -> list:
     """Pack an ASCII serial into Modbus UINT16 registers (big-endian byte
     pairs, exactly as ISM frames it on the wire — see Field[1297]/[1299])."""
@@ -90,7 +85,6 @@ def serial_to_registers(new_serial: str, fmt: str) -> list:
     n_regs = SERIAL_REG_COUNT[fmt]
     payload = new_serial.encode("ascii")
     return [(payload[2 * i] << 8) | payload[2 * i + 1] for i in range(n_regs)]
-
 
 # ─── Modbus operations (sync — caller MUST hold thread_locks[ip]) ──────────
 
@@ -107,7 +101,6 @@ def _do_unlock(client, slave: int) -> None:
     if r is None or r.isError():
         raise SerialIoError(f"unlock_modbus_error: {r}")
 
-
 def _do_write(client, slave: int, regs: list) -> None:
     """Send the FC16 serial-write frame.  Raises SerialIoError on failure."""
     try:
@@ -120,7 +113,6 @@ def _do_write(client, slave: int, regs: list) -> None:
         raise SerialIoError(f"write_exception: {exc}") from exc
     if r is None or r.isError():
         raise SerialIoError(f"write_modbus_error: {r}")
-
 
 def read_serial_with_lock(
     client,
@@ -182,7 +174,6 @@ def read_serial_with_lock(
         "raw_payload_hex": info.raw_payload.hex(),
         "error": None,
     }
-
 
 def write_serial_with_lock(
     client,
@@ -328,7 +319,6 @@ def write_serial_with_lock(
                 + (f" (write error: {write_err})" if write_err else "")
             )
     return out
-
 
 # ─── Convenience wrappers used by the FastAPI handlers ─────────────────────
 

@@ -1,12 +1,12 @@
 # ADSI Inverter Dashboard User Manual
 
-**Applies to:** ADSI Inverter Dashboard `v2.12.3`
-**Document type:** Operator and administrator reference  
+**Applies to:** ADSI Inverter Dashboard `v2.12.4`
+**Document type:** Operator and administrator reference
 **Scope:** Main dashboard, forecast workspace, settings center, cloud backup, standby database workflow, alarm handling, exports, IP Configuration, and Topology
 
 ---
 
-## Service documentation (v2.12.3+)
+## Service documentation (v2.12.4+)
 
 Four Ingeteam reference PDFs ship with the installer under `docs/` and are
 also hosted on GitHub for in-app auto-download from the alarm drilldown:
@@ -352,12 +352,9 @@ The notification panel shows up to 50 recent active alarms. Each unacknowledged 
 
 Already-acknowledged alarms show a muted **`✔ Acked`** label instead of the button. When there are no active alarms the panel shows a simple "No active alarms." message and the pill is hidden.
 
-Alarm toasts (the brief pop-up notifications that appear bottom-right when a new alarm is raised, capped to a small stack so they never cover the inverter cards) also include an inline **`ACK`** button. Clicking ACK from a toast:
+Acknowledgement is gateway-authoritative in both operating modes. An ACK made on the gateway dashboard or any Remote-mode viewer is saved on the gateway and synchronized immediately to every connected dashboard. The Alarms table, sidebar badge, notification panel, alarm sound, and inverter-card alarm state reconcile together; reconnecting or replicated standby databases retain the same ACK state.
 
-- immediately registers the acknowledgement
-- auto-dismisses the toast after a short delay
-
-Use the Alarms page for formal review, bulk acknowledgement, and history. Use the bottom-right hub pill, its panel, and toast buttons for quick acknowledgement without leaving the current page.
+Use the Alarms page for formal review, bulk acknowledgement, and history. Use the bottom-right hub pill and its panel for quick acknowledgement without leaving the current page.
 
 ### 5.4 Operator Messages
 
@@ -918,6 +915,8 @@ Use this page for:
 - shift alarm review
 - confirmation that alarms were acknowledged
 - incident reporting and maintenance coordination
+
+Single-alarm ACK and `Acknowledge All` use the gateway as the source of truth. Their results synchronize across Gateway and Remote mode, including other open dashboard windows, without requiring a manual reload.
 
 ---
 
@@ -1856,19 +1855,48 @@ The service status grid polls `GET /api/streaming/go2rtc-status` every 5 seconds
 
 ### Separate Hikvision DVR Card
 
-The Hikvision DVR uses its own draggable dashboard card, settings modal, native decoder bridge, and API routes. Its DVR-specific connection stays separate from the Tapo configuration. The compact modal groups device identity, local connection, channel/playback, stream profile, and native-decoder status into separate panels. Enter the DVR's local username and password; Hik-Connect cloud credentials and camera access codes are not used.
+The Hikvision DVR uses its own draggable dashboard card, settings modal, browser stream, native decoder bridge, and API routes. Its DVR-specific connection stays separate from the Tapo configuration. The polished modal groups secure stream paths, device identity, DVR connection, channel/playback, stream profile, and playback status into separate panels. Enter the DVR's local username and password; Hik-Connect cloud credentials and camera access codes are not used. The SDK/HTTP port defaults to `80`, while RTSP defaults to `554`.
 
-Use **Smooth native playback** for normal operation. Hikvision LocalService decodes the selected DVR stream with the vendor's native hardware path, preserving the DVR's original quality and frame rate without an FFmpeg transcode. The native surface fills the Hikvision card, hides while the card is off-screen or a modal/Tapo fullscreen covers it, and resumes without restarting the stream. Open its configuration through **Tapo Camera Settings > Hikvision DVR**. Double-click the native Hikvision video to enter or leave its LocalService fullscreen view; the card has no HTML Settings or Fullscreen buttons. Repeated unchanged geometry updates are suppressed so window tracking does not interrupt decoding. **Compatible snapshots** remain a low-frame-rate fallback, while **Direct HLS** is retained for diagnostics. **Prepare H.264 Substream** remains an optional isolated change to channel **xx02** and never modifies **xx01**. A blank password means “keep the existing password.” Playback remains local to the workstation in Gateway and Remote dashboard modes.
+Use **Hybrid HLS + native viewer window** for normal operation. On the Inverters-page card, FFmpeg supplies browser-safe H.264 HLS. Expect roughly 2–3 seconds of latency and modest transcoding loss. The native-viewer control pauses card HLS and opens a standard Electron window like the Analytics popout. Hikvision LocalService fills its content area at the DVR's original quality and frame rate. Use the normal Windows title-bar controls to move, resize, minimize, maximize, restore, or close it. Closing the window stops the native decoder and resumes HLS automatically when Inverters is visible.
+
+When the operator navigates away from Inverters, the Hikvision card disappears with that page and its HLS playback stops. Returning to Inverters restores the card in its saved grid position and reconnects playback. The card provides **Settings** and **Open native viewer window** controls. Closing the native viewer resumes the card only when Inverters is visible. Native playback is restricted to its owning viewer window, and rapid window transitions cancel stale starts. If LocalService cannot start, the viewer shows a **Retry** button; otherwise the native video fills the content area.
+
+**Compatible snapshots** remains a low-frame-rate fallback, while **Direct HLS** remains a raw-codec diagnostic mode; these explicit modes use ordinary HTML fullscreen instead of opening the native viewer. **Prepare H.264 Substream** is an optional isolated change to channel **xx02** and never modifies **xx01**. A blank password means “keep the existing password.”
+
+#### Hikvision over Tailscale
+
+The delivery path follows the dashboard operating mode:
+
+| Playback surface | Gateway mode | Remote mode |
+| --- | --- | --- |
+| Inverters-page camera card | Local H.264 HLS generated beside the DVR | Authenticated HLS/snapshot relay from the gateway over the configured gateway link |
+| Native viewer window | LocalService connects directly to the DVR over the plant LAN | LocalService connects directly to the DVR through a Tailscale subnet route |
+
+The Remote workstation does not start a second go2rtc/FFmpeg pipeline. The gateway remains authoritative for the compact stream and retains its DVR password. Native LocalService runs on the viewer, so that viewer stores its own DVR password locally; the gateway password is never returned through the API. Gateway host, port, channel, stream, and username changes synchronize to the viewer so both playback paths target the same source.
+
+During a rolling deployment, an older gateway may not yet expose `/api/hikvision/*`. The viewer detects and contains that HTML/404 response instead of sending it to the HLS parser or displaying markup inside the camera card. Remote mode never starts a viewer-side transcoder: update or restart the gateway to enable compact playback.
+
+For least privilege, configure the gateway as a Tailscale subnet router advertising only the DVR host, for example `192.168.1.12/32`, instead of the entire plant subnet. Approve that route in the Tailscale admin console and grant only approved viewer devices access to the configured SDK/HTTP and RTSP ports (normally TCP `80` and `554`). The **Secure Stream Paths** panel and **Check Routes** button report:
+
+- whether the dashboard card is local or gateway-relayed
+- whether this workstation can reach the DVR's SDK port for native playback
+- whether Tailscale is installed and connected
+- the recommended `/32` route when native playback is blocked
+
+The route check is read-only. It opens bounded TCP connectivity probes and never starts video, changes the DVR, or activates a microphone.
 
 | Hikvision control | Purpose |
 | --- | --- |
-| `Tapo Camera Settings > Hikvision DVR` | Opens the dedicated Hikvision DVR configuration modal |
-| Double-click Hikvision video | Enters or leaves Hikvision LocalService fullscreen playback |
-| `Playback Mode` | Selects smooth Hikvision LocalService playback, compatible snapshots, or diagnostic direct HLS |
-| `Verify Connection` | Saves the current fields and verifies native playback against the DVR |
+| Gear button / `Tapo Camera Settings > Hikvision DVR` | Opens the dedicated Hikvision DVR configuration modal |
+| Native viewer button or double-click video | In recommended hybrid mode, pauses HLS and opens an Analytics-style framed, resizable LocalService window |
+| Windows title-bar controls | Move, resize, minimize, maximize/restore, or close the native viewer; closing stops the decoder and resumes H.264 HLS |
+| `Playback Mode` | Selects hybrid HLS/native playback, compatible snapshots, or diagnostic direct HLS |
+| `SDK / HTTP` | Port used by LocalService native playback; default `80` |
+| `Secure Stream Paths` / `Check Routes` | Shows gateway-relay, direct-native, and Tailscale readiness without starting playback |
+| `Verify Connection` | Saves the current fields and verifies the browser-safe HLS stream against the DVR |
 | `Prepare H.264 Substream` | Converts only the selected channel's xx02 profile to browser-compatible H.264 after confirmation |
 | `Save & View` | Persists the Hikvision configuration and reconnects the dedicated card |
-| `Start` / `Stop` | Starts or stops Hikvision LocalService native playback |
+| `Start` / `Stop` | Starts or stops the current Hikvision presentation |
 
 ### Troubleshooting
 
@@ -1880,7 +1908,10 @@ Use **Smooth native playback** for normal operation. Hikvision LocalService deco
 | FFmpeg mode shows no video | FFmpeg not installed | Install FFmpeg and add to system PATH |
 | Service controls hidden | Remote operation mode | Switch to Gateway mode in Settings > Connectivity |
 | Status shows `error` | 3+ consecutive crashes | Check RTSP source and `go2rtc.yaml` config, then manually restart |
-| Hikvision card stays on “Starting” | Hikvision LocalService is unavailable, the DVR is unreachable, or the local DVR login failed | Confirm LocalService is running, verify the DVR/LAN connection, then use `Verify Connection` |
+| Hikvision card stays on “Starting” | The Hikvision media service is unavailable, the DVR is unreachable, or the local DVR login failed | Verify the DVR/LAN connection, then use `Verify Connection` |
+| HLS works but the native viewer is blank | Hikvision LocalService is unavailable or blocked on the workstation | Start LocalService and select **Retry**, or close the viewer with the normal Windows close button |
+| Remote card works but native viewer is blocked | The gateway relay is healthy, but the viewer has no approved route to the DVR or no viewer-local DVR password | Advertise and approve the DVR `/32` route, allow the SDK/RTSP ports in the tailnet grant, enter the password on the viewer, then use **Check Routes** |
+| Secure Stream Paths shows Tailscale offline | Tailscale is stopped or signed out on the Remote workstation | Connect Tailscale, confirm the correct tailnet, then rerun **Check Routes** |
 | Hikvision profile or stream is unavailable | DVR IP, RTSP account, or LAN route is incorrect | Verify the DVR is reachable, then use `Test Stream` |
 
 ---
@@ -2170,13 +2201,26 @@ the old → new firmware codes from the post-flash re-read).
 
 ## 7. Auxiliary Windows
 
-## 7.1 IP Configuration
+## 7.1 Global Configuration
 
-The `IP Configuration` window manages per-inverter network and operational settings. Open it from **Settings > IP Configuration** or `Ctrl+I`. Access requires an auth gate key (`adsiM` or `adsiMM`, where M is the current minute). The session lasts 1 hour.
+The `Global Configuration` window is the compact administration surface for inverter addressing, plant/data settings, hardware endpoints and inverter clocks, and connectivity/backup status. Open it from **Settings > Global Configuration** or `Ctrl+I`. Access requires an auth gate key (`adsiM` or `adsiMM`, where M is the current minute). The session lasts 1 hour.
 
 The window is available in **both Gateway and Remote mode**. When opened on a Remote viewer, a banner indicates that edits are saved to the gateway (the authoritative source) and mirrored back to the local viewer, so an operator working away from the plant can update inverter addressing without remoting into the gateway PC. The local device-reachability scan (gear-icon status, the **Check Status** button, and the "Online x / 27" counter) is suppressed in Remote mode because those inverters live on the gateway's LAN and are not reachable from the viewer; the gateway continues to poll them normally.
 
-### Configuration Table
+### Configuration Tabs
+
+| Tab | Purpose |
+|-----|---------|
+| **Network & IP** | Inverter IP addresses, poll intervals, enabled nodes, loss factors, reconnect, and device-page access. |
+| **Plant & Data** | Plant/operator identity, fleet sizing, dashboard grid layout, export folder, retention, and forecast provider. |
+| **Hardware & Clocks** | Python inverter-service data/write endpoints plus daily inverter RTC synchronization and drift threshold. |
+| **Connectivity & Backup** | Gateway/Remote mode, gateway URL/token, Tailscale hint, standby auto-refresh, live link state, backup readiness, and gateway-only portable backup export. |
+
+License and application-update controls are intentionally kept in the main **Settings** page because they belong to the individual workstation and are not gateway-synchronized global configuration.
+
+Use **Save All Changes** to commit pending editable settings across the tabs. A dot on the button indicates unsaved changes. Server validation errors remain visible in the bottom status bar and are never reported as successful saves. Switching from Remote to Gateway mode displays a warning and restarts the desktop app after a successful save so the new local-authority state starts cleanly.
+
+### Network & IP Table
 
 Each of the 27 inverters has one row with the following columns:
 
@@ -2187,7 +2231,7 @@ Each of the 27 inverters has one row with the following columns:
 | **Polling Interval (s)** | How often the gateway polls this inverter, in seconds (min 0.01, default 0.05). |
 | **Enabled Units** | Which nodes (1--4) are active. Use **All** to toggle all four. Empty selection disables the inverter. |
 | **Loss %** | Estimated MW transmission loss from this inverter to the substation (0--100%). Default is `2.5%` per inverter unless overridden. Used exclusively by the forecast engine for substation-level accuracy; does *not* affect live dashboard readings, energy totals, or exports. |
-| **Save** | Saves the individual row. Use **Save All Changes** at the bottom to save every row at once. |
+| **Save** | Saves the individual row without discarding edits still pending in other rows. Use **Save All Changes** at the bottom to save every pending row and global setting. |
 
 IP Config is also the authority for live inverter identity. The dashboard binds telemetry to an inverter by the configured IP address and enabled node list, not by any assumed IP numbering pattern. Cards, selectors, and alarm labels may show the configured IP alongside `INV-xx` so operators can verify the assignment directly.
 
@@ -2200,8 +2244,10 @@ Example: if INV-15 has a 2.5% loss (degraded cable) and INV-26 has 1.0% (far fro
 ### Additional Controls
 
 - **Check Status** -- scans all configured IPs for reachability and shows an online count.
-- **Open Topology** -- opens the visual plant topology map.
+- **Topology** -- opens the visual plant topology map (Gateway mode only).
 - **Theme toggle** -- switches between light and dark mode for this window.
+- **Export .adsibak** -- creates a complete portable backup from the gateway workstation; it is disabled on Remote viewers.
+- **License / update actions** -- refresh or replace the license and check, download, or install application updates through the desktop shell.
 
 ### Operational Notes
 
@@ -2434,6 +2480,16 @@ is safe.
 6. Click **Apply & Connect**.
 7. Verify the live feed appears in the camera card.
 8. If the stream fails, check the go2rtc service status, verify network connectivity, and retry.
+
+For the separate Hikvision DVR card:
+
+1. Open the Hikvision gear button, or use **Tapo Camera Settings > Hikvision DVR**.
+2. Enter the DVR host, local username/password, channel, stream, and transport.
+3. Select **Hybrid HLS + native viewer window** and click **Verify Connection**.
+4. Click **Save & View**. Confirm the card badge changes to **H.264 HLS**.
+5. Navigate to another dashboard page and confirm the Hikvision card is completely absent. Return to Inverters and confirm it reconnects in its saved grid position.
+6. Click the native-viewer button or double-click the video. Confirm an Analytics-style window opens with the standard Windows title bar and the vendor native surface fills its content area.
+7. Resize, maximize, restore, and minimize the viewer, then close it with the title-bar **X** and confirm H.264 HLS resumes.
 
 ---
 

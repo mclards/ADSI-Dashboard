@@ -27,7 +27,6 @@ from typing import Optional
 
 from pymodbus.client.sync import ModbusTcpClient
 
-
 def find_ipconfig(p: Optional[str]):
     if p:
         return Path(p).expanduser().resolve()
@@ -38,7 +37,6 @@ def find_ipconfig(p: Optional[str]):
         if c.is_file():
             return c
     raise FileNotFoundError("ipconfig.json not found")
-
 
 def load_plan(path: Path):
     d = json.loads(path.read_text("utf-8"))
@@ -55,7 +53,6 @@ def load_plan(path: Path):
         plan.append((n, str(ip), u))
     plan.sort()
     return plan
-
 
 class Poller(threading.Thread):
     def __init__(self, inv, ip, units, interval, deadline, q, stop):
@@ -129,7 +126,6 @@ class Poller(threading.Thread):
         try: c.close()
         except Exception: pass
 
-
 class Writer(threading.Thread):
     def __init__(self, path, q, stop):
         super().__init__(daemon=True)
@@ -145,7 +141,6 @@ class Writer(threading.Thread):
                 except Exception: continue
                 f.write(json.dumps(r, separators=(",",":")) + "\n"); f.flush()
                 if r.get("kind") == "scan": self.n += 1
-
 
 def main():
     ap = argparse.ArgumentParser()
@@ -196,7 +191,6 @@ def main():
     ok = sum(p.ok for p in ps); fail = sum(p.fail for p in ps)
     print(f"[DONE] samples={w.n} ok={ok} fail={fail} out={out}")
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

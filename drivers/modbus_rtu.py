@@ -13,7 +13,6 @@ import struct
 import time
 from pymodbus.client.sync import ModbusSerialClient
 
-
 def crc16_modbus(data: bytes) -> int:
     """
     Calculate Modbus CRC16 (polynomial 0xA001, init 0xFFFF).
@@ -29,7 +28,6 @@ def crc16_modbus(data: bytes) -> int:
                 crc >>= 1
     return crc
 
-
 def build_rtu_adu(unit: int, pdu: bytes) -> bytes:
     """
     Build Modbus RTU ADU: [unit] + pdu + crc16_lo + crc16_hi.
@@ -44,7 +42,6 @@ def build_rtu_adu(unit: int, pdu: bytes) -> bytes:
     adu = bytes([unit]) + pdu
     crc = crc16_modbus(adu)
     return adu + struct.pack("<H", crc)
-
 
 def parse_rtu_adu(adu: bytes) -> tuple:
     """
@@ -70,7 +67,6 @@ def parse_rtu_adu(adu: bytes) -> tuple:
     computed_crc = crc16_modbus(adu[:-2])
     crc_ok = embedded_crc == computed_crc
     return unit, pdu, crc_ok
-
 
 def create_serial_client(port: str, baudrate: int = 9600, parity: str = "N",
                          stopbits: int = 1, bytesize: int = 8,
@@ -100,7 +96,6 @@ def create_serial_client(port: str, baudrate: int = 9600, parity: str = "N",
         retry_on_empty=False,
     )
     return client
-
 
 def close_quietly(client):
     """Close a serial client without raising exceptions."""

@@ -25,7 +25,6 @@ import sys
 from collections import defaultdict
 from datetime import datetime
 
-
 def load(path: pathlib.Path):
     samples = []
     events = []
@@ -41,7 +40,6 @@ def load(path: pathlib.Path):
             events.append(r)
     return samples, events
 
-
 def per_unit(samples):
     by_unit = defaultdict(list)
     for s in samples:
@@ -49,7 +47,6 @@ def per_unit(samples):
     for k, arr in by_unit.items():
         arr.sort(key=lambda r: r["ts_ms"])
     return by_unit
-
 
 def analyze_unit(arr):
     first, last = arr[0], arr[-1]
@@ -130,7 +127,6 @@ def analyze_unit(arr):
         "r0_suspicious": r0_suspicious,
     }
 
-
 def fmt(v, spec=""):
     if v is None:
         return "-"
@@ -138,7 +134,6 @@ def fmt(v, spec=""):
         return f"{v:{spec}}"
     except Exception:
         return str(v)
-
 
 def build_report(samples, events):
     by_unit = per_unit(samples)
@@ -258,7 +253,6 @@ def build_report(samples, events):
 
     return "\n".join(out), rows
 
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("jsonl", type=str)
@@ -282,7 +276,6 @@ def main():
     else:
         print(report)
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

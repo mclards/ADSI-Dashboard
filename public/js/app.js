@@ -4493,12 +4493,12 @@ function syncDayAheadGeneratorAvailability() {
 function openIpConfigSettings() {
   // Editable in both gateway and remote mode. In remote mode the save proxies
   // to the gateway (source of truth) and is mirrored into the local store — see
-  // _applyIpConfigPostRemote (server) and the remote banner in ip-config.html.
+  // _applyIpConfigPostRemote (server) and the remote banner in global-config.html.
   if (window.electronAPI?.openIpConfigWindow) {
     window.electronAPI.openIpConfigWindow();
     return;
   }
-  window.location.href = "/ip-config.html";
+  window.location.href = "/global-config.html";
 }
 
 function openCalibratorWindow() {
@@ -4761,10 +4761,21 @@ function initNavDrag() {
 
 function switchPage(page) {
   State.currentPage = page;
+  const isPopoutWindow = document.body.classList.contains("popout-mode");
   if (page !== "inverters" && page !== "camera" && cameraPlayer) {
     cameraPlayer.stop();
   }
-  if (page !== "inverters" && hikvisionPlayer) hikvisionPlayer.stop();
+  // Hikvision belongs to the Inverters page. Its dedicated popout is the only
+  // exception; normal dashboard navigation must stop the hidden HLS player.
+  const hikvisionPageActive = page === "inverters";
+  const hikvisionCard = $("hikvisionCard");
+  if (hikvisionCard) {
+    hikvisionCard.hidden = !hikvisionPageActive;
+    hikvisionCard.style.display = hikvisionPageActive ? "" : "none";
+  }
+  if (!hikvisionPageActive && hikvisionPlayer) {
+    hikvisionPlayer.stop();
+  }
   if (page !== "analytics") {
     stopAnalyticsRealtime();
     stopAnalyticsAutoRefresh();
@@ -4854,7 +4865,7 @@ function switchPage(page) {
         cameraPlayer.start();
       }
     }
-    if (page === "inverters" && $("hikvisionCard") && hikvisionPlayer) {
+    if (page === "inverters" && $("hikvisionCard") && hikvisionPlayer && !hikvisionPlayer._pausedForNativeViewer) {
       hikvisionPlayer.start();
     }
   }
@@ -12055,8 +12066,10 @@ function buildInverterGrid() {
   if (!hikPlaced) ordered.push("hik");
   const frag = document.createDocumentFragment();
   frag.appendChild(buildBulkControlPanel());
-  const isPopoutCam = document.body.classList.contains("popout-mode") && 
-                      (new URLSearchParams(window.location.search).get("popout") === "camera");
+  const popoutTarget = document.body.classList.contains("popout-mode")
+    ? new URLSearchParams(window.location.search).get("popout")
+    : "";
+  const isPopoutCam = popoutTarget === "camera";
 
   for (const i of ordered) {
     if (i === "cam") {
@@ -12069,8 +12082,6 @@ function buildInverterGrid() {
       }
     }
     else if (i === "hik") {
-      // The existing camera popout remains the Tapo viewer. Hikvision has an
-      // independent card/player and does not compete for Tapo's stream slot.
       if (!isPopoutCam) frag.appendChild(buildHikvisionCard());
     }
     else frag.appendChild(buildInverterCard(i, nodes));
@@ -12808,6 +12819,14 @@ function buildHikvisionCard() {
       <div class="cam-label" id="hikvisionLabel">Hikvision CCTV</div>
       <div class="cam-codec-badge" id="hikvisionCodecBadge">VIDEO</div>
       <div class="cam-live-dot" id="hikvisionLiveDot"></div>
+      <div class="cam-controls" id="hikvisionControls">
+        <button class="cam-ctrl-btn" id="btnHikvisionSettings" type="button" title="Hikvision settings" aria-label="Hikvision settings">
+          <span class="mdi mdi-cog"></span>
+        </button>
+        <button class="cam-ctrl-btn" id="btnHikvisionNativeViewer" type="button" title="Open native viewer window" aria-label="Open native viewer window">
+          <span class="mdi mdi-monitor-eye"></span>
+        </button>
+      </div>
       <div class="camera-overlay" id="hikvisionOverlay">
         <span class="mdi mdi-cctv camera-overlay-icon" id="hikvisionOverlayIcon"></span>
         <span class="camera-overlay-text" id="hikvisionOverlayText">Connecting to Hikvision DVR...</span>
@@ -15422,10 +15441,30 @@ function connectWS() {
 /* ── Camera Streaming ──────────────────────────────────────────────── */
 let cameraPlayer = null;
 let hikvisionPlayer = null;
+let hikvisionUiAbortController = null;
+let hikvisionNativeViewerActive = false;
 // Grid rebuilds are synchronous, but LocalService teardown is asynchronous.
 // Share the stop promise across successive player instances so a retiring
 // instance cannot destroy the native window just opened by its replacement.
 let hikvisionNativeStopGate = Promise.resolve();
+
+function isHikvisionFullscreen(card = $("hikvisionCard")) {
+  return Boolean(card && document.fullscreenElement === card);
+}
+
+function openHikvisionViewer(card = $("hikvisionCard")) {
+  if (!card) return Promise.resolve();
+  const requestedMode = hikvisionPlayer?.requestedMode
+    || State.settings?.hikvisionConfig?.playbackMode
+    || "localservice";
+  if (requestedMode === "localservice" && window.electronAPI?.openHikvisionNativeViewer) {
+    const theme = document.documentElement.getAttribute("data-theme") || "dark";
+    return window.electronAPI.openHikvisionNativeViewer(theme);
+  }
+  if (isHikvisionFullscreen(card)) return document.exitFullscreen();
+  if (document.fullscreenElement) return Promise.reject(new Error("Another fullscreen view is active"));
+  return card.requestFullscreen();
+}
 
 const CAM_DEFAULTS = {
   mode: "hls",
@@ -16053,6 +16092,10 @@ function initCameraPlayer() {
 /* ── Dedicated Hikvision DVR player ──────────────────────────────── */
 class HikVisionPlayer {
   constructor() {
+    this.card = $("hikvisionCard");
+    this.video = $("hikvisionVideo");
+    this.nativeSurface = $("hikvisionNativeSurface");
+    this.snapshot = $("hikvisionSnapshot");
     this.active = false;
     this.hls = null;
     this.reconnectTimer = null;
@@ -16070,6 +16113,8 @@ class HikVisionPlayer {
     this.requestedMode = "localservice";
     this.effectiveMode = "localservice";
     this.autoFallbackTried = false;
+    this.connectGeneration = 0;
+    this._pausedForNativeViewer = false;
   }
 
   async start() {
@@ -16082,6 +16127,7 @@ class HikVisionPlayer {
 
   stop() {
     this.active = false;
+    this.connectGeneration += 1;
     this._clearTimers();
     this._teardown();
     this._setLive(false);
@@ -16089,6 +16135,7 @@ class HikVisionPlayer {
   }
 
   async reconnect() {
+    this.connectGeneration += 1;
     this._clearTimers();
     this._teardown();
     this.active = true;
@@ -16098,6 +16145,7 @@ class HikVisionPlayer {
 
   async connect() {
     if (!this.active) return;
+    const generation = ++this.connectGeneration;
     this._showOverlay("Starting Hikvision stream...", "mdi-loading mdi-spin");
     this._setLive(false);
     this._hideRetry();
@@ -16108,26 +16156,37 @@ class HikVisionPlayer {
       } catch (_) {
         this.requestedMode = State.settings?.hikvisionConfig?.playbackMode || "localservice";
       }
-      this.effectiveMode = this.requestedMode === "compatible"
-        ? "compatible"
-        : this.requestedMode === "hls" ? "hls" : "localservice";
+      if (!this._isCurrent(generation)) return;
+      // Hybrid mode applies only to the recommended LocalService selection.
+      // Explicit snapshot/direct-HLS diagnostic choices retain their meaning.
+      this.effectiveMode = this.requestedMode === "localservice"
+        ? "browser"
+        : this.requestedMode;
       if (this.effectiveMode === "compatible") {
-        this._openSnapshots();
+        this._openSnapshots(generation);
       } else if (this.effectiveMode === "localservice") {
-        await this._openNative();
+        await this._openNative(generation);
       } else {
         await api("/api/hikvision/start", "POST");
-        this._openHls();
+        if (!this._isCurrent(generation)) return;
+        await this._openHls(generation);
       }
     } catch (err) {
-      this._onError(err.message || "Hikvision service unavailable");
+      if (this._isCurrent(generation)) this._onError(err.message || "Hikvision service unavailable", generation);
     }
   }
 
+  _isCurrent(generation) {
+    return this.active && generation === this.connectGeneration && this.card?.isConnected;
+  }
+
   _nativeRect() {
-    const body = $("hikvisionBody");
+    const body = this.card?.querySelector("#hikvisionBody");
     if (!body) return null;
     const rect = body.getBoundingClientRect();
+    if (![rect.left, rect.top, rect.width, rect.height].every(Number.isFinite) || rect.width < 2 || rect.height < 2) {
+      return null;
+    }
     return {
       left: rect.left,
       top: rect.top,
@@ -16139,16 +16198,13 @@ class HikVisionPlayer {
 
   _nativeCanDisplay(rect = this._nativeRect()) {
     if (!this.active || !this.nativeRunning || !rect || document.hidden) return false;
-    if (State.currentPage !== "inverters" || !$("page-inverters")?.classList.contains("active")) return false;
+    if (!this.card?.isConnected || !isHikvisionFullscreen(this.card)) return false;
     const modalOpen = [...document.querySelectorAll(".modal-backdrop:not(.hidden)")]
       .some((modal) => getComputedStyle(modal).display !== "none");
     if (modalOpen) return false;
-    const card = $("hikvisionCard");
-    const fullscreen = document.fullscreenElement;
-    if (fullscreen && fullscreen !== card && !card?.contains(fullscreen)) return false;
     const viewportWidth = document.documentElement.clientWidth || window.innerWidth;
     const viewportHeight = document.documentElement.clientHeight || window.innerHeight;
-    const hostRect = $("hikvisionBody")?.getBoundingClientRect();
+    const hostRect = this.card.querySelector("#hikvisionBody")?.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0 && hostRect && hostRect.left >= 0 && hostRect.top >= 0 &&
       hostRect.right <= viewportWidth && hostRect.bottom <= viewportHeight;
   }
@@ -16177,25 +16233,28 @@ class HikVisionPlayer {
     return this.nativeSyncPromise;
   }
 
-  async _openNative() {
+  async _openNative(generation) {
     const bridge = window.electronAPI;
     if (!bridge || typeof bridge.hikvisionNativeStart !== "function") {
       throw new Error("Smooth Hikvision playback requires the Electron desktop app");
     }
     this._teardownMediaOnly();
     await hikvisionNativeStopGate.catch(() => {});
-    const surface = $("hikvisionNativeSurface");
+    if (!this._isCurrent(generation) || !isHikvisionFullscreen(this.card)) return;
+    const surface = this.nativeSurface;
     if (surface) surface.style.display = "block";
     this._showOverlay("Starting Hikvision hardware decoder...", "mdi-loading mdi-spin");
-    const result = await bridge.hikvisionNativeStart(this._nativeRect());
-    if (!this.active) {
+    const rect = this._nativeRect();
+    if (!rect) throw new Error("Hikvision fullscreen surface is not ready");
+    const result = await bridge.hikvisionNativeStart(rect);
+    if (!this._isCurrent(generation) || !isHikvisionFullscreen(this.card)) {
       await bridge.hikvisionNativeStop().catch(() => {});
       return;
     }
     this.nativeRunning = true;
     this.nativeHidden = false;
-    $("hikvisionCard")?.classList.add("native-playing");
-    const badge = $("hikvisionCodecBadge");
+    this.card.classList.add("native-playing");
+    const badge = this.card.querySelector("#hikvisionCodecBadge");
     if (badge) badge.textContent = `${result.width || "2944"}x${result.height || "1664"} NATIVE`;
     this.reconnectCount = 0;
     this._hideOverlay();
@@ -16208,21 +16267,37 @@ class HikVisionPlayer {
     await this.syncNativePresentation();
   }
 
-  _openHls() {
-    const video = $("hikvisionVideo");
+  async _openHls(generation) {
+    const video = this.video;
     if (!video) return;
     video.style.display = "block";
     video.muted = true;
     const url = `/api/hikvision/hls/master.m3u8?mode=${encodeURIComponent(this.effectiveMode)}&_=${Date.now()}`;
+    try {
+      const manifestResponse = await fetch(url, { cache: "no-store" });
+      const manifestText = await manifestResponse.text();
+      if (!manifestResponse.ok || !/^\uFEFF?\s*#EXTM3U(?:\r?\n|$)/i.test(manifestText)) {
+        let serverMessage = "";
+        try { serverMessage = JSON.parse(manifestText)?.error || ""; } catch (_) {}
+        if (!serverMessage && /^\s*</.test(manifestText)) {
+          serverMessage = "The gateway returned an invalid camera response. Update or restart the gateway dashboard.";
+        }
+        throw new Error(serverMessage || `Hikvision gateway relay returned an invalid HLS manifest (HTTP ${manifestResponse.status})`);
+      }
+    } catch (err) {
+      if (this._isCurrent(generation)) this._onError(err.message || "Hikvision gateway manifest unavailable", generation);
+      return;
+    }
+    if (!this._isCurrent(generation)) return;
     const onPlaying = () => {
-      if (!this.active) return;
+      if (!this._isCurrent(generation)) return;
       clearTimeout(this.playTimeout);
       this.playTimeout = null;
       this.reconnectCount = 0;
-      const badge = $("hikvisionCodecBadge");
+      const badge = this.card.querySelector("#hikvisionCodecBadge");
       if (badge) {
         const size = video.videoWidth && video.videoHeight ? `${video.videoWidth}x${video.videoHeight} ` : "";
-        badge.textContent = `${size}${this.effectiveMode === "browser" ? "H.264 GPU" : "HLS"}`;
+        badge.textContent = `${size}${this.effectiveMode === "browser" ? "H.264 HLS" : "HLS"}`;
       }
       this._hideOverlay();
       this._setLive(true);
@@ -16242,41 +16317,45 @@ class HikVisionPlayer {
       hls.loadSource(url);
       hls.attachMedia(video);
       hls.on(Hls.Events.MANIFEST_PARSED, (_event, data) => {
+        if (!this._isCurrent(generation)) return;
         const codec = data?.levels?.[0]?.videoCodec || (this.effectiveMode === "browser" ? "H.264" : "H.265");
-        const badge = $("hikvisionCodecBadge");
-        if (badge) badge.textContent = /avc|h264/i.test(codec) ? "H.264 GPU" : "H.265";
+        const badge = this.card.querySelector("#hikvisionCodecBadge");
+        if (badge) badge.textContent = /avc|h264/i.test(codec) ? "H.264 HLS" : "H.265 HLS";
         video.play().catch(() => {});
       });
       hls.on(Hls.Events.ERROR, (_event, data) => {
-        if (data.fatal) this._onError(`Hikvision ${data.details || "stream error"}`);
+        if (data.fatal && this._isCurrent(generation)) this._onError(`Hikvision ${data.details || "stream error"}`, generation);
       });
     } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
       video.src = url;
       video.play().catch(() => {});
-      video.addEventListener("error", () => this._onError("Hikvision HLS playback failed"), { once: true });
+      video.addEventListener("error", () => {
+        if (this._isCurrent(generation)) this._onError("Hikvision HLS playback failed", generation);
+      }, { once: true });
     } else {
       this._onError("HLS playback is unavailable in this runtime");
       return;
     }
 
     this.playTimeout = setTimeout(() => {
-      if (this.active && !$("hikvisionLiveDot")?.classList.contains("active")) {
-        this._onError("Hikvision browser video did not begin playing");
+      if (this._isCurrent(generation) && !this.card.querySelector("#hikvisionLiveDot")?.classList.contains("active")) {
+        this._onError("Hikvision browser video did not begin playing", generation);
       }
     }, 30000);
   }
 
-  _onError(message) {
-    if (!this.active) return;
+  _onError(message, generation = this.connectGeneration) {
+    if (!this._isCurrent(generation)) return;
     this._teardown();
     this._setLive(false);
-    if (this.reconnectCount < 2) {
+    const requiresGatewayUpdate = /gateway (?:does not support|relay is unavailable)|update or restart the gateway/i.test(String(message || ""));
+    if (!requiresGatewayUpdate && this.reconnectCount < 2) {
       const delay = 3000 * Math.pow(2, this.reconnectCount);
       this.reconnectCount += 1;
       this._showOverlay(`${message}. Retrying...`, "mdi-loading mdi-spin");
       this.reconnectTimer = setTimeout(() => {
         this.reconnectTimer = null;
-        if (this.active) this.connect();
+        if (this._isCurrent(generation)) this.connect();
       }, delay);
     } else {
       this._showOverlay(message, "mdi-video-off-outline");
@@ -16288,15 +16367,15 @@ class HikVisionPlayer {
     this.snapshotGeneration += 1;
     if (this.nativeGeometryTimer) clearInterval(this.nativeGeometryTimer);
     this.nativeGeometryTimer = null;
-    if (this.nativeRunning || $("hikvisionCard")?.classList.contains("native-playing")) {
+    if (this.nativeRunning || this.card?.classList.contains("native-playing")) {
       hikvisionNativeStopGate = window.electronAPI?.hikvisionNativeStop?.().catch(() => {}) || Promise.resolve();
       this.nativeStopPromise = hikvisionNativeStopGate;
     }
     this.nativeRunning = false;
     this.nativeHidden = true;
     this.nativeSyncQueued = false;
-    $("hikvisionCard")?.classList.remove("native-playing");
-    const surface = $("hikvisionNativeSurface");
+    this.card?.classList.remove("native-playing");
+    const surface = this.nativeSurface;
     if (surface) surface.style.display = "none";
     this._teardownMediaOnly();
   }
@@ -16306,7 +16385,7 @@ class HikVisionPlayer {
       try { this.hls.destroy(); } catch (_) {}
       this.hls = null;
     }
-    const video = $("hikvisionVideo");
+    const video = this.video;
     if (video) {
       try { video.pause(); } catch (_) {}
       video.srcObject = null;
@@ -16314,7 +16393,7 @@ class HikVisionPlayer {
       video.load();
       video.style.display = "none";
     }
-    const snapshot = $("hikvisionSnapshot");
+    const snapshot = this.snapshot;
     if (snapshot) {
       snapshot.removeAttribute("src");
       snapshot.style.display = "none";
@@ -16323,22 +16402,22 @@ class HikVisionPlayer {
     this.snapshotObjectUrl = "";
   }
 
-  _openSnapshots() {
-    const image = $("hikvisionSnapshot");
-    if (!image) return this._onError("Hikvision snapshot viewer is unavailable");
+  _openSnapshots(connectGeneration = this.connectGeneration) {
+    const image = this.snapshot;
+    if (!image) return this._onError("Hikvision snapshot viewer is unavailable", connectGeneration);
     this._teardown();
     const generation = this.snapshotGeneration;
     image.style.display = "block";
     let sequence = 0;
     let displayed = 0;
     const worker = async () => {
-      while (this.active && this.effectiveMode === "compatible" && generation === this.snapshotGeneration) {
+      while (this._isCurrent(connectGeneration) && this.effectiveMode === "compatible" && generation === this.snapshotGeneration) {
         const requestSequence = ++sequence;
         try {
           const response = await fetch(`/api/hikvision/snapshot?_=${Date.now()}-${requestSequence}`, { cache: "no-store" });
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
           const blob = await response.blob();
-          if (!this.active || this.effectiveMode !== "compatible" || generation !== this.snapshotGeneration) return;
+          if (!this._isCurrent(connectGeneration) || this.effectiveMode !== "compatible" || generation !== this.snapshotGeneration) return;
           if (requestSequence > displayed) {
             displayed = requestSequence;
             const objectUrl = URL.createObjectURL(blob);
@@ -16349,7 +16428,7 @@ class HikVisionPlayer {
             this.reconnectCount = 0;
             this._hideOverlay();
             this._setLive(true);
-            const badge = $("hikvisionCodecBadge");
+            const badge = this.card.querySelector("#hikvisionCodecBadge");
             if (badge) badge.textContent = "HD LIVE";
           }
         } catch (_) {
@@ -16403,13 +16482,56 @@ let _hikModalGeneration = 0;
 function initHikvisionPlayer() {
   const card = $("hikvisionCard");
   if (!card) return;
+  hikvisionUiAbortController?.abort();
+  hikvisionUiAbortController = new AbortController();
+  const signal = hikvisionUiAbortController.signal;
+  const on = (target, type, handler, options = {}) => {
+    target?.addEventListener(type, handler, { ...options, signal });
+  };
   hikvisionPlayer = new HikVisionPlayer();
 
+  if (window.electronAPI) {
+    const offNativeOpened = window.electronAPI.onHikvisionNativeViewerOpened?.(() => {
+      hikvisionNativeViewerActive = true;
+      if (!hikvisionPlayer) return;
+      hikvisionPlayer._pausedForNativeViewer = true;
+      hikvisionPlayer.stop();
+    });
+    const offNativeClosed = window.electronAPI.onHikvisionNativeViewerClosed?.(() => {
+      hikvisionNativeViewerActive = false;
+      if (!hikvisionPlayer?._pausedForNativeViewer) return;
+      hikvisionPlayer._pausedForNativeViewer = false;
+      setTimeout(() => {
+        const ownsVisiblePage = State.currentPage === "inverters";
+        if (ownsVisiblePage && hikvisionPlayer && !hikvisionPlayer.active) {
+          hikvisionPlayer.start();
+        }
+      }, 450);
+    });
+    signal.addEventListener("abort", () => {
+      offNativeOpened?.();
+      offNativeClosed?.();
+    }, { once: true });
+    window.electronAPI.hikvisionNativeViewerStatus?.().then((viewerStatus) => {
+      if (!viewerStatus?.requester || !hikvisionPlayer) return;
+      hikvisionNativeViewerActive = true;
+      hikvisionPlayer._pausedForNativeViewer = true;
+      hikvisionPlayer.stop();
+    }).catch(() => {});
+  }
+
   const modal = $("hikSettingsModal");
+  let hikDelivery = {
+    operationMode: getActiveOperationModeClient(),
+    compactPath: getActiveOperationModeClient() === "remote" ? "gateway-relay" : "local-hls",
+    nativePath: getActiveOperationModeClient() === "remote" ? "tailscale-direct" : "local-direct",
+  };
+  let nativePasswordConfigured = false;
   const configFromForm = () => ({
     enabled: $("hikEnabled")?.checked !== false,
     name: $("hikName")?.value || "Hikvision CCTV",
     host: $("hikHost")?.value || "192.168.1.12",
+    httpPort: $("hikHttpPort")?.value || "80",
     rtspPort: $("hikRtspPort")?.value || "554",
     channel: $("hikChannel")?.value || "1",
     stream: $("hikStream")?.value || "main",
@@ -16420,10 +16542,27 @@ function initHikvisionPlayer() {
     autoStart: Boolean($("hikAutoStart")?.checked),
   });
 
-  const renderConfig = (cfg = {}) => {
+  const renderDelivery = (delivery = hikDelivery) => {
+    hikDelivery = { ...hikDelivery, ...(delivery || {}) };
+    const remote = hikDelivery.operationMode === "remote";
+    const subtitle = $("hikTitleSubtitle");
+    const note = $("hikDeliveryNote");
+    if (subtitle) subtitle.textContent = remote
+      ? "Gateway-relayed card and Tailscale native route"
+      : "Local HLS card and direct native playback";
+    if (note) note.textContent = remote
+      ? "The dashboard card is streamed only by the gateway. The native viewer runs on this workstation and reaches the DVR through its approved Tailscale subnet route."
+      : "Both playback paths use the DVR's local account on this plant network. Hik-Connect cloud credentials are not required.";
+    if ($("hikCompactPath")) $("hikCompactPath").textContent = remote ? "Gateway HLS relay" : "Local H.264 HLS";
+    if ($("hikNativePath")) $("hikNativePath").textContent = remote ? "Direct DVR over Tailscale" : "Direct DVR over LAN";
+  };
+
+  const renderConfig = (cfg = {}, delivery = null) => {
+    if (delivery) renderDelivery(delivery);
     if ($("hikEnabled")) $("hikEnabled").checked = cfg.enabled !== false;
     if ($("hikName")) $("hikName").value = cfg.name || "Hikvision CCTV";
     if ($("hikHost")) $("hikHost").value = cfg.host || "192.168.1.12";
+    if ($("hikHttpPort")) $("hikHttpPort").value = cfg.httpPort || "80";
     if ($("hikRtspPort")) $("hikRtspPort").value = cfg.rtspPort || "554";
     if ($("hikChannel")) $("hikChannel").value = cfg.channel || "1";
     if ($("hikStream")) $("hikStream").value = cfg.stream || "main";
@@ -16431,8 +16570,14 @@ function initHikvisionPlayer() {
     if ($("hikUser")) $("hikUser").value = cfg.username || "admin";
     if ($("hikPassword")) {
       $("hikPassword").value = "";
-      $("hikPassword").placeholder = cfg.passwordConfigured ? "Saved — leave blank to keep" : "Enter DVR password";
+      const nativeSaved = cfg.nativePasswordConfigured ?? cfg.passwordConfigured;
+      $("hikPassword").placeholder = nativeSaved
+        ? "Saved — leave blank to keep"
+        : hikDelivery.operationMode === "remote" && cfg.passwordConfigured
+          ? "Enter once for native viewer"
+          : "Enter DVR password";
     }
+    nativePasswordConfigured = cfg.nativePasswordConfigured ?? cfg.passwordConfigured ?? false;
     if ($("hikPlaybackMode")) $("hikPlaybackMode").value = cfg.playbackMode || "localservice";
     if ($("hikAutoStart")) $("hikAutoStart").checked = Boolean(cfg.autoStart);
     const label = $("hikvisionLabel");
@@ -16440,12 +16585,78 @@ function initHikvisionPlayer() {
     renderModeSummary();
   };
 
+  const setRouteState = (id, text, state = "") => {
+    const el = $(id);
+    if (!el) return;
+    el.textContent = text;
+    if (state) el.dataset.state = state;
+    else delete el.dataset.state;
+  };
+
+  const refreshRouteStatus = async () => {
+    const button = $("btnHikRouteCheck");
+    const panel = $("hikRoutePanel");
+    if (button) button.disabled = true;
+    if (panel) panel.dataset.state = "checking";
+    if ($("hikRouteSummary")) $("hikRouteSummary").textContent = "Checking DVR ports and secure-network readiness...";
+    setRouteState("hikCompactState", "checking");
+    setRouteState("hikNativeState", "checking");
+    setRouteState("hikTailscaleState", "checking");
+    try {
+      const result = await api("/api/hikvision/route-status", "POST", configFromForm());
+      const remote = result.operationMode === "remote";
+      renderDelivery({
+        operationMode: result.operationMode,
+        compactPath: result.compactPath,
+        nativePath: result.nativePath,
+      });
+      const tsReady = Boolean(result.tailscale?.connected);
+      const nativeReady = Boolean(result.nativeReady);
+      const rtspReady = Boolean(result.rtsp?.reachable);
+      if ($("hikTailscalePath")) $("hikTailscalePath").textContent = tsReady
+        ? (result.tailscale?.dnsName || "Connected")
+        : result.tailscale?.installed ? "Installed, not connected" : "Not installed";
+      setRouteState(
+        "hikCompactState",
+        remote ? result.relayAvailable === false ? "unavailable" : "relayed" : rtspReady ? "ready" : "offline",
+        remote ? result.relayAvailable === false ? "error" : "ready" : rtspReady ? "ready" : "error",
+      );
+      setRouteState("hikNativeState", nativeReady ? "ready" : "blocked", nativeReady ? "ready" : "error");
+      setRouteState("hikTailscaleState", tsReady ? "connected" : remote ? "offline" : "optional", tsReady ? "ready" : remote ? "error" : "warning");
+      if ($("hikRouteSummary")) $("hikRouteSummary").textContent = remote
+        ? result.relayAvailable === false
+          ? "Gateway relay is unavailable. Update or restart the gateway; Remote mode will not start a viewer-side transcoder."
+          : "Compact video stays on the gateway; native playback uses the viewer's direct DVR route."
+        : "Compact and native playback reach the DVR directly on the plant LAN.";
+      const guidance = $("hikRouteGuidance");
+      if (guidance) {
+        if (!remote) {
+          guidance.textContent = `Local route: SDK port ${result.sdk?.port || 80} ${result.sdk?.reachable ? "reachable" : "unreachable"}; RTSP port ${result.rtsp?.port || 554} ${rtspReady ? "reachable" : "unreachable"}. Tailscale is optional on the gateway.`;
+        } else if (nativeReady && nativePasswordConfigured) {
+          guidance.innerHTML = `Native route ready: <code>${escapeHtml(result.host)}</code> is reachable on SDK port ${Number(result.sdk?.port || 80)}. Compact playback remains authenticated through the gateway relay.`;
+        } else {
+          const passwordHint = nativePasswordConfigured ? "" : " Enter the DVR password and save it on this viewer.";
+          guidance.innerHTML = `Native playback needs an approved <code>${escapeHtml(result.recommendedRoute || result.host)}</code> subnet route on the gateway and TCP ports ${Number(result.sdk?.port || 80)}/${Number(result.rtsp?.port || 554)} allowed for this viewer.${passwordHint}`;
+        }
+      }
+      if (panel) panel.dataset.state = nativeReady || !remote ? "ready" : "warning";
+    } catch (err) {
+      if ($("hikRouteSummary")) $("hikRouteSummary").textContent = err.message || "Route check failed";
+      setRouteState("hikCompactState", "unknown", "warning");
+      setRouteState("hikNativeState", "unknown", "warning");
+      setRouteState("hikTailscaleState", "unknown", "warning");
+      if (panel) panel.dataset.state = "warning";
+    } finally {
+      if (button) button.disabled = false;
+    }
+  };
+
   const renderModeSummary = () => {
     const summary = $("hikModeSummary");
     if (!summary) return;
     const mode = $("hikPlaybackMode")?.value || "localservice";
     const details = mode === "localservice"
-      ? ["Smooth native playback", "Uses Hikvision LocalService hardware decoding at the DVR's original quality and frame rate.", "mdi-video-wireless-outline"]
+      ? ["Hybrid HLS + native viewer", "Uses browser-safe H.264 HLS in the card, then opens LocalService at original quality in a standard resizable window.", "mdi-video-wireless-outline"]
       : mode === "compatible"
         ? ["Compatible snapshots", "Stable 1920×1088 fallback, but motion is limited to a few frames per second.", "mdi-image-multiple-outline"]
         : ["Direct HLS diagnostic", "Passes the DVR codec through without GPU conversion.", "mdi-flask-outline"];
@@ -16454,18 +16665,29 @@ function initHikvisionPlayer() {
 
   const refreshStatus = async () => {
     try {
-      const status = await window.electronAPI?.hikvisionNativeStatus?.() || { running: false };
-      if ($("hikServiceStatus")) $("hikServiceStatus").textContent = status.running ? "running" : "stopped";
-      if ($("hikServicePid")) $("hikServicePid").textContent = status.running ? "LocalService" : "-";
-      if ($("hikServiceHealth")) $("hikServiceHealth").textContent = status.connected ? "Hardware decoded" : "-";
-      if ($("btnHikStart")) $("btnHikStart").disabled = Boolean(status.running);
-      if ($("btnHikStop")) $("btnHikStop").disabled = !status.running;
+      const [status, relayStatus] = await Promise.all([
+        window.electronAPI?.hikvisionNativeStatus?.() || Promise.resolve({ running: false }),
+        api("/api/hikvision/status").catch(() => ({ running: false })),
+      ]);
+      const remote = hikDelivery.operationMode === "remote";
+      const browserRunning = Boolean(
+        hikvisionPlayer?.active &&
+        hikvisionPlayer.effectiveMode !== "localservice" &&
+        hikvisionPlayer.card?.querySelector("#hikvisionLiveDot")?.classList.contains("active"),
+      );
+      const relayRunning = Boolean(relayStatus?.running);
+      const presentationRunning = Boolean(status.running || browserRunning || relayRunning);
+      if ($("hikServiceStatus")) $("hikServiceStatus").textContent = presentationRunning ? "running" : "stopped";
+      if ($("hikServicePid")) $("hikServicePid").textContent = status.running ? "LocalService" : relayRunning && remote ? "Gateway HLS" : browserRunning ? "HLS" : "-";
+      if ($("hikServiceHealth")) $("hikServiceHealth").textContent = status.connected ? "Hardware decoded" : relayRunning && remote ? "Tailscale relay" : browserRunning ? "Browser decoded" : "-";
+      if ($("btnHikStart")) $("btnHikStart").disabled = presentationRunning;
+      if ($("btnHikStop")) $("btnHikStop").disabled = !presentationRunning;
       const headerStatus = $("hikHeaderStatus");
       if (headerStatus) {
-        const isRunning = status.running;
+        const isRunning = presentationRunning;
         const state = isRunning ? "running" : "stopped";
         headerStatus.dataset.state = state;
-        headerStatus.innerHTML = `<span></span>${status.running ? "Native Stream Online" : "Stopped"}`;
+        headerStatus.innerHTML = `<span></span>${status.running ? "Native Viewer Online" : relayRunning && remote ? "Gateway Relay Ready" : browserRunning ? "HLS Stream Online" : "Stopped"}`;
       }
     } catch (_) {}
   };
@@ -16504,13 +16726,15 @@ function initHikvisionPlayer() {
     try {
       const result = await api("/api/hikvision/config");
       if (modalGeneration !== _hikModalGeneration || modal?.classList.contains("hidden")) return;
-      renderConfig(result.config || {});
+      renderConfig(result.config || {}, result.delivery);
+      if (result.warning) showMsg("hikConfigMsg", result.warning, "warning");
     } catch (_) {
       if (modalGeneration !== _hikModalGeneration || modal?.classList.contains("hidden")) return;
-      renderConfig(State.settings.hikvisionConfig || {});
+      renderConfig(State.settings.hikvisionConfig || {}, hikDelivery);
     }
     if (modalGeneration !== _hikModalGeneration || modal?.classList.contains("hidden")) return;
     refreshSubstreamProfile();
+    refreshRouteStatus();
   };
   const closeModal = () => {
     _hikModalGeneration += 1;
@@ -16520,17 +16744,18 @@ function initHikvisionPlayer() {
     _hikStatusTimer = null;
   };
 
-  document.addEventListener("hikvision:open-settings", openModal);
-  $("btnHikModalClose")?.addEventListener("click", closeModal);
-  modal?.addEventListener("click", (event) => { if (event.target === modal) closeModal(); });
-  $("btnHikPwToggle")?.addEventListener("click", () => {
+  on(document, "hikvision:open-settings", openModal);
+  on($("btnHikModalClose"), "click", closeModal);
+  on(modal, "click", (event) => { if (event.target === modal) closeModal(); });
+  on($("btnHikPwToggle"), "click", () => {
     const input = $("hikPassword");
     if (!input) return;
     input.type = input.type === "password" ? "text" : "password";
   });
-  $("hikChannel")?.addEventListener("change", refreshSubstreamProfile);
-  $("hikPlaybackMode")?.addEventListener("change", renderModeSummary);
-  $("btnHikOptimize")?.addEventListener("click", async () => {
+  on($("hikChannel"), "change", refreshSubstreamProfile);
+  on($("hikPlaybackMode"), "change", renderModeSummary);
+  on($("btnHikRouteCheck"), "click", refreshRouteStatus);
+  on($("btnHikOptimize"), "click", async () => {
     const channel = String($("hikChannel")?.value || "1").replace(/\D/g, "") || "1";
     const confirmed = await appConfirm(
       "Prepare Hikvision H.264 Substream",
@@ -16542,9 +16767,12 @@ function initHikvisionPlayer() {
     const button = $("btnHikOptimize");
     if (button) button.disabled = true;
     try {
+      const saved = await api("/api/hikvision/config", "POST", configFromForm());
+      State.settings.hikvisionConfig = saved.config || {};
+      nativePasswordConfigured = saved.config?.nativePasswordConfigured ?? nativePasswordConfigured;
       const result = await api("/api/hikvision/optimize-substream", "POST", configFromForm());
       State.settings.hikvisionConfig = result.config || {};
-      renderConfig(result.config || {});
+      renderConfig(result.config || {}, saved.delivery);
       await refreshSubstreamProfile();
       showMsg("hikConfigMsg", result.already ? "H.264 substream is already ready." : "H.264 substream prepared. Main recording stream was not changed.", "ok");
       await hikvisionPlayer.reconnect();
@@ -16553,50 +16781,72 @@ function initHikvisionPlayer() {
       showMsg("hikConfigMsg", err.message, "error");
     }
   });
-  $("btnHikApply")?.addEventListener("click", async () => {
+  on($("btnHikApply"), "click", async () => {
     showMsg("hikConfigMsg", "Saving and connecting...", "");
     try {
       const result = await api("/api/hikvision/config", "POST", configFromForm());
       State.settings.hikvisionConfig = result.config || {};
-      renderConfig(result.config || {});
+      renderConfig(result.config || {}, result.delivery);
+      if (result.warning) showToast(result.warning, "warning", 6500);
       closeModal();
       await hikvisionPlayer.reconnect();
     } catch (err) {
       showMsg("hikConfigMsg", err.message, "error");
     }
   });
-  $("btnHikTest")?.addEventListener("click", async () => {
-    showMsg("hikConfigMsg", "Testing native DVR playback...", "");
+  on($("btnHikTest"), "click", async () => {
+    showMsg("hikConfigMsg", "Testing Hikvision browser stream...", "");
     try {
-      const result = await api("/api/hikvision/config", "POST", configFromForm());
-      State.settings.hikvisionConfig = result.config || {};
+      const saved = await api("/api/hikvision/config", "POST", configFromForm());
+      State.settings.hikvisionConfig = saved.config || {};
+      renderConfig(saved.config || {}, saved.delivery);
+      if (saved.warning) showMsg("hikConfigMsg", saved.warning, "warning");
+      const result = await api("/api/hikvision/test", "POST", { ...configFromForm(), playbackMode: "localservice" });
+      if (!result?.ok) throw new Error(result?.error || "Hikvision browser stream test failed");
       await hikvisionPlayer.reconnect();
-      const native = await window.electronAPI?.hikvisionNativeStatus?.();
-      if (!native?.running) throw new Error("Hikvision LocalService did not start playback");
-      showMsg("hikConfigMsg", `Native hardware playback connected${native.width ? ` (${native.width}x${native.height})` : ""}.`, "ok");
+      showMsg("hikConfigMsg", `Browser-safe HLS stream connected (${result.codec || "H.264"}). Native playback starts in its own window when requested.`, "ok");
       refreshStatus();
     } catch (err) {
       showMsg("hikConfigMsg", err.message, "error");
     }
   });
-  $("btnHikStart")?.addEventListener("click", async () => {
+  on($("btnHikStart"), "click", async () => {
     try {
       await hikvisionPlayer.reconnect();
     } catch (err) { showMsg("hikConfigMsg", err.message, "error"); }
     refreshStatus();
   });
-  $("btnHikStop")?.addEventListener("click", async () => {
+  on($("btnHikStop"), "click", async () => {
     hikvisionPlayer.stop();
     await window.electronAPI?.hikvisionNativeStop?.().catch((err) => showMsg("hikConfigMsg", err.message, "error"));
     refreshStatus();
   });
-  $("hikvisionRetryBtn")?.addEventListener("click", () => hikvisionPlayer.reconnect());
-  document.addEventListener("fullscreenchange", () => hikvisionPlayer.syncNativePresentation().catch(() => {}));
-  window.addEventListener("resize", () => hikvisionPlayer.syncNativePresentation().catch(() => {}));
-  document.querySelector(".inv-page-body")?.addEventListener("scroll", () => hikvisionPlayer.syncNativePresentation().catch(() => {}), { passive: true });
+  on($("hikvisionRetryBtn"), "click", () => hikvisionPlayer.reconnect());
 
-  renderConfig(State.settings.hikvisionConfig || {});
-  if (State.currentPage === "inverters") hikvisionPlayer.start();
+  const openViewer = () => openHikvisionViewer(card).catch((err) => {
+    console.warn("[hikvision] viewer open failed:", err?.message || err);
+    showToast(err?.message || "Hikvision native viewer could not start", "error", 5000);
+  });
+  on($("btnHikvisionSettings"), "click", openModal);
+  on($("btnHikvisionNativeViewer"), "click", openViewer);
+  on($("hikvisionVideo"), "dblclick", openViewer);
+  on($("hikvisionSnapshot"), "dblclick", openViewer);
+
+  on(document, "fullscreenchange", () => {
+    const isFullscreen = isHikvisionFullscreen(card);
+    const icon = $("btnHikvisionNativeViewer")?.querySelector(".mdi");
+    if (icon) icon.className = isFullscreen ? "mdi mdi-fullscreen-exit" : "mdi mdi-monitor-eye";
+  });
+  on(window, "resize", () => hikvisionPlayer.syncNativePresentation().catch(() => {}));
+  on(document.querySelector(".inv-page-body"), "scroll", () => hikvisionPlayer.syncNativePresentation().catch(() => {}), { passive: true });
+
+  renderConfig(State.settings.hikvisionConfig || {}, hikDelivery);
+  const ownsVisiblePage = State.currentPage === "inverters";
+  card.hidden = !ownsVisiblePage;
+  card.style.display = ownsVisiblePage ? "" : "none";
+  if (!hikvisionNativeViewerActive && ownsVisiblePage) {
+    hikvisionPlayer.start();
+  }
 }
 
 function handleWS(msg) {
@@ -16889,6 +17139,9 @@ function handleWS(msg) {
   if (msg.type === "alarm") {
     handleAlarmPush(msg.alarms || []);
   }
+  if (msg.type === "alarm_ack") {
+    handleAlarmAcknowledgementPush(msg);
+  }
   if (msg.type === "offline") {
     const d = State.liveData[msg.key];
     if (d) {
@@ -17002,6 +17255,63 @@ function handleAlarmPush(alarms) {
 
   // If alarms page visible, refresh
   if (State.currentPage === "alarms") fetchAlarms();
+}
+
+let _alarmAckRefreshTimer = null;
+
+function markAlarmAckButton(btn) {
+  if (!btn) return;
+  btn.disabled = true;
+  if (btn.classList?.contains("notif-ack-btn")) {
+    btn.classList.add("acked");
+    btn.textContent = "✔ Acked";
+    return;
+  }
+  btn.className = "ack-btn acked";
+  btn.textContent = "✔ ACK";
+}
+
+function handleAlarmAcknowledgementPush(msg = {}) {
+  const all = Boolean(msg?.all);
+  const ids = new Set(
+    (Array.isArray(msg?.alarmIds) ? msg.alarmIds : [])
+      .map((value) => Math.trunc(Number(value || 0)))
+      .filter((value) => value > 0),
+  );
+  if (!all && ids.size === 0) return;
+
+  // Reconcile the in-memory alarm models first so sound and card state stop
+  // immediately, even before the authoritative HTTP refresh completes.
+  Object.values(State.activeAlarms || {}).forEach((row) => {
+    if (all || ids.has(Number(row?.id || 0))) row.acknowledged = true;
+  });
+  (State.alarmView?.rows || []).forEach((row) => {
+    if (all || ids.has(Number(row?.id || 0))) row.acknowledged = 1;
+  });
+
+  const selector = all
+    ? ".ack-btn:not(.acked), .notif-ack-btn:not([disabled])"
+    : [...ids]
+        .flatMap((id) => [
+          `.ack-btn[data-alarm-id="${id}"]`,
+          `.notif-ack-btn[data-alarm-id="${id}"]`,
+        ])
+        .join(", ");
+  if (selector) document.querySelectorAll(selector).forEach(markAlarmAckButton);
+  if (State.currentPage === "alarms") applyAlarmTableView();
+  syncAlarmSoundPlayback();
+  scheduleInverterCardsUpdate(true);
+
+  // Coalesce bursts (especially ACK ALL) into one gateway-authoritative read.
+  if (_alarmAckRefreshTimer) clearTimeout(_alarmAckRefreshTimer);
+  _alarmAckRefreshTimer = setTimeout(() => {
+    _alarmAckRefreshTimer = null;
+    refreshAlarmBadge().catch(() => {});
+    refreshNotifPanel().catch(() => {});
+    if (State.currentPage === "alarms") {
+      fetchAlarms({ force: true, silent: true }).catch(() => {});
+    }
+  }, 60);
 }
 
 // ─── Right-side notification hub ──────────────────────────────────────────
@@ -18407,9 +18717,7 @@ function renderAlarmTable(rows) {
 async function ackAlarm(id, btn) {
   try {
     const res = await api(`/api/alarms/${id}/ack`, "POST");
-    btn.className = "ack-btn acked";
-    btn.textContent = "✔ ACK";
-    btn.disabled = true;
+    markAlarmAckButton(btn);
     await fetchAlarms();
     await refreshAlarmBadge();
     await refreshNotifPanel();
@@ -34732,7 +35040,8 @@ async function _fcalHandleToggleWrites() {
     _popoutAttempts += 1;
     try {
       if (typeof switchPage === "function") {
-        if (typeof State === "object" && State && State.settings && typeof cameraPlayer !== "undefined" && cameraPlayer) {
+        var relevantPlayerReady = typeof cameraPlayer !== "undefined" && cameraPlayer;
+        if (typeof State === "object" && State && State.settingsLoaded && relevantPlayerReady) {
           switchPage(popoutPage);
           if (State.currentPage === popoutPage) {
             _popoutRouted = true;

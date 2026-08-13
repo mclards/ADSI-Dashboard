@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ADSI Inverter Dashboard — User Guide v2.11.8</title>
+<title>ADSI Inverter Dashboard — User Guide v2.12.4</title>
 <style>
   /* ══════════════════════════════════════════════
      CSS VARIABLES & RESET
@@ -987,7 +987,7 @@
   <div class="cover-meta">
     <div class="cover-meta-item">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1v6l4 2" stroke="#4d9fff" stroke-width="1.5" stroke-linecap="round"/><circle cx="8" cy="8" r="7" stroke="#4d9fff" stroke-width="1.5"/></svg>
-      <span><b>Version 2.12.3</b></span>
+      <span><b>Version 2.12.4</b></span>
     </div>
     <div class="cover-meta-item">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 8a3 3 0 100-6 3 3 0 000 6zM2 14c0-3.3 2.7-5 6-5s6 1.7 6 5" stroke="#c084fc" stroke-width="1.5" stroke-linecap="round"/></svg>
@@ -1029,7 +1029,7 @@
     <a href="#s17"><span class="toc-num">18</span> Operator Messaging</a>
     <a href="#s18"><span class="toc-num">19</span> Cloud Backup &amp; Restore</a>
     <a href="#s19"><span class="toc-num">20</span> Standard Workflows</a>
-    <a href="#s20"><span class="toc-num">21</span> IP Configuration</a>
+    <a href="#s20"><span class="toc-num">21</span> Global Configuration</a>
     <a href="#s21"><span class="toc-num">22</span> Keyboard Shortcuts &amp; Tips</a>
     <a href="#s22"><span class="toc-num">23</span> Troubleshooting</a>
     <a href="#s23"><span class="toc-num">24</span> Quick Reference</a>
@@ -1297,7 +1297,7 @@
   <h3>Alarm Episode Model</h3>
   <ul><li>New alarm = new episode</li><li>Bitmask change on active node = same episode</li><li>ACK state preserved across changes</li></ul>
   <h3>Quick-ACK System</h3>
-  <ul><li>Toast notification (12s TTL) with inline ACK button</li><li>Bottom-right notification hub panel with ACK for up to 50 recent alarms</li><li>Auto-dismiss 1.2s after ACK</li><li>Sound triggers after <b>5 seconds</b> unacknowledged</li><li>Mute button silences audio only, not visual alerts</li></ul>
+  <ul><li>Bottom-right notification hub panel with ACK for up to 50 recent alarms</li><li>Single ACK and Acknowledge All are saved on the authoritative gateway</li><li>ACK state synchronizes immediately across connected Gateway and Remote-mode dashboards</li><li>The alarm table, badge, panel, sound, and inverter cards reconcile together</li><li>Sound triggers after <b>5 seconds</b> unacknowledged</li><li>Mute button silences audio only, not visual alerts</li></ul>
   <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
@@ -1565,16 +1565,29 @@
   </ul>
 
   <h3>Separate Hikvision DVR Card</h3>
-  <p>The Hikvision DVR has its own draggable card, settings modal, native decoder bridge, and API routes. Its DVR-specific connection remains separate from Tapo. The compact modal groups device identity, local connection, channel/playback, stream profile, and native-decoder status into separate panels. Use the DVR&rsquo;s local username and password; Hik-Connect cloud credentials and camera access codes are not required.</p>
-  <div class="info-card note"><div class="info-card-label">Smooth Native Playback</div><p>Use <b>Smooth native playback</b> for normal operation. Hikvision LocalService decodes the selected DVR stream with the vendor&rsquo;s native hardware path, retaining the DVR&rsquo;s original quality and frame rate without an FFmpeg transcode. The native surface fills the Hikvision card, hides while the card is off-screen or a modal/Tapo fullscreen covers it, and resumes without restarting the stream. Open its configuration through <b>Tapo Camera Settings &gt; Hikvision DVR</b>. Double-click the native video to enter or leave Hikvision LocalService fullscreen; the card has no HTML Settings or Fullscreen buttons. Repeated unchanged geometry updates are suppressed so card tracking does not interrupt video decoding. Compatible snapshots remain a low-frame-rate fallback, while Direct HLS is retained for diagnostics.</p></div>
+  <p>The Hikvision DVR has its own draggable card, settings modal, browser stream, native decoder bridge, and API routes. Its DVR-specific connection remains separate from Tapo. The polished modal groups secure stream paths, device identity, DVR connection, channel/playback, stream profile, and playback status. Use the DVR&rsquo;s local username and password; Hik-Connect cloud credentials and camera access codes are not required. SDK/HTTP defaults to port <code>80</code> and RTSP to <code>554</code>.</p>
+  <div class="info-card note"><div class="info-card-label">Hybrid HLS + Native Viewer Window</div><p>Use <b>Hybrid HLS + native viewer window</b> for normal operation. The Inverters-page card uses browser-safe H.264 HLS. Expect roughly 2&ndash;3 seconds of latency and modest transcoding loss. The native-viewer control pauses card HLS and opens a standard Electron window like the Analytics popout. Hikvision LocalService fills its content area at the DVR&rsquo;s original quality and frame rate. Use the normal Windows title-bar controls to move, resize, minimize, maximize/restore, or close it. Closing the window stops native playback and resumes HLS automatically when Inverters is visible. Compatible snapshots and Direct HLS remain explicit diagnostic/fallback modes and use ordinary HTML fullscreen.</p></div>
+  <p>When you leave the Inverters page, the Hikvision card disappears completely and its HLS playback stops. Returning restores the card in its saved grid position and reconnects playback. The card provides <b>Settings</b> and <b>Open native viewer window</b> controls. If LocalService cannot start, the native viewer displays <b>Retry</b>; otherwise video fills the complete content area.</p>
+  <h4>Hikvision over Tailscale</h4>
+  <table><thead><tr><th>Playback Surface</th><th>Gateway Mode</th><th>Remote Mode</th></tr></thead><tbody>
+    <tr><td>Inverters-page card</td><td>Local H.264 HLS generated beside the DVR</td><td>Authenticated HLS/snapshot relay from the gateway over the configured gateway link</td></tr>
+    <tr><td>Native viewer</td><td>LocalService connects directly to the DVR over the plant LAN</td><td>LocalService connects directly through a Tailscale subnet route</td></tr>
+  </tbody></table>
+  <div class="info-card warn"><div class="info-card-label">Least-Privilege Route</div><p>Advertise only the DVR host from the gateway, for example <code>192.168.1.12/32</code>, rather than the complete plant subnet. Approve that route and grant only approved viewer devices access to the configured SDK/HTTP and RTSP ports (normally TCP <code>80</code> and <code>554</code>).</p></div>
+  <p>A Remote workstation does not start another transcoder. The gateway remains authoritative for the compact stream and keeps its DVR password. Native LocalService runs on the viewer, so the viewer stores its own DVR password locally; the gateway password is never returned through the API. Non-secret source fields synchronize so both paths target the same DVR and channel.</p>
+  <p>During a rolling deployment, an older gateway may not expose <code>/api/hikvision/*</code> yet. The viewer contains that HTML/404 response instead of sending it to the HLS parser or displaying markup in the card. Remote mode never starts a viewer-side transcoder: update or restart the gateway to enable compact playback.</p>
+  <p>The <b>Secure Stream Paths</b> panel and <b>Check Routes</b> button show whether the card is local or gateway-relayed, whether the DVR SDK port is reachable for native playback, whether Tailscale is connected, and which <code>/32</code> route is recommended. The check is read-only and never starts video or changes the DVR.</p>
   <table><thead><tr><th>Hikvision Control</th><th>Function</th></tr></thead><tbody>
-    <tr><td>Tapo Camera Settings &gt; Hikvision DVR</td><td>Opens the dedicated Hikvision DVR configuration modal.</td></tr>
-    <tr><td>Double-click Hikvision video</td><td>Enters or leaves Hikvision LocalService fullscreen playback.</td></tr>
-    <tr><td>Playback Mode</td><td>Selects smooth Hikvision LocalService playback, compatible snapshots, or diagnostic direct HLS.</td></tr>
-    <tr><td>Verify Connection</td><td>Saves the current fields and verifies native playback against the DVR.</td></tr>
+    <tr><td>Gear / Tapo Camera Settings &gt; Hikvision DVR</td><td>Opens the dedicated Hikvision DVR configuration modal.</td></tr>
+    <tr><td>Native viewer / double-click video</td><td>In recommended hybrid mode, pauses HLS and opens an Analytics-style framed, resizable LocalService window.</td></tr>
+    <tr><td>Windows title-bar controls</td><td>Move, resize, minimize, maximize/restore, or close the viewer; closing stops native playback and resumes HLS.</td></tr>
+    <tr><td>Playback Mode</td><td>Selects hybrid HLS/native playback, compatible snapshots, or diagnostic direct HLS.</td></tr>
+    <tr><td>SDK / HTTP</td><td>Configures the DVR port used by LocalService native playback; default <code>80</code>.</td></tr>
+    <tr><td>Secure Stream Paths / Check Routes</td><td>Shows gateway-relay, direct-native, and Tailscale readiness without starting playback.</td></tr>
+    <tr><td>Verify Connection</td><td>Saves the current fields and verifies browser-safe HLS against the DVR.</td></tr>
     <tr><td>Prepare H.264 Substream</td><td>Changes only the selected channel&rsquo;s xx02 profile to H.264 after confirmation.</td></tr>
     <tr><td>Save &amp; View</td><td>Persists the dedicated Hikvision configuration and reconnects the card.</td></tr>
-    <tr><td>Start / Stop</td><td>Starts or stops Hikvision LocalService native playback.</td></tr>
+    <tr><td>Start / Stop</td><td>Starts or stops the current Hikvision presentation.</td></tr>
   </tbody></table>
 
   <h3>Troubleshooting</h3>
@@ -1585,7 +1598,10 @@
     <tr><td>FFmpeg mode no video</td><td>FFmpeg not installed on server</td><td>Install FFmpeg and ensure it is on PATH</td></tr>
     <tr><td>Service section hidden</td><td>Remote mode active</td><td>Switch to Gateway mode in Settings &rarr; Connectivity</td></tr>
     <tr><td>Auto-restart stopped</td><td>3+ consecutive crashes</td><td>Check go2rtc logs, fix RTSP source, then manually restart</td></tr>
-    <tr><td>Hikvision card stays on &ldquo;Starting&rdquo;</td><td>Hikvision LocalService is unavailable, the DVR is unreachable, or the local DVR login failed</td><td>Confirm LocalService is running, verify the DVR/LAN connection, then use Verify Connection</td></tr>
+    <tr><td>Hikvision card stays on &ldquo;Starting&rdquo;</td><td>The media service is unavailable, the DVR is unreachable, or the local DVR login failed</td><td>Verify the DVR/LAN connection, then use Verify Connection</td></tr>
+    <tr><td>HLS works but the native viewer is blank</td><td>Hikvision LocalService is unavailable or blocked</td><td>Start LocalService and select Retry, or close the viewer with the normal Windows close button</td></tr>
+    <tr><td>Remote card works but native viewer is blocked</td><td>The gateway relay is healthy, but the viewer lacks an approved DVR route or viewer-local password</td><td>Advertise and approve the DVR <code>/32</code>, allow its SDK/RTSP ports, save the DVR password on the viewer, then use Check Routes</td></tr>
+    <tr><td>Secure Stream Paths reports Tailscale offline</td><td>Tailscale is stopped or signed out on the Remote workstation</td><td>Reconnect Tailscale and rerun Check Routes</td></tr>
     <tr><td>Hikvision profile unavailable</td><td>DVR IP, local RTSP account, or LAN route is incorrect</td><td>Verify DVR reachability, then use Test Stream</td></tr>
   </tbody></table>
   <a href="#toc" class="back-top">&uarr; Back to Contents</a>
@@ -1658,20 +1674,21 @@
   <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
-<!-- 20. IP CONFIGURATION -->
+<!-- 20. GLOBAL CONFIGURATION -->
 <section id="s20">
-  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="3" y="6" width="16" height="10" rx="2" stroke="#fb923c" stroke-width="1.8"/><circle cx="7" cy="11" r="1.5" fill="#fb923c"/><path d="M11 9h5M11 13h4" stroke="#fb923c" stroke-width="1.5" stroke-linecap="round"/></svg></div><h2>IP Configuration</h2></div>
-  <p>Open via <b>Settings &rarr; IP Configuration</b> or <kbd>Ctrl</kbd>+<kbd>I</kbd>. Auth code required, 1-hour session.</p>
+  <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="3" y="6" width="16" height="10" rx="2" stroke="#fb923c" stroke-width="1.8"/><circle cx="7" cy="11" r="1.5" fill="#fb923c"/><path d="M11 9h5M11 13h4" stroke="#fb923c" stroke-width="1.5" stroke-linecap="round"/></svg></div><h2>Global Configuration</h2></div>
+  <p>Open via <b>Settings &rarr; Global Configuration</b> or <kbd>Ctrl</kbd>+<kbd>I</kbd>. The window combines network addressing with core global settings. Auth code required, 1-hour session.</p>
   <p>Available in <b>both Gateway and Remote mode</b>. On a Remote viewer a banner notes that edits save to the gateway (authoritative) and mirror back locally, so addressing can be updated without remoting into the gateway PC. The local reachability scan and <b>Check Status</b> counter are suppressed in Remote mode (those inverters sit on the gateway LAN); the gateway keeps polling them.</p>
+  <table><thead><tr><th>Tab</th><th>Purpose</th></tr></thead><tbody><tr><td>Network &amp; IP</td><td>Inverter addressing, polling, enabled nodes, loss factors, reconnect, and device pages.</td></tr><tr><td>Plant &amp; Data</td><td>Plant identity, fleet sizing/layout, exports, retention, and forecast provider.</td></tr><tr><td>Hardware &amp; Clocks</td><td>Inverter-service endpoints and daily RTC synchronization schedule.</td></tr><tr><td>Connectivity &amp; Backup</td><td>Gateway/Remote access, live-link state, backup readiness, and gateway-only portable export.</td></tr></tbody></table>
   <table><thead><tr><th>Column</th><th>Description</th></tr></thead><tbody><tr><td>Inverter</td><td>Label</td></tr><tr><td>IP Address</td><td>Modbus TCP target</td></tr><tr><td>Polling Interval</td><td>Refresh rate (ms)</td></tr><tr><td>Enabled Units</td><td>Active nodes to poll</td></tr><tr><td>Loss %</td><td>Cable/connection loss (used by forecast engine)</td></tr></tbody></table>
-  <p>Additional: <b>Check Status</b> (test config), <b>Open Topology</b> (separate auth, 10-min session), <b>Theme toggle</b>.</p>
+  <p><b>Save All Changes</b> commits pending editable settings across tabs and reports server validation failures in the bottom status bar. Saving one inverter row preserves unsaved edits in other rows. Additional actions: <b>Check Status</b>, <b>Topology</b> (Gateway mode only), <b>Export .adsibak</b> (Gateway mode only), and the light/dark theme toggle. License and application-update controls remain in the main <b>Settings</b> page because they are workstation-local rather than gateway-synchronized global settings.</p>
   <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
 
 <!-- 21. KEYBOARD SHORTCUTS -->
 <section id="s21">
   <div class="section-head"><div class="section-icon"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="2" y="7" width="18" height="10" rx="2" stroke="#94a3b8" stroke-width="1.8"/><path d="M6 11h2M10 11h2M14 11h2M8 14h6" stroke="#94a3b8" stroke-width="1.5" stroke-linecap="round"/></svg></div><h2>Keyboard Shortcuts &amp; Tips</h2></div>
-  <table><thead><tr><th>Shortcut</th><th>Function</th></tr></thead><tbody><tr><td><kbd>Ctrl</kbd>+<kbd>T</kbd></td><td>Topology window</td></tr><tr><td><kbd>Ctrl</kbd>+<kbd>I</kbd></td><td>IP Configuration</td></tr><tr><td><kbd>Ctrl</kbd>+<kbd>=</kbd></td><td>Zoom in</td></tr><tr><td><kbd>Ctrl</kbd>+<kbd>-</kbd></td><td>Zoom out</td></tr><tr><td><kbd>Ctrl</kbd>+<kbd>0</kbd></td><td>Reset zoom</td></tr><tr><td><kbd>Ctrl</kbd>+<kbd>L</kbd></td><td>Theme toggle (aux windows)</td></tr><tr><td><kbd>Ctrl</kbd>+<kbd>R</kbd></td><td>Force full data reload</td></tr></tbody></table>
+  <table><thead><tr><th>Shortcut</th><th>Function</th></tr></thead><tbody><tr><td><kbd>Ctrl</kbd>+<kbd>T</kbd></td><td>Topology window</td></tr><tr><td><kbd>Ctrl</kbd>+<kbd>I</kbd></td><td>Global Configuration</td></tr><tr><td><kbd>Ctrl</kbd>+<kbd>=</kbd></td><td>Zoom in</td></tr><tr><td><kbd>Ctrl</kbd>+<kbd>-</kbd></td><td>Zoom out</td></tr><tr><td><kbd>Ctrl</kbd>+<kbd>0</kbd></td><td>Reset zoom</td></tr><tr><td><kbd>Ctrl</kbd>+<kbd>L</kbd></td><td>Theme toggle (aux windows)</td></tr><tr><td><kbd>Ctrl</kbd>+<kbd>R</kbd></td><td>Force full data reload</td></tr></tbody></table>
   <ul><li><b>Alarm notifications</b>: sidebar <code>ALARMS</code> badge shows the count (navigation); the bottom-right hub pill opens the quick-ACK panel</li><li><b>Sidebar</b>: collapses to icons on narrow windows; hover for tooltips</li><li><b>Inverter cards</b>: click to expand detail panel</li><li><b>Message bubble</b>: bottom corner, opens operator messaging</li></ul>
   <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
@@ -1729,7 +1746,7 @@
 
 <!-- FOOTER -->
 <div class="guide-footer">
-  <p><b>ADSI Inverter Dashboard</b> v2.11.8</p>
+  <p><b>ADSI Inverter Dashboard</b> v2.12.4</p>
   <p>Designed &amp; Developed by Engr. Clariden Monta&ntilde;o REE</p>
   <p>&copy; 2026 Engr. Clariden Monta&ntilde;o REE. All rights reserved.</p>
 </div>

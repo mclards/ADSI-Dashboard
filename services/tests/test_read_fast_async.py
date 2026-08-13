@@ -15,7 +15,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "services" / "inverter_engine.py"
 
-
 def _load_engine_helpers():
     """
     Load inverter_engine.py without triggering its FastAPI / pymodbus
@@ -48,7 +47,6 @@ def _load_engine_helpers():
     exec(extract("_u32_hi_lo"), ns)
     exec(extract("_rtc_from_regs"), ns)
     return ns
-
 
 class HardwareCounterDecodeTests(unittest.TestCase):
     @classmethod
@@ -147,7 +145,6 @@ class HardwareCounterDecodeTests(unittest.TestCase):
         dt, valid = self.ns["_rtc_from_regs"](regs, server_year=2026)
         self.assertFalse(valid)
 
-
 class SignedInt16DecodeTests(unittest.TestCase):
     """
     Slice α unit tests — Int16 sign extension for Modbus input registers.
@@ -207,7 +204,6 @@ class SignedInt16DecodeTests(unittest.TestCase):
         """Slice α — 0xFFFF → -1."""
         fn = self._get_signed_int16()
         self.assertEqual(fn(0xFFFF), -1)
-
 
 if __name__ == "__main__":
     unittest.main()

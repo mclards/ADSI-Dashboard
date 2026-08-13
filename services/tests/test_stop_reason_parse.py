@@ -33,7 +33,6 @@ from services.stop_reason import (  # noqa: E402
     to_capture_payload,
 )
 
-
 # ─── Hardware-derived fixture (same source as test_vendor_pdu.py) ───────────
 
 def _make_stopreason_bytes(*,
@@ -63,9 +62,7 @@ def _make_stopreason_bytes(*,
         flags, timeout_band, debug_desc,
     )
 
-
 HEALTHY_RAW = _make_stopreason_bytes()  # DebugDesc=20, MotParo=0
-
 
 # Inverter 23 (.133 EKI) DebugDesc=57 captured during validation
 EVENT_RAW = _make_stopreason_bytes(
@@ -73,11 +70,9 @@ EVENT_RAW = _make_stopreason_bytes(
     pot_ac_raw=0,  # inverter stopped
 )
 
-
 # ─── ARRAYHISTMOTPARO fixture (TOTAL=62292 in slot 30) ─────────────────────
 
 ARRAYHIST_62B = struct.pack(">31H", *([5] * 30 + [62292]))
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # parse_stop_reason
@@ -151,7 +146,6 @@ class ParseStopReasonTests(unittest.TestCase):
         rec = parse_stop_reason(raw)
         self.assertEqual(rec.temp, -20)
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # fingerprint — de-dup key
 # ──────────────────────────────────────────────────────────────────────────────
@@ -180,7 +174,6 @@ class FingerprintTests(unittest.TestCase):
         b = parse_stop_reason(_make_stopreason_bytes(motparo=20, debug_desc=57,
                                                        pot_ac_raw=15, temp=43))
         self.assertEqual(a.fingerprint(), b.fingerprint())
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # to_capture_payload — JSON-ready dict for the Node-side endpoint
@@ -221,7 +214,6 @@ class ToCapturePayloadTests(unittest.TestCase):
         self.assertEqual(payload["alarm_id"], 4321)
         self.assertLess(payload["event_at_ms"], payload["read_at_ms"])
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # parse_arrayhist
 # ──────────────────────────────────────────────────────────────────────────────
@@ -246,7 +238,6 @@ class ParseArrayhistTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_arrayhist(b"\x00" * 10)
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Address constants (regression guard)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -269,7 +260,6 @@ class AddressConstantsTests(unittest.TestCase):
     def test_node_cap_is_3(self):
         """v2.10.0 caps at 3 nodes — node 4 (0xFF00) returns garbage."""
         self.assertEqual(NODE_MAX_SUPPORTED, 3)
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # read_with_lock — orchestrator that calls vendor_scope_peek under a lock
@@ -374,7 +364,6 @@ class ReadWithLockTests(unittest.TestCase):
         self.assertIsNotNone(result["histogram"])
         self.assertTrue(result["histogram"]["ok"])
         self.assertEqual(result["histogram"]["total"], 62292)
-
 
 if __name__ == "__main__":
     unittest.main()

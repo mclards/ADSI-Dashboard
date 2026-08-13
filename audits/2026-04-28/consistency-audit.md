@@ -1,9 +1,9 @@
 # Cross-Module Consistency Audit — 2026-04-28
 
-**Auditor:** general-purpose consistency focus  
-**Scope:** unit-of-measure pipelines, timezone handling, energy authority, replication mode, audit-log vocabulary, counter trust, settings keys, API shapes  
-**Status:** AUDIT COMPLETE + 3 CRITICAL FIXES APPLIED  
-**Date:** 2026-04-28 (audit) → 2026-04-28 18:47 UTC (fixes committed)  
+**Auditor:** general-purpose consistency focus
+**Scope:** unit-of-measure pipelines, timezone handling, energy authority, replication mode, audit-log vocabulary, counter trust, settings keys, API shapes
+**Status:** AUDIT COMPLETE + 3 CRITICAL FIXES APPLIED
+**Date:** 2026-04-28 (audit) → 2026-04-28 18:47 UTC (fixes committed)
 **Motivation:** Recent v2.10.0-beta.4 pac_w 10× regression (double scaling in poller + dailyAggregator) exposed systematic risk of cross-module unit inconsistencies; this audit searches for similar patterns.
 
 **FIXES APPLIED:** Commit 4712027 "Fix critical remote-mode proxy and timezone handling bugs in v2.10.0"
@@ -141,11 +141,11 @@
 
 ### Summary: Unit-of-Measure Consistency
 
-✅ **PAC:** scaling path clear (daW→W); repair retroactively applied.  
-✅ **Energy (kWh):** no re-scaling; PAC integration authority enforced.  
-✅ **Hardware counters:** kWh throughout; trust gates in place.  
-⚠️ **CosΦ:** untested at scale; register 16 may differ by DSP architecture.  
-⚠️ **Temperature:** −1 °C offset is empirically calibrated but not documented per-unit; register 71 not validated across all 27 units.  
+✅ **PAC:** scaling path clear (daW→W); repair retroactively applied.
+✅ **Energy (kWh):** no re-scaling; PAC integration authority enforced.
+✅ **Hardware counters:** kWh throughout; trust gates in place.
+⚠️ **CosΦ:** untested at scale; register 16 may differ by DSP architecture.
+⚠️ **Temperature:** −1 °C offset is empirically calibrated but not documented per-unit; register 71 not validated across all 27 units.
 ⚠️ **Frequency:** register 19 is *assumed* to be ×100; no datasheet confirmation in code.
 
 ---
@@ -217,7 +217,7 @@ const d = new Date(dateStr + "T00:00:00+08:00");
 - PAC seed only fires on `crash_detected=true` AND solar-window gap_ratio < 0.5.
 - `energySourceMode` selector (pac/etotal/parce) with NaN propagation.
 
-**Verification:** 
+**Verification:**
 - `ensureTodayEnergyBaseline()` (poller.js:429–462) calls `sumEnergy5minByInverterRange()` to fetch DB baseline, then compares against live PAC integrator state.
 - Recovery seed logic in poller.js:465–573 includes classifyRecoveryDelta() gate (v2.9.2), preventing single-frame jumps from poisoning training data.
 
@@ -380,7 +380,7 @@ trust_etotal → trust_parce → zero (fallback)
 
 **Every consumer of "counter source" MUST use the helper, not re-implement the logic.**
 
-**Verification:** 
+**Verification:**
 - Helpers defined in server/counterHealth.js (pure functions: `rtcYearValid()`, `counterAdvancing()`, etc.) and services/inverter_engine.py (matching: `trust_etotal()`, `trust_parce()`, etc.).
 - Callers: poller.js `ensureTodayEnergyBaseline()` does **not** directly invoke trust helpers (instead relies on `source_ip` and PAC authority).
 - Recovery seed logic uses `classifyRecoveryDelta()`, which doesn't call trust helpers directly.
@@ -410,6 +410,6 @@ trust_etotal → trust_parce → zero (fallback)
 
 ---
 
-**Audit completed:** 2026-04-28  
-**Auditor:** general-purpose consistency  
-**Confidence:** Moderate (limited time for forecast/scheduler path tracing and remote-mode stop-reasons verification)  
+**Audit completed:** 2026-04-28
+**Auditor:** general-purpose consistency
+**Confidence:** Moderate (limited time for forecast/scheduler path tracing and remote-mode stop-reasons verification)

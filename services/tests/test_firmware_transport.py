@@ -14,7 +14,6 @@ from services import firmware_transport as ft
 _FW = os.path.join(os.path.dirname(__file__), "..", "..", "docs",
                    "AAV1003IJK01BC_InverterFirmware.S")
 
-
 class _SlaveId:
     """Minimal duck of vendor_pdu.SlaveIdInfo for the compat gate.
 
@@ -26,7 +25,6 @@ class _SlaveId:
     def __init__(self, model_code="AAV1003BA", firmware_main="AAS1091AA"):
         self.model_code = model_code
         self.firmware_main = firmware_main
-
 
 class _FakeSocket:
     """Emulates the transparent MBAP→RTU gateway + DSP, in memory."""
@@ -55,7 +53,6 @@ class _FakeSocket:
     def close(self):
         pass
 
-
 class _Lock:
     def __init__(self):
         self.entered = self.exited = False
@@ -65,7 +62,6 @@ class _Lock:
     def __exit__(self, *a):
         self.exited = True
         return False
-
 
 class TestVerifyFirmwareFile(unittest.TestCase):
     def test_accepts_real_file_and_returns_sha(self):
@@ -109,7 +105,6 @@ class TestVerifyFirmwareFile(unittest.TestCase):
         self.assertTrue(ft.verify_firmware_file(_FW, allowed_dir=good_dir))
         with self.assertRaises(ft.FlashGateError):
             ft.verify_firmware_file(_FW, allowed_dir="d:/ADSI-Dashboard/server")
-
 
 class TestCompatGate(unittest.TestCase):
     @classmethod
@@ -157,7 +152,6 @@ class TestCompatGate(unittest.TestCase):
             ft.firmware_upgrade_direction(_SlaveId(model_code="AAV1003BC"),
                                           _FW)["direction"], "same")
 
-
 class TestEmbeddedFirmwareCode(unittest.TestCase):
     """ISM VerificaFicheroFirmware — embedded-code-vs-filename guard."""
 
@@ -192,7 +186,6 @@ class TestEmbeddedFirmwareCode(unittest.TestCase):
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
-
 class TestTransportFraming(unittest.TestCase):
     def test_mbap_roundtrip_via_fakesocket(self):
         img = fw.load_srec(_FW, 1, 512)
@@ -211,7 +204,6 @@ class TestTransportFraming(unittest.TestCase):
         with self.assertRaises(ft.FlashGateError):
             ft.ModbusVendorTcpTransport("")
 
-
 class TestOrchestratorDryRun(unittest.TestCase):
     def test_dry_run_default_never_touches_socket(self):
         res, dsp = ft.flash_inverter_node(firmware_path=_FW, node=4)
@@ -221,7 +213,6 @@ class TestOrchestratorDryRun(unittest.TestCase):
     def test_unknown_mode_rejected(self):
         with self.assertRaises(ft.FlashGateError):
             ft.flash_inverter_node(firmware_path=_FW, node=4, mode="yolo")
-
 
 class TestLiveGates(unittest.TestCase):
     """Every gate must refuse BEFORE any wire I/O."""
@@ -319,13 +310,11 @@ class TestLiveGates(unittest.TestCase):
             ft.flash_inverter_node(**self._base(host=None,
                                                 serial_port=None))
 
-
 class _DummyOK:
     """Transport that ACKs everything — only reached if gates PASS, so used
     by negative tests via _base() (they raise before query)."""
     def query(self, frame, t):
         return bytes([frame[0], frame[1], 0])
-
 
 class _DspTransport:
     """Transport adapter wrapping a MockDSP for the happy-path live test."""
@@ -337,7 +326,6 @@ class _DspTransport:
         pass
     def query(self, frame, t):
         return self._dsp.query(frame, t)
-
 
 class _FakeSerial:
     """In-memory pyserial stand-in: bridges RTU ADU ↔ MockDSP, zero
@@ -376,7 +364,6 @@ class _FakeSerial:
     def close(self):
         pass
 
-
 class _CannedSerial(_FakeSerial):
     """Returns a fixed FC11 ADU so report_slave_id parsing/CRC is proven
     without a MockDSP FC11 implementation."""
@@ -389,7 +376,6 @@ class _CannedSerial(_FakeSerial):
         body = bytes([node, 0x11, len(self._payload)]) + self._payload
         self._buf += body + struct.pack("<H", ft._modbus_crc16(body))
         return len(adu)
-
 
 class TestRtuTransport(unittest.TestCase):
     def test_port_required(self):
@@ -442,7 +428,6 @@ class TestRtuTransport(unittest.TestCase):
         self.assertEqual(sid.model_code, "AAV1003BA")
         self.assertEqual(sid.serial, "400152A17R52")
         tr.close()
-
 
 if __name__ == "__main__":
     unittest.main()

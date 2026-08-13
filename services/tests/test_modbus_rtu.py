@@ -6,7 +6,6 @@ Tests are independent of pyserial or socket I/O.
 import unittest
 import struct
 
-
 def crc16_modbus(data: bytes) -> int:
     """
     Calculate Modbus CRC16 (polynomial 0xA001, init 0xFFFF).
@@ -22,13 +21,11 @@ def crc16_modbus(data: bytes) -> int:
                 crc >>= 1
     return crc
 
-
 def build_rtu_adu(unit: int, pdu: bytes) -> bytes:
     """Build RTU ADU: [unit] + pdu + crc16_lo + crc16_hi."""
     adu = bytes([unit]) + pdu
     crc = crc16_modbus(adu)
     return adu + struct.pack("<H", crc)
-
 
 def parse_rtu_adu(adu: bytes) -> tuple:
     """
@@ -48,7 +45,6 @@ def parse_rtu_adu(adu: bytes) -> tuple:
     crc_ok = embedded_crc == computed_crc
     return unit, pdu, crc_ok
 
-
 def build_tcp_adu(txn_id: int, pdu: bytes) -> bytes:
     """Build Modbus TCP ADU: [txn_hi, txn_lo, 0, 0, len_hi, len_lo, unit, ...pdu]."""
     # For test simplicity, assume unit=1 (normally read from request or map)
@@ -56,7 +52,6 @@ def build_tcp_adu(txn_id: int, pdu: bytes) -> bytes:
     payload = bytes([unit]) + pdu
     length = len(payload)
     return struct.pack(">HHHB", txn_id, 0, length, unit) + pdu
-
 
 def parse_tcp_adu(adu: bytes) -> tuple:
     """
@@ -76,7 +71,6 @@ def parse_tcp_adu(adu: bytes) -> tuple:
     if len(pdu) != length - 1:  # length includes unit byte
         raise ValueError(f"Length mismatch: expected {length-1}, got {len(pdu)}")
     return txn_id, unit, pdu
-
 
 class TestCRC16(unittest.TestCase):
     """CRC16 vectors from Modbus spec and independent sources."""
@@ -109,7 +103,6 @@ class TestCRC16(unittest.TestCase):
         # Just verify it computes without error and is in valid range
         self.assertGreaterEqual(crc, 0)
         self.assertLess(crc, 65536)
-
 
 class TestRTUADU(unittest.TestCase):
     """RTU ADU build/parse round-trip tests."""
@@ -184,7 +177,6 @@ class TestRTUADU(unittest.TestCase):
             self.assertEqual(parsed_pdu, pdu)
             self.assertTrue(crc_ok)
 
-
 class TestTCPADU(unittest.TestCase):
     """TCP ADU parse tests (for bridge context awareness)."""
 
@@ -218,7 +210,6 @@ class TestTCPADU(unittest.TestCase):
         self.assertEqual(unit, 1)
         self.assertEqual(pdu, bytes([0x03, 0x00, 0x00, 0x00, 0x0A]))
 
-
 class TestExceptionResponse(unittest.TestCase):
     """Test exception response synthesis for bridge failures."""
 
@@ -246,7 +237,6 @@ class TestExceptionResponse(unittest.TestCase):
         self.assertEqual(unit_out, 1)
         self.assertEqual(pdu_out, exc_pdu)
         self.assertTrue(crc_ok)
-
 
 if __name__ == "__main__":
     unittest.main()

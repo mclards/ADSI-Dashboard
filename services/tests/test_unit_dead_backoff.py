@@ -29,7 +29,6 @@ import unittest
 
 import services.inverter_engine as engine
 
-
 class UnitDeadBackoffTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self._orig = {
@@ -295,7 +294,6 @@ class UnitDeadBackoffTests(unittest.IsolatedAsyncioTestCase):
                 await task
             except asyncio.CancelledError:
                 pass
-
 
 if __name__ == "__main__":
     unittest.main()

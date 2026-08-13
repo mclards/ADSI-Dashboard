@@ -29,7 +29,6 @@ _BLOB = (
 )
 REGS = [int(x, 16) for x in _BLOB.split()]
 
-
 def _by_field(full):
     out = {}
     for rows in full["groups"].values():
@@ -37,10 +36,8 @@ def _by_field(full):
             out[r["field"]] = r
     return out
 
-
 def test_block_length():
     assert len(REGS) == 177
-
 
 def test_full_settings_available_and_grouped():
     full = cd.decode_full_settings(REGS)
@@ -50,7 +47,6 @@ def test_full_settings_available_and_grouped():
     for rows in full["groups"].values():
         for r in rows:
             assert r["writable"] is False
-
 
 def test_audit_values_match():
     f = _by_field(cd.decode_full_settings(REGS))
@@ -89,7 +85,6 @@ def test_audit_values_match():
     assert f["CountryCode"]["decoded"] == 42
     assert f["ValidCfgCode"]["raw_hex"] == "0x1F1F"
 
-
 # ─── Diff-lock: calibration scale-factor decode must NOT change ────────────
 
 _CALIB_GOLDEN = {
@@ -102,14 +97,12 @@ _CALIB_GOLDEN = {
     91: 1927, 92: 437, 93: 7714, 94: 65346,
 }
 
-
 def test_calibration_block_diff_locked():
     out = cd.decode_calibration_block(REGS, base_offset=0)
     assert out["valid_cfg_code_hex"] == "0x1F1F"
     assert out["valid_cfg_code_ok"] is True
     got = {row["offset"]: row["signed"] for row in out["fields"]}
     assert got == _CALIB_GOLDEN
-
 
 def test_config_block_embeds_full():
     d = cd.decode_config_block(REGS)

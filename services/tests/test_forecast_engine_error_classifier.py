@@ -15,7 +15,6 @@ MODULE_PATH = ROOT / "services" / "forecast_engine.py"
 WORK_TMP = ROOT / ".tmp" / "forecast-engine-error-classifier-tests"
 WORK_TMP.mkdir(parents=True, exist_ok=True)
 
-
 def load_module(temp_root: Path, tag: str):
     (temp_root / "data").mkdir(parents=True, exist_ok=True)
     (temp_root / "portable").mkdir(parents=True, exist_ok=True)
@@ -27,7 +26,6 @@ def load_module(temp_root: Path, tag: str):
     spec.loader.exec_module(module)
     return module
 
-
 class IdentityScaler:
     def __init__(self, n_features: int):
         self.n_features_in_ = n_features
@@ -35,14 +33,12 @@ class IdentityScaler:
     def transform(self, X):
         return np.asarray(X, dtype=float)
 
-
 class ZeroRegressor:
     def __init__(self):
         self.n_estimators = 1
 
     def predict(self, X):
         return np.zeros(len(X), dtype=float)
-
 
 class FixedClassifier:
     def __init__(self, probs):
@@ -52,7 +48,6 @@ class FixedClassifier:
 
     def predict_proba(self, X):
         return np.tile(self._probs, (len(X), 1))
-
 
 class ForecastEngineErrorClassifierTests(unittest.TestCase):
     def test_fit_error_classifier_skips_when_only_one_class_present(self):
@@ -1320,7 +1315,6 @@ class ForecastEngineErrorClassifierTests(unittest.TestCase):
         finally:
             logging.shutdown()
             shutil.rmtree(tmp_root, ignore_errors=True)
-
 
 if __name__ == "__main__":
     unittest.main()

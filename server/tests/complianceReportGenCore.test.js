@@ -104,7 +104,7 @@ test("generateCsvBundle: data rows are properly column-split (regression guard)"
   // column structure here so it can never regress.
   const out = generateCsvBundle(fakeRun, fakeSteps, fakeSamples, tmpDir);
   const lines = fs.readFileSync(out.path, "utf8")
-    .replace(/^﻿/, "")
+    .replace(/^\uFEFF/, "")
     .split("\n");
 
   // Trivial CSV split that respects double-quoted fields. Sufficient for

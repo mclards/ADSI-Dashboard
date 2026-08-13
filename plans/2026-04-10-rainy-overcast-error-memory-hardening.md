@@ -2,14 +2,14 @@
 
 **Objective:** Improve forecast accuracy during rainy and overcast regimes by fixing the systematic weaknesses in the error memory system that cause it to underperform exactly when generation impact is highest.
 
-**Status:** Draft  
-**Date:** 2026-04-10  
-**Created:** 2026-04-10  
-**Author:** Engr. M. + Claude  
-**Target file:** `services/forecast_engine.py`  
-**Branch strategy:** Single feature branch `feat/rainy-regime-memory-hardening` off `main`  
-**Risk level:** Medium — parameter-level changes within existing logic; no new tables, no schema changes, no new dependencies  
-**Rollback:** Revert single commit; all changes are constant/parameter adjustments  
+**Status:** Draft
+**Date:** 2026-04-10
+**Created:** 2026-04-10
+**Author:** Engr. M. + Claude
+**Target file:** `services/forecast_engine.py`
+**Branch strategy:** Single feature branch `feat/rainy-regime-memory-hardening` off `main`
+**Risk level:** Medium — parameter-level changes within existing logic; no new tables, no schema changes, no new dependencies
+**Rollback:** Revert single commit; all changes are constant/parameter adjustments
 
 ---
 
@@ -50,8 +50,8 @@ Step 2 (support weight fix)          Step 3 (Solcast damping by regime)
                           Step 6 (validation & smoke test)
 ```
 
-Steps 2 and 3 are independent of each other (parallel-safe).  
-Steps 4 and 5 depend on Steps 1-3 being complete.  
+Steps 2 and 3 are independent of each other (parallel-safe).
+Steps 4 and 5 depend on Steps 1-3 being complete.
 Step 6 is the final gate.
 
 ---

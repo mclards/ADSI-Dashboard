@@ -19,11 +19,9 @@ _FW = os.path.join(
     "AAV1003IJK01BC_InverterFirmware.S",
 )
 
-
 def _read_lines():
     with open(_FW, "r", encoding="latin-1") as fh:
         return [ln.strip() for ln in fh if ln.strip()]
-
 
 class TestSrecChecksum(unittest.TestCase):
     """valida_linea_de_sfile must accept every line of the intact file and
@@ -46,7 +44,6 @@ class TestSrecChecksum(unittest.TestCase):
         s3 = next(ln for ln in _read_lines() if ln.startswith("S3"))
         self.assertFalse(fw.valida_linea_de_sfile(s3 + "AA"))  # extra pair
 
-
 class TestAuditDerivedFacts(unittest.TestCase):
     """Cross-check against the independent figures in the 2026-05-18 audit."""
 
@@ -58,7 +55,6 @@ class TestAuditDerivedFacts(unittest.TestCase):
         img = fw.load_srec(_FW, arg_dsp=1, arg_longitud_trama=512)
         self.assertIn("PROGRAM&DATA", img.s0_header)
         self.assertEqual(img.s7_entry, 0x0000B153)
-
 
 class TestFlashMap(unittest.TestCase):
     """build_flash_map = CargaMapaFlashDSP80x port."""
@@ -100,7 +96,6 @@ class TestFlashMap(unittest.TestCase):
         # No match → returns len(banks) (callers guard with < len).
         self.assertEqual(fw.dir_flash_2_index(b, 0x9999, 0), len(b))
 
-
 class TestTargetDspGates(unittest.TestCase):
     def test_unsupported_s(self):
         for d in (4, 5):
@@ -112,7 +107,6 @@ class TestTargetDspGates(unittest.TestCase):
         with self.assertRaises(fw.FirmwareError) as e:
             fw.load_srec(_FW, arg_dsp=2, arg_longitud_trama=512)
         self.assertIn("2005 or older", str(e.exception))
-
 
 def _independent_decode(lines):
     """Reference S3 decoder written from scratch (NOT using the module) so a
@@ -135,7 +129,6 @@ def _independent_decode(lines):
             hi = int(ln[14 + 4 * k:16 + 4 * k], 16)
             mem[(tipo, addr + k)] = (lo + hi * 256) & 0xFFFF
     return mem
-
 
 class TestFlashImageEquivalence(unittest.TestCase):
     """Strongest proof: every written word in the real file must land in the
@@ -222,7 +215,6 @@ class TestFlashImageEquivalence(unittest.TestCase):
             self.assertIn("S3 line", str(e.exception))
         finally:
             os.unlink(tmp)
-
 
 class TestPhase1bFrameBuilders(unittest.TestCase):
     """Frame builders = CrearTrama0x90/91/92 + AvanzaFlash + global checksum.
@@ -361,7 +353,6 @@ class TestPhase1bFrameBuilders(unittest.TestCase):
         self.assertTrue(all(w == 0xFFFF for w in recon[4].data),
                         "reset-vector bank[4] must never be transmitted")
 
-
 class TestPhase1cDryRun(unittest.TestCase):
     """End-to-end hardware-free flash: parse → frames → state machine →
     MockDSP receiver. If every layer is internally consistent against the
@@ -486,7 +477,6 @@ class TestPhase1cDryRun(unittest.TestCase):
                           sleep=lambda _s: None)
         self.assertIn("FrameCHKErrors:", str(e.exception))
 
-
 class TestPhase1Hardening(unittest.TestCase):
     """Regression locks for the post-review hardening (size guard,
     truncated-frame NACK, narrowed exception handling)."""
@@ -554,7 +544,6 @@ class TestPhase1Hardening(unittest.TestCase):
         with self.assertRaises(AttributeError):
             fw.flash_node(frames, BuggyTransport(), node=4, num_intentos=2,
                           sleep=lambda _s: None)
-
 
 if __name__ == "__main__":
     unittest.main()

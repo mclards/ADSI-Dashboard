@@ -17,7 +17,6 @@ import json
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "services" / "inverter_engine.py"
 
-
 def _load_helpers():
     """
     Load pure helper functions from inverter_engine.py for testing.
@@ -48,7 +47,6 @@ def _load_helpers():
         print(f"Warning: could not extract _signed_int16: {e}")
 
     return ns
-
 
 class StandardStopReasonsTests(unittest.TestCase):
     """
@@ -291,7 +289,6 @@ class StandardStopReasonsTests(unittest.TestCase):
         # This will be tested once we implement the async function
         # We'll verify read_at_ms is close to the invocation timestamp
         pass
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

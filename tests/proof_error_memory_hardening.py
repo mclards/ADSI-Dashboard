@@ -38,7 +38,6 @@ def make_errors(regime):
         err[SOLAR_START:SOLAR_END] = np.random.normal(20.0, 10.0, SOLAR_END - SOLAR_START)
     return err
 
-
 def make_support_weight_old(regime, slot_bucket):
     """OLD behavior: penalize storm/rain slots regardless of regime."""
     w = 1.0
@@ -48,7 +47,6 @@ def make_support_weight_old(regime, slot_bucket):
     if slot_bucket in ('storm_risk', 'rain_heavy'):
         w *= 0.75   # old: flat 75% for storm slots
     return w
-
 
 def make_support_weight_new(regime, slot_bucket):
     """NEW behavior: don't penalize storm/rain slots during rainy/overcast."""
@@ -64,7 +62,6 @@ def make_support_weight_new(regime, slot_bucket):
             w *= 0.75   # unchanged for clear/mixed
         # rainy/overcast: no penalty (1.0)
     return w
-
 
 # Build 30-day history
 history = []
@@ -86,7 +83,6 @@ ERR_MEMORY_DAYS_OLD = 7
 ERR_MEMORY_DECAY = 0.72
 ERR_MEMORY_REGIME_MISMATCH_PENALTY_OLD = 0.25
 ERROR_ALPHA = 0.28
-
 
 def compute_old(target_regime):
     weighted_sum = np.zeros(SLOTS_DAY)
@@ -115,7 +111,6 @@ def compute_old(target_regime):
     correction = ERROR_ALPHA * mem * bias_damp
     return correction, selected, regime_days_used, bias_damp
 
-
 # ============================================================
 # NEW error memory
 # ============================================================
@@ -126,7 +121,6 @@ ERR_MEMORY_REGIME_PENALTY_MATRIX = {
     ('overcast', 'clear'):    0.25, ('overcast', 'mixed'):    0.60, ('overcast', 'rainy'):    0.70,
     ('rainy',    'clear'):    0.20, ('rainy',    'mixed'):    0.35, ('rainy',    'overcast'): 0.70,
 }
-
 
 def compute_new(target_regime):
     _regime_days = ERR_MEMORY_DAYS_BY_REGIME.get(target_regime, 7)
@@ -163,7 +157,6 @@ def compute_new(target_regime):
         bias_damp = 0.30   # 70% reduction (unchanged for clear)
     correction = ERROR_ALPHA * mem * bias_damp
     return correction, selected, regime_days_used, bias_damp
-
 
 # ============================================================
 # COMPARE
@@ -214,7 +207,6 @@ def report(target):
         # 156 solar slots x 5 min = 13 hours, ~5400 kW peak
         mw_impact = (total_new - total_old) / 1000.0
         print(f"  Daily MWh impact:   {mw_impact:+.2f} MWh")
-
 
 print("="*72)
 print("  PROOF: Error Memory Hardening — Numerical Impact")

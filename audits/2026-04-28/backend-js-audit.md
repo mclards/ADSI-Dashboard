@@ -20,8 +20,8 @@ None.
 
 ### HI-001 - Missing remote-mode proxy on /api/counter-baseline/:date_key
 
-**File:** server/index.js:12427  
-**Severity:** HIGH  
+**File:** server/index.js:12427
+**Severity:** HIGH
 
 The endpoint reads inverter_counter_baseline (gateway-local only). Remote viewers receive data from their HTTP gateway, not the actual inverter gateway.
 
@@ -34,8 +34,8 @@ Impact: Remote-viewer counter-baseline queries return stale/blank data.
 
 ### HI-002 - Missing remote-mode proxy on /admin/inverter-clock
 
-**File:** server/index.js:12856  
-**Severity:** HIGH  
+**File:** server/index.js:12856
+**Severity:** HIGH
 
 Same issue: inverter_counter_state is gateway-local. Admin page reads and renders clock state without checking if requester is remote.
 

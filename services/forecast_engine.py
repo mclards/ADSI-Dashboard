@@ -55,7 +55,6 @@ except ImportError as _lgb_err:
     # opaque "lgbm_unavailable_fallback" flag.
     _LIGHTGBM_IMPORT_ERROR = str(_lgb_err)
 
-
 # Phase 8 code-review fix (2026-04-15): module-scope initializers for the
 # one-time-log guards used by T4.6 (Solcast reliability dimension fallback)
 # and T4.8 (legacy-model truncation).  Previously initialised lazily inside
@@ -66,7 +65,6 @@ except ImportError as _lgb_err:
 # `add()` / assignment always lands in the already-existing container.
 _reliability_fallback_notified: set = set()
 _legacy_model_truncate_notified: bool = False
-
 
 class IdentityFeatureScaler:
     """Legacy-compatible no-op transformer for standalone scaler artifacts."""
@@ -174,13 +172,11 @@ DAYAHEAD_GEN_LOCK_MAX_AGE_SEC = 300  # 5 min — covers Node's 180 s timeout + s
 for _d in [WEATHER_DIR, MODEL_FILE.parent, FORECAST_SNAPSHOT_DIR, LOG_FILE.parent, APP_DB_FILE.parent, IPCONFIG_FILE.parent, DAYAHEAD_GEN_LOCK_DIR]:
     _d.mkdir(parents=True, exist_ok=True)
 
-
 def _service_stop_requested() -> bool:
     try:
         return bool(SERVICE_STOP_FILE and SERVICE_STOP_FILE.exists())
     except Exception:
         return False
-
 
 def _clear_service_stop_file() -> None:
     if SERVICE_STOP_FILE is None:
@@ -195,7 +191,6 @@ def _clear_service_stop_file() -> None:
             pass
     except Exception:
         pass
-
 
 def _sleep_with_service_stop(total_sec: float) -> None:
     deadline = time.monotonic() + max(0.0, float(total_sec or 0.0))
@@ -536,7 +531,6 @@ def _load_json(path: Path) -> dict:
         log.error("JSON load failed %s: %s", path, e)
         return {}
 
-
 def _save_json(path: Path, data: dict) -> bool:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -548,9 +542,7 @@ def _save_json(path: Path, data: dict) -> bool:
         log.error("JSON save failed %s: %s", path, e)
         return False
 
-
 _TRAIN_REJECTION_ALERT_THRESHOLD = 3  # consecutive skipped runs before a prominent warning
-
 
 def _increment_train_rejection_streak() -> int:
     """Increment the consecutive ML training rejection counter and return the new value.
@@ -571,7 +563,6 @@ def _increment_train_rejection_streak() -> int:
             streak,
         )
     return streak
-
 
 def _reset_train_rejection_streak(bundle: dict | None = None) -> None:
     """Reset the consecutive ML training rejection counter after a successful training run."""
@@ -604,7 +595,6 @@ def _reset_train_rejection_streak(bundle: dict | None = None) -> None:
 
     _save_json(ML_TRAIN_STATE_FILE, state)
 
-
 def _has_forecast_dayahead_in_db(day: str) -> bool:
     """Check if forecast_dayahead has a complete solar-window rowset for the day."""
     try:
@@ -622,7 +612,6 @@ def _has_forecast_dayahead_in_db(day: str) -> bool:
             return int(row[0] or 0) >= int(SOLAR_SLOTS)
     except Exception:
         return False
-
 
 def _is_retryable_sqlite_error(exc: Exception) -> bool:
     """
@@ -653,7 +642,6 @@ def _is_retryable_sqlite_error(exc: Exception) -> bool:
     )
     return any(s in msg for s in retryable_substrings)
 
-
 # v2.8 SQLite audit (M3): once-per-process WAL mode verification. If the
 # DB file is not in WAL mode, Python's synchronous=NORMAL + busy_timeout
 # assumptions are weaker than expected (DELETE journal doesn't give
@@ -662,7 +650,6 @@ def _is_retryable_sqlite_error(exc: Exception) -> bool:
 # install) is visible early instead of surfacing as mysterious lock
 # contention later.
 _WAL_MODE_VERIFIED: dict[str, bool] = {}
-
 
 def _verify_wal_mode_once(db_path: Path) -> None:
     key = str(db_path)
@@ -689,7 +676,6 @@ def _verify_wal_mode_once(db_path: Path) -> None:
             conn.close()
     except Exception as e:
         log.debug("WAL mode verification skipped for %s: %s", db_path.name, e)
-
 
 def _open_sqlite(db_path: Path, timeout_sec: float, readonly: bool = False) -> sqlite3.Connection:
     # v2.8 M3: one-shot WAL mode check on first open per-path.
@@ -725,7 +711,6 @@ def _open_sqlite(db_path: Path, timeout_sec: float, readonly: bool = False) -> s
             pass  # best-effort; never fail open over pragma failure
     return conn
 
-
 def _sleep_sqlite_retry(attempt: int) -> None:
     # v2.8 SQLite audit O1: exponential backoff. Previously linear
     # (0.35 × attempt → 0.35, 0.70, 1.05 s). Exponential (0.35 × 2^(n-1)
@@ -737,7 +722,6 @@ def _sleep_sqlite_retry(attempt: int) -> None:
     delay = SQLITE_RETRY_BACKOFF_SEC * (2 ** (n - 1))
     time.sleep(min(delay, 2.0))
 
-
 def _coerce_non_negative_float(value, default: float = 0.0) -> float:
     try:
         f = float(value)
@@ -747,7 +731,6 @@ def _coerce_non_negative_float(value, default: float = 0.0) -> float:
         return float(default)
     return max(0.0, f)
 
-
 def _coerce_optional_non_negative_float(value) -> float | None:
     try:
         f = float(value)
@@ -756,7 +739,6 @@ def _coerce_optional_non_negative_float(value) -> float | None:
     if not math.isfinite(f):
         return None
     return max(0.0, f)
-
 
 def _normalize_solcast_slot_pair(
     energy_kwh_value,
@@ -773,14 +755,11 @@ def _normalize_solcast_slot_pair(
         power_mw = energy_kwh / max(SOLCAST_KWH_PER_MW_SLOT, 1e-9)
     return energy_kwh, power_mw
 
-
 def _empty_slot_values() -> np.ndarray:
     return np.zeros(SLOTS_DAY, dtype=float)
 
-
 def _empty_slot_presence() -> np.ndarray:
     return np.zeros(SLOTS_DAY, dtype=bool)
-
 
 def _count_solar_present_slots(present: np.ndarray | None) -> int:
     if present is None:
@@ -789,7 +768,6 @@ def _count_solar_present_slots(present: np.ndarray | None) -> int:
     if arr.size < SLOTS_DAY:
         return 0
     return int(np.count_nonzero(arr[SOLAR_START_SLOT:SOLAR_END_SLOT]))
-
 
 def _parse_slot_from_time_text(day: str, time_text: str | None) -> int | None:
     try:
@@ -808,12 +786,10 @@ def _parse_slot_from_time_text(day: str, time_text: str | None) -> int | None:
     except Exception:
         return None
 
-
 def _default_legacy_slot(index: int, total_rows: int) -> int:
     if total_rows <= SOLAR_SLOTS:
         return SOLAR_START_SLOT + int(index)
     return int(index)
-
 
 def _merge_slot_series(
     label: str,
@@ -862,7 +838,6 @@ def _merge_slot_series(
     merged_values[merged_values < 0] = 0.0
     return merged_values
 
-
 def _merge_slot_series_with_presence(
     label: str,
     day: str,
@@ -910,7 +885,6 @@ def _merge_slot_series_with_presence(
     merged_values[merged_values < 0] = 0.0
     return merged_values, merged_present
 
-
 def clear_forecast_data_cache() -> None:
     global _cached_loss_factors
     _cached_loss_factors = None
@@ -927,7 +901,6 @@ def clear_forecast_data_cache() -> None:
     load_intraday_adjusted_with_presence.cache_clear()
     load_operational_constraint_profile.cache_clear()
 
-
 def _slice_weather_day(df: pd.DataFrame, day: str) -> pd.DataFrame:
     """Return rows belonging only to YYYY-MM-DD (local naive timestamps)."""
     if df is None or df.empty or "time" not in df.columns:
@@ -943,14 +916,12 @@ def _slice_weather_day(df: pd.DataFrame, day: str) -> pd.DataFrame:
     out = out.sort_values("time").reset_index(drop=True)
     return out
 
-
 def _is_past_day(day: str) -> bool:
     try:
         req = datetime.strptime(day, "%Y-%m-%d").date()
     except Exception:
         return False
     return req < datetime.now().date()
-
 
 def validate_weather_hourly(day: str, wdf: pd.DataFrame) -> tuple[bool, str]:
     req_cols = {
@@ -965,7 +936,6 @@ def validate_weather_hourly(day: str, wdf: pd.DataFrame) -> tuple[bool, str]:
     if len(wdf) < MIN_HOURLY_POINTS:
         return False, f"insufficient hourly rows ({len(wdf)})"
     return True, ""
-
 
 def validate_weather_5min(day: str, w5: pd.DataFrame) -> tuple[bool, str]:
     req_cols = [
@@ -985,7 +955,6 @@ def validate_weather_5min(day: str, w5: pd.DataFrame) -> tuple[bool, str]:
             return False, f"column {c} has no finite values"
     return True, ""
 
-
 # ============================================================================
 # IPCONFIG RESOLUTION
 # ============================================================================
@@ -999,7 +968,6 @@ def _default_ipconfig() -> dict:
         cfg["units"][key] = [1, 2, 3, 4]
         cfg["losses"][key] = float(DEFAULT_INVERTER_LOSS_PCT)
     return cfg
-
 
 def _sanitize_ipconfig(data) -> dict:
     out = _default_ipconfig()
@@ -1051,7 +1019,6 @@ def _sanitize_ipconfig(data) -> dict:
 
     return out
 
-
 @lru_cache(maxsize=1)
 def load_ipconfig_authoritative() -> dict:
     raw = _read_setting_value(IPCONFIG_SETTING_KEY)
@@ -1080,7 +1047,6 @@ def load_ipconfig_authoritative() -> dict:
         "path": str(IPCONFIG_FILE),
     }
 
-
 # ============================================================================
 # PLANT CAPACITY
 # ============================================================================
@@ -1100,7 +1066,6 @@ def _sanitize_units(raw) -> list[int]:
             out.append(u)
             seen.add(u)
     return out
-
 
 def plant_capacity_profile() -> dict:
     """
@@ -1197,7 +1162,6 @@ def plant_capacity_profile() -> dict:
         "ipconfig_path": str(ipconfig_meta.get("path", IPCONFIG_FILE)),
     }
 
-
 def plant_capacity_kw(dependable: bool = True) -> float:
     """Return plant capacity in kW from ipconfig or fallback."""
     p = plant_capacity_profile()
@@ -1224,7 +1188,6 @@ def slot_cap_kwh(dependable: bool = True) -> float:
     cap_kw = plant_capacity_kw(dependable)
     return cap_kw * SLOT_MIN / 60.0
 
-
 def plant_node_count() -> int:
     """Return enabled power-module count across the plant."""
     profile = plant_capacity_profile()
@@ -1234,12 +1197,10 @@ def plant_node_count() -> int:
     fallback = int(round(max(profile.get("max_kw", 0.0), plant_capacity_kw(False)) / max(NODE_KW_NOMINAL, 1.0)))
     return max(1, fallback)
 
-
 def node_slot_kwh() -> float:
     """Approximate per-node 5-minute energy step used for low-power staging."""
     node_count = max(1, plant_node_count())
     return plant_capacity_kw(True) * SLOT_MIN / 60.0 / node_count
-
 
 def activity_threshold_kwh() -> float:
     """
@@ -1250,12 +1211,10 @@ def activity_threshold_kwh() -> float:
     """
     return max(1.0, min(node_slot_kwh() * 0.18, slot_cap_kwh(True) * ACTIVITY_MIN_FRACTION))
 
-
 def _solar_hour_bounds(hour: int) -> tuple[int, int]:
     start = int(hour) * 60 // SLOT_MIN
     end = start + (60 // SLOT_MIN)
     return max(0, start), min(SLOTS_DAY, end)
-
 
 def _season_bucket_from_day(day: str) -> str:
     try:
@@ -1263,7 +1222,6 @@ def _season_bucket_from_day(day: str) -> str:
     except Exception:
         month = datetime.now().month
     return "dry" if month in (12, 1, 2, 3, 4, 5) else "wet"
-
 
 def _is_extreme_weather_day(
     actual_solar: np.ndarray,
@@ -1283,14 +1241,12 @@ def _is_extreme_weather_day(
     severe_slots = int(np.count_nonzero((ratio < EXTREME_WEATHER_RATIO_THRESHOLD) & usable))
     return severe_slots >= EXTREME_WEATHER_SLOT_THRESHOLD
 
-
 def _tod_zone_for_slot(slot_idx: int):
     """Return 'morning', 'midday', 'afternoon', or None if outside solar window."""
     for zone, (zs, ze) in TOD_ZONES.items():
         if zs <= slot_idx < ze:
             return zone
     return None
-
 
 def _compute_tod_slot_metrics(actual: np.ndarray, forecast: np.ndarray, present_mask: np.ndarray, exclude_mask: np.ndarray | None = None) -> dict:
     """Per-zone slot-level metrics (bias_ratio, mape, slot_count) from 288-slot arrays."""
@@ -1318,7 +1274,6 @@ def _compute_tod_slot_metrics(actual: np.ndarray, forecast: np.ndarray, present_
             "slot_count": usable,
         }
     return result
-
 
 def _compute_solcast_trend(records: list) -> dict:
     """Compute trend signal from daily reliability records (most-recent-first)."""
@@ -1357,7 +1312,6 @@ def _compute_solcast_trend(records: list) -> dict:
         "second_half_days": len(second_half),
     }
 
-
 def lookup_solcast_tod_reliability(artifact, regime: str, zone: str) -> dict:
     """Lookup ToD reliability: time_of_day_by_regime[regime][zone] -> time_of_day[zone] -> fallback."""
     fallback = {"bias_ratio": 1.0, "mape": 0.24, "reliability": 0.62, "slot_count": 0}
@@ -1378,13 +1332,11 @@ def lookup_solcast_tod_reliability(artifact, regime: str, zone: str) -> dict:
         return out
     return fallback
 
-
 def lookup_solcast_trend(artifact) -> dict:
     """Return trend dict from artifact, or stable fallback."""
     if artifact and isinstance(artifact, dict) and "trend" in artifact:
         return artifact["trend"]
     return {"signal": "stable", "magnitude": 0.0, "first_half_reliability": 0.0, "second_half_reliability": 0.0, "first_half_days": 0, "second_half_days": 0}
-
 
 def _rolling_window_bounds(length: int, window: int, center: bool = False) -> tuple[np.ndarray, np.ndarray]:
     size = max(int(length), 0)
@@ -1400,7 +1352,6 @@ def _rolling_window_bounds(length: int, window: int, center: bool = False) -> tu
         end = idx + 1
     return start, end
 
-
 def _rolling_sum(values: np.ndarray, window: int, center: bool = False) -> np.ndarray:
     arr = np.asarray(values, dtype=float).reshape(-1)
     if arr.size <= 0:
@@ -1414,7 +1365,6 @@ def _rolling_sum(values: np.ndarray, window: int, center: bool = False) -> np.nd
     out[(count[end] - count[start]) <= 0] = np.nan
     return out
 
-
 def _rolling_mean(values: np.ndarray, window: int, center: bool = False) -> np.ndarray:
     arr = np.asarray(values, dtype=float).reshape(-1)
     if arr.size <= 0:
@@ -1427,7 +1377,6 @@ def _rolling_mean(values: np.ndarray, window: int, center: bool = False) -> np.n
     numer = csum[end] - csum[start]
     denom = count[end] - count[start]
     return np.divide(numer, denom, out=np.full(arr.size, np.nan, dtype=float), where=denom > 0)
-
 
 def _rolling_std(values: np.ndarray, window: int, center: bool = False, ddof: int = 1) -> np.ndarray:
     arr = np.asarray(values, dtype=float).reshape(-1)
@@ -1448,7 +1397,6 @@ def _rolling_std(values: np.ndarray, window: int, center: bool = False, ddof: in
     var = np.divide(var_numer, denom, out=np.full(arr.size, np.nan, dtype=float), where=denom > 0)
     return np.sqrt(np.clip(var, 0.0, None))
 
-
 def _normalize_profile(values: np.ndarray) -> np.ndarray:
     arr = np.clip(np.asarray(values, dtype=float), 0.0, None)
     if arr.size == 0:
@@ -1459,13 +1407,11 @@ def _normalize_profile(values: np.ndarray) -> np.ndarray:
         return np.full(arr.size, 1.0 / arr.size, dtype=float)
     return arr / total
 
-
 # NOTE (v2.8 cleanup): `_anen_find_analogs` and `_anen_correction_ratio` were
 # removed. The Analog Ensemble post-correction was a recency-only scalar
 # `actual/forecast` ratio (clipped ±15%) that ran AFTER `compute_error_memory`
 # had already corrected per-slot bias. Both layers were solving the same
 # problem; error_memory does it with regime-aware decay + spread weighting.
-
 
 def _find_first_active_slot(values: np.ndarray, threshold: float | None = None, sustain_slots: int = ACTIVITY_SUSTAIN_SLOTS) -> int | None:
     arr = np.clip(np.asarray(values, dtype=float), 0.0, None)
@@ -1477,7 +1423,6 @@ def _find_first_active_slot(values: np.ndarray, threshold: float | None = None, 
             return slot
     return None
 
-
 def _find_last_active_slot(values: np.ndarray, threshold: float | None = None, sustain_slots: int = ACTIVITY_SUSTAIN_SLOTS) -> int | None:
     arr = np.clip(np.asarray(values, dtype=float), 0.0, None)
     threshold = activity_threshold_kwh() if threshold is None else float(threshold)
@@ -1488,18 +1433,15 @@ def _find_last_active_slot(values: np.ndarray, threshold: float | None = None, s
             return slot + window.size - 1
     return None
 
-
 def _sample_weight_for_days_ago(days_ago: int) -> float:
     days = max(0.0, float(days_ago) - 1.0)
     weight = 0.5 ** (days / max(TRAIN_WEIGHT_HALF_LIFE_DAYS, 1e-6))
     return float(np.clip(weight, TRAIN_WEIGHT_FLOOR, 1.0))
 
-
 def _weather_cache_path(day: str, source_kind: str) -> Path:
     loc_tag = f"{LAT_DEG:.6f}_{LON_DEG:.6f}".replace("-", "m")
     tag = "archive" if str(source_kind or "").strip().lower() == "archive" else "forecast"
     return WEATHER_DIR / f"om_{tag}_{day}_{loc_tag}.csv"
-
 
 # ============================================================================
 # WEATHER FETCH & CACHE
@@ -1511,7 +1453,6 @@ def _weather_cache_path(day: str, source_kind: str) -> Path:
 # CSV parse + validate entirely. Invalidated by cache-file mtime change.
 _WEATHER_MEM_CACHE: dict[tuple[str, str], tuple[int, pd.DataFrame]] = {}
 _WEATHER_MEM_CACHE_MAX = 256
-
 
 # v2.8 efficiency audit (E1a/P2): per-cycle day-keyed read cache for the
 # load_solcast_snapshot helper (the only hot-path DB reader that did NOT
@@ -1530,11 +1471,9 @@ _FORECAST_CYCLE_CACHE: dict[tuple[str, str], object] = {}
 _FORECAST_CYCLE_CACHE_MAX = 512
 _CYCLE_CACHE_MISS = object()
 
-
 def _cycle_cache_get(name: str, day: str):
     """Return cached value or _CYCLE_CACHE_MISS sentinel if absent."""
     return _FORECAST_CYCLE_CACHE.get((name, day), _CYCLE_CACHE_MISS)
-
 
 def _cycle_cache_put(name: str, day: str, value) -> None:
     if len(_FORECAST_CYCLE_CACHE) >= _FORECAST_CYCLE_CACHE_MAX:
@@ -1542,7 +1481,6 @@ def _cycle_cache_put(name: str, day: str, value) -> None:
         for k in victims:
             _FORECAST_CYCLE_CACHE.pop(k, None)
     _FORECAST_CYCLE_CACHE[(name, day)] = value
-
 
 def _reset_forecast_cycle_cache() -> None:
     """
@@ -1569,7 +1507,6 @@ def _reset_forecast_cycle_cache() -> None:
             except Exception:
                 pass
 
-
 def _weather_mem_cache_get(day: str, source_kind: str, cache_path: Path) -> pd.DataFrame | None:
     try:
         mtime_ns = cache_path.stat().st_mtime_ns
@@ -1579,7 +1516,6 @@ def _weather_mem_cache_get(day: str, source_kind: str, cache_path: Path) -> pd.D
     if entry is None or entry[0] != mtime_ns:
         return None
     return entry[1].copy()
-
 
 def _weather_mem_cache_put(day: str, source_kind: str, cache_path: Path, day_df: pd.DataFrame) -> None:
     try:
@@ -1592,7 +1528,6 @@ def _weather_mem_cache_put(day: str, source_kind: str, cache_path: Path, day_df:
         for k in victims:
             _WEATHER_MEM_CACHE.pop(k, None)
     _WEATHER_MEM_CACHE[(day, source_kind)] = (mtime_ns, day_df.copy())
-
 
 def fetch_weather(day: str, source: str = "auto") -> pd.DataFrame | None:
     """
@@ -1719,7 +1654,6 @@ def fetch_weather(day: str, source: str = "auto") -> pd.DataFrame | None:
             return cached
         return None
 
-
 def interpolate_5min(df: pd.DataFrame, day: str | None = None) -> pd.DataFrame:
     """
     Resample hourly weather to 5-min with shape-preserving interpolation.
@@ -1782,7 +1716,6 @@ def interpolate_5min(df: pd.DataFrame, day: str | None = None) -> pd.DataFrame:
             out[col] = _rolling_mean(pd.to_numeric(out[col], errors="coerce").values, 5, center=True)
 
     return out.iloc[:SLOTS_DAY].reset_index(drop=True)
-
 
 # ============================================================================
 # SOLAR GEOMETRY (precise)
@@ -1849,7 +1782,6 @@ def _solar_geometry_cached(day: str) -> dict:
         "extra":    extra_arr,
     }
 
-
 def solar_geometry(day: str) -> dict:
     """
     Return per-slot solar geometry arrays for *day*.
@@ -1867,7 +1799,6 @@ def solar_geometry(day: str) -> dict:
     """
     cached = _solar_geometry_cached(day)
     return {k: (v.copy() if isinstance(v, np.ndarray) else v) for k, v in cached.items()}
-
 
 # ============================================================================
 # CLEAR-SKY MODEL  (Ineichen simplified + humidity correction)
@@ -1896,7 +1827,6 @@ def _clear_sky_radiation_impl(day: str, rh_mean: float) -> np.ndarray:
 
     return csi
 
-
 @lru_cache(maxsize=128)
 def _clear_sky_radiation_climatological(day: str) -> np.ndarray:
     """
@@ -1906,7 +1836,6 @@ def _clear_sky_radiation_climatological(day: str) -> np.ndarray:
     Returns a fresh copy to every public caller via clear_sky_radiation().
     """
     return _clear_sky_radiation_impl(day, 78.0)
-
 
 def clear_sky_radiation(day: str, rh_hourly: np.ndarray | None = None) -> np.ndarray:
     """
@@ -1925,7 +1854,6 @@ def clear_sky_radiation(day: str, rh_hourly: np.ndarray | None = None) -> np.nda
         return _clear_sky_radiation_climatological(day).copy()
     rh_mean = float(np.clip(np.asarray(rh_hourly).mean(), 30, 95))
     return _clear_sky_radiation_impl(day, rh_mean)
-
 
 # ============================================================================
 # CLOUD TRANSMITTANCE  (non-linear, PH-calibrated)
@@ -1966,7 +1894,6 @@ def cloud_transmittance(cloud_pct: np.ndarray,
     trans = np.clip(trans + brightening, 0.10, 1.05)
 
     return trans
-
 
 # ============================================================================
 # PHYSICS BASELINE  (clear-sky - cloud - temperature derating)
@@ -2032,7 +1959,6 @@ def physics_baseline(day: str, w5: pd.DataFrame) -> np.ndarray:
     kwh[SOLAR_END_SLOT:]    = 0.0
 
     return kwh
-
 
 # ============================================================================
 # WEATHER ANALYSIS  (for training quality & diagnostics)
@@ -2112,7 +2038,6 @@ def analyse_weather_day(day: str, w5: pd.DataFrame, actual: np.ndarray | None = 
 
     return stats
 
-
 def classify_day_regime(stats: dict) -> str:
     cloud_mean = float(stats.get("cloud_mean", 0.0))
     vol_index = float(stats.get("vol_index", 0.0))
@@ -2127,11 +2052,9 @@ def classify_day_regime(stats: dict) -> str:
         return "mixed"
     return "overcast"
 
-
 # NOTE (v2.8 cleanup): `classify_hour_regime` was removed — only consumer
 # was `hour_weather_signature` (also removed). Day-level regime classification
 # is still done by `classify_day_regime` above.
-
 
 def classify_slot_weather_buckets(w5: pd.DataFrame, day: str) -> np.ndarray:
     """Classify each 5-minute slot into a weather bucket for error analysis."""
@@ -2203,7 +2126,6 @@ def classify_slot_weather_buckets(w5: pd.DataFrame, day: str) -> np.ndarray:
     out[active] = "overcast"
     return out
 
-
 def _error_class_normalizer(
     residual: np.ndarray,
     opportunity_kwh: np.ndarray | float | None = None,
@@ -2228,7 +2150,6 @@ def _error_class_normalizer(
     scale = np.maximum(scale, floor)
     return scale
 
-
 def classify_residual_error_classes(
     residual: np.ndarray,
     cap_slot: float | None = None,
@@ -2248,7 +2169,6 @@ def classify_residual_error_classes(
     out[rn >= ERROR_CLASS_STRONG_THRESHOLD] = 4
     return out
 
-
 def _apply_probability_temperature(prob_matrix: np.ndarray, temperature: float | None) -> np.ndarray:
     probs = np.asarray(prob_matrix, dtype=float)
     if probs.ndim != 2 or probs.size <= 0:
@@ -2263,7 +2183,6 @@ def _apply_probability_temperature(prob_matrix: np.ndarray, temperature: float |
     scaled = np.power(np.clip(probs, 1e-9, 1.0), 1.0 / temp)
     scaled_sum = scaled.sum(axis=1, keepdims=True)
     return np.divide(scaled, np.maximum(scaled_sum, 1e-9), out=np.zeros_like(scaled), where=scaled_sum > 0)
-
 
 def _weighted_neg_log_loss(
     prob_matrix: np.ndarray,
@@ -2283,7 +2202,6 @@ def _weighted_neg_log_loss(
         return float(np.mean(losses))
     return float(np.average(losses, weights=np.maximum(w, 1e-9)))
 
-
 def _weighted_mae_loss(
     pred: np.ndarray,
     actual: np.ndarray,
@@ -2296,7 +2214,6 @@ def _weighted_mae_loss(
     if w.shape[0] != err.shape[0]:
         return float(np.mean(err)) if err.size else float("inf")
     return float(np.average(err, weights=np.maximum(w, 1e-9))) if err.size else float("inf")
-
 
 def _blocked_day_holdout_mask(day_keys: np.ndarray | list[str] | None) -> np.ndarray:
     if day_keys is None:
@@ -2321,10 +2238,8 @@ def _blocked_day_holdout_mask(day_keys: np.ndarray | list[str] | None) -> np.nda
     holdout_set = set(ordered_unique[:holdout_days])
     return np.asarray([day in holdout_set for day in days], dtype=bool)
 
-
 def _blocked_classifier_holdout_mask(day_keys: np.ndarray | list[str] | None) -> np.ndarray:
     return _blocked_day_holdout_mask(day_keys)
-
 
 def _fit_error_classifier_temperature(
     X: pd.DataFrame,
@@ -2396,11 +2311,9 @@ def _fit_error_classifier_temperature(
     })
     return meta
 
-
 def _error_class_name(label: int) -> str:
     idx = int(np.clip(int(label), 0, len(ERROR_CLASS_NAMES) - 1))
     return ERROR_CLASS_NAMES[idx]
-
 
 def _error_class_sign(label: np.ndarray | int) -> np.ndarray:
     arr = np.asarray(label, dtype=int)
@@ -2408,7 +2321,6 @@ def _error_class_sign(label: np.ndarray | int) -> np.ndarray:
     out[arr < ERROR_CLASS_NEUTRAL_IDX] = -1
     out[arr > ERROR_CLASS_NEUTRAL_IDX] = 1
     return out
-
 
 def _aggregate_scalar_series(values: list[float]) -> dict:
     if not values:
@@ -2421,11 +2333,9 @@ def _aggregate_scalar_series(values: list[float]) -> dict:
         "mae": float(np.mean(np.abs(arr))),
     }
 
-
 # NOTE (v2.8 cleanup): `hour_weather_signature` was removed alongside the
 # shape-correction stack — it was only consumed by the dead `shape_records`
 # pipeline and `apply_hour_shape_correction`.
-
 
 def is_anomalous_day(
     stats: dict,
@@ -2461,7 +2371,6 @@ def is_anomalous_day(
         return True, f"Rad-gen correlation too low ({corr:.2f}) - inconsistent data"
 
     return False, ""
-
 
 def training_day_rejection(
     stats: dict,
@@ -2508,7 +2417,6 @@ def training_day_rejection(
             return True, f"Generation far below Solcast baseline ({energy_ratio:.2f})"
 
     return False, ""
-
 
 # ============================================================================
 # FEATURE ENGINEERING  (rich, physics-informed)
@@ -2863,7 +2771,6 @@ def build_features(
     )
     return df
 
-
 FEATURE_COLS = [
     "rad", "rad_direct", "rad_diffuse", "rad_lag_1h", "rad_lag_1slot", "rad_lag_2slots", "rad_grad_15m",
     "cloud", "cloud_low", "cloud_mid", "cloud_high", "cloud_std_1h", "cloud_grad_15m", "cloud_trans",
@@ -2889,7 +2796,6 @@ FEATURE_COLS = [
     # Plant
     "expected_nodes", "cap_kw",
 ]
-
 
 # ============================================================================
 # CURTAILMENT DETECTION
@@ -2918,7 +2824,6 @@ def curtailed_mask(actual: np.ndarray, baseline: np.ndarray, tol: float = CAP_DI
     cap_slot = load_forecast_export_limit_mw() * 1000.0 * SLOT_MIN / 60.0
     return (actual >= tol * cap_slot) & (baseline > cap_slot * 1.05)
 
-
 # ============================================================================
 # 1000H ALARM-BASED INVERTER OUTAGE MASK (for QA)
 # ============================================================================
@@ -2945,7 +2850,6 @@ def _get_inverter_node_map() -> dict[int, list[int]]:
             except (ValueError, TypeError):
                 pass
     return result
-
 
 @lru_cache(maxsize=256)
 def _build_1000h_inverter_outage_mask(day: str) -> np.ndarray:
@@ -3028,7 +2932,6 @@ def _build_1000h_inverter_outage_mask(day: str) -> np.ndarray:
         log.info("1000H outage mask for %s: %d/%d slots with full-inverter outage", day, down_count, SLOTS_DAY)
     return mask
 
-
 # ============================================================================
 # OPERATIONAL CONSTRAINTS (manual stops vs plant-cap curtailment)
 # ============================================================================
@@ -3041,15 +2944,12 @@ def _iter_history_db_paths(start_ms: int, end_ms_exclusive: int) -> list[Path]:
             paths.append(path)
     return paths
 
-
 def _normalize_audit_scope(value) -> str:
     return str(value or "single").strip().lower() or "single"
-
 
 def _audit_result_ok(value) -> bool:
     result = str(value or "ok").strip().lower()
     return bool(result) and not result.startswith("error")
-
 
 def _query_audit_log_latest_before(db_path: Path, before_ms: int) -> list[dict]:
     if not db_path.exists():
@@ -3102,7 +3002,6 @@ def _query_audit_log_latest_before(db_path: Path, before_ms: int) -> list[dict]:
         log.warning("Audit-log latest-before query failed [%s]: %s", db_path, e)
         return []
 
-
 def _query_audit_log_events(db_path: Path, start_ms: int, end_ms_exclusive: int) -> list[dict]:
     if not db_path.exists():
         return []
@@ -3145,7 +3044,6 @@ def _query_audit_log_events(db_path: Path, start_ms: int, end_ms_exclusive: int)
             return []
         log.warning("Audit-log range query failed [%s]: %s", db_path, e)
         return []
-
 
 @lru_cache(maxsize=256)
 def load_operational_constraint_profile(day: str) -> dict:
@@ -3240,7 +3138,6 @@ def load_operational_constraint_profile(day: str) -> dict:
         "event_count": int(len(events)),
     }
 
-
 def build_operational_constraint_mask(day: str) -> tuple[np.ndarray, dict]:
     profile = load_operational_constraint_profile(day)
     commanded_off_nodes = np.asarray(
@@ -3275,13 +3172,11 @@ def build_operational_constraint_mask(day: str) -> tuple[np.ndarray, dict]:
         "event_count": int(profile.get("event_count", 0)),
     }
 
-
 # ============================================================================
 # ENERGY DATA LOADERS
 # ============================================================================
 
 _TZ_UTC8 = timezone(timedelta(hours=TZ_OFFSET))
-
 
 def _day_bounds_ms(day: str) -> tuple[int, int] | tuple[None, None]:
     """Return (start_ms, end_ms) for a day string, explicitly in UTC+8."""
@@ -3292,7 +3187,6 @@ def _day_bounds_ms(day: str) -> tuple[int, int] | tuple[None, None]:
     start = start_naive.replace(tzinfo=_TZ_UTC8)
     end = (start_naive + timedelta(days=1)).replace(tzinfo=_TZ_UTC8)
     return int(start.timestamp() * 1000), int(end.timestamp() * 1000)
-
 
 def _archive_month_keys_for_range(start_ms: int, end_ms_exclusive: int) -> list[str]:
     try:
@@ -3310,7 +3204,6 @@ def _archive_month_keys_for_range(start_ms: int, end_ms_exclusive: int) -> list[
         else:
             cur = datetime(cur.year, cur.month + 1, 1)
     return keys
-
 
 def _load_inverter_loss_factors() -> dict[str, float]:
     """Load per-inverter transmission loss factors (0.0-1.0) from ipconfig.
@@ -3333,7 +3226,6 @@ def _load_inverter_loss_factors() -> dict[str, float]:
             pct = 0.0
         factors[str(k)] = pct / 100.0
     return factors
-
 
 def _query_energy_5min_loss_adjusted(
     db_path: Path,
@@ -3384,7 +3276,6 @@ def _query_energy_5min_loss_adjusted(
             break
     return out
 
-
 def _query_energy_5min_totals(db_path: Path, day_start_ms: int, day_end_ms: int) -> dict[int, float]:
     """Raw plant-level 5-min energy totals -- no loss adjustment."""
     if not db_path.exists():
@@ -3422,7 +3313,6 @@ def _query_energy_5min_totals(db_path: Path, day_start_ms: int, day_end_ms: int)
             log.warning("DB actual load failed [%s]: %s", db_path, e)
             break
     return out
-
 
 # ── Substation Metered Energy (E3) ────────────────────────────────────────────
 
@@ -3463,7 +3353,6 @@ def _query_substation_metered_15min(day: str) -> dict[int, float]:
             break
     return out
 
-
 def interpolate_15min_to_5min(
     metered_15min: dict[int, float],
     inverter_5min: dict[int, float],
@@ -3503,7 +3392,6 @@ def interpolate_15min_to_5min(
                     result[slot_idx] = kwh_15 / 3.0
 
     return result
-
 
 def resolve_actual_5min_for_date(day: str) -> tuple[np.ndarray, np.ndarray, str]:
     """E4 fallback chain: resolve best-available actual energy for a date.
@@ -3583,7 +3471,6 @@ def resolve_actual_5min_for_date(day: str) -> tuple[np.ndarray, np.ndarray, str]
 
     return actual, present, source
 
-
 def audit_loss_factors(lookback_days: int = 30) -> dict:
     """P3: Audit loss factors against metered data.
 
@@ -3653,7 +3540,6 @@ def audit_loss_factors(lookback_days: int = 30) -> dict:
         "per_day": per_day_results[-10:],  # last 10 days
     }
 
-
 def compute_solcast_accuracy_vs_metered(lookback_days: int = 30) -> float:
     """P4: Compute dynamic EST_ACTUAL_WEIGHT_FACTOR based on Solcast accuracy vs metered.
 
@@ -3721,7 +3607,6 @@ def compute_solcast_accuracy_vs_metered(lookback_days: int = 30) -> float:
     log.info("Dynamic EST_ACTUAL_WEIGHT = %.3f (based on metered accuracy)", weight)
     return weight
 
-
 def get_plant_avg_loss_pct() -> float:
     """P5: Compute plant-average loss factor percentage."""
     try:
@@ -3735,7 +3620,6 @@ def get_plant_avg_loss_pct() -> float:
     except Exception as e:
         log.warning("Failed to compute plant avg loss: %s", e)
         return 0.0
-
 
 # ── Availability / Outage Detection (Phase 2) ──────────────────────────────
 
@@ -3780,7 +3664,6 @@ def _query_availability_5min(db_path: Path, day_start_ms: int, day_end_ms: int) 
             break
     return out
 
-
 def _load_availability_for_day(day: str) -> dict[int, tuple[int, int]]:
     """Load availability data for a day from hot DB + archives (merge)."""
     day_start_ms, day_end_ms = _day_bounds_ms(day)
@@ -3795,7 +3678,6 @@ def _load_availability_for_day(day: str) -> dict[int, tuple[int, int]]:
             if ts not in merged:
                 merged[ts] = counts
     return merged
-
 
 def _detect_outage_slots(day: str) -> np.ndarray:
     """Build a boolean mask (288 slots) where True = outage-tainted slot.
@@ -3821,7 +3703,6 @@ def _detect_outage_slots(day: str) -> np.ndarray:
                 mask[slot] = True
     return mask
 
-
 def _classify_day_outage_severity(day: str, outage_mask: np.ndarray | None = None) -> str:
     """Classify a day's outage severity based on the fraction of solar slots affected.
 
@@ -3845,7 +3726,6 @@ def _classify_day_outage_severity(day: str, outage_mask: np.ndarray | None = Non
         return "minor"
     return "no_outage"
 
-
 def _outage_slot_summary(day: str, outage_mask: np.ndarray | None = None) -> dict[str, int | str | bool]:
     """Return a summary dict of outage metrics for a given day.
 
@@ -3861,7 +3741,6 @@ def _outage_slot_summary(day: str, outage_mask: np.ndarray | None = None) -> dic
         "severity": _classify_day_outage_severity(day, outage_mask),
         "has_availability_data": bool(np.any(outage_mask)) or bool(_load_availability_for_day(day)),
     }
-
 
 def _load_actual_from_appdata(day: str) -> tuple[np.ndarray | None, np.ndarray | None]:
     day_start_ms, day_end_ms = _day_bounds_ms(day)
@@ -3892,7 +3771,6 @@ def _load_actual_from_appdata(day: str) -> tuple[np.ndarray | None, np.ndarray |
             present[slot] = True
     return out, present
 
-
 def _load_actual_from_legacy_context(day: str) -> tuple[np.ndarray | None, np.ndarray | None]:
     ctx = _load_json(HISTORY_CTX)
     rows = ctx.get("PacEnergy_5min", {}).get("0", {}).get(day)
@@ -3912,7 +3790,6 @@ def _load_actual_from_legacy_context(day: str) -> tuple[np.ndarray | None, np.nd
             present[slot] = True
     return (out, present) if present.any() else (None, None)
 
-
 @lru_cache(maxsize=256)
 def load_actual_with_presence(day: str) -> tuple[np.ndarray | None, np.ndarray | None]:
     db_actual, db_present = _load_actual_from_appdata(day)
@@ -3927,12 +3804,10 @@ def load_actual_with_presence(day: str) -> tuple[np.ndarray | None, np.ndarray |
         MIN_HISTORY_SOLAR_SLOTS,
     )
 
-
 @lru_cache(maxsize=256)
 def load_actual(day: str) -> np.ndarray | None:
     values, _ = load_actual_with_presence(day)
     return values
-
 
 # ---------------------------------------------------------------------------
 # Loss-adjusted actual loaders (forecast engine only)
@@ -3949,7 +3824,6 @@ def load_actual(day: str) -> np.ndarray | None:
 # per-day call inside training / error-memory loops.
 _cached_loss_factors: dict[str, float] | None = None
 
-
 def _get_loss_factors() -> dict[str, float]:
     """Return cached loss factors, loading from ipconfig on first call."""
     global _cached_loss_factors
@@ -3957,10 +3831,8 @@ def _get_loss_factors() -> dict[str, float]:
         _cached_loss_factors = _load_inverter_loss_factors()
     return _cached_loss_factors
 
-
 def _has_nonzero_losses() -> bool:
     return any(v > 0 for v in _get_loss_factors().values())
-
 
 def _load_actual_loss_adjusted_from_appdata(
     day: str,
@@ -3994,7 +3866,6 @@ def _load_actual_loss_adjusted_from_appdata(
             present[slot] = True
     return out, present
 
-
 # Cache lifetime equals subprocess lifetime — safe in the current spawn model.
 # If the engine is ever converted to a long-running daemon this cache must be
 # time-bounded or invalidated on each generation run to avoid stale actuals.
@@ -4017,7 +3888,6 @@ def load_actual_loss_adjusted_with_presence(day: str) -> tuple[np.ndarray | None
         MIN_HISTORY_SOLAR_SLOTS,
     )
 
-
 # See note on load_actual_loss_adjusted_with_presence regarding daemon-mode staleness.
 @lru_cache(maxsize=256)
 def load_actual_loss_adjusted(day: str) -> np.ndarray | None:
@@ -4027,7 +3897,6 @@ def load_actual_loss_adjusted(day: str) -> np.ndarray | None:
     """
     values, _ = load_actual_loss_adjusted_with_presence(day)
     return values
-
 
 def _load_dayahead_from_db(day: str) -> tuple[np.ndarray | None, np.ndarray | None]:
     if not APP_DB_FILE.exists():
@@ -4067,7 +3936,6 @@ def _load_dayahead_from_db(day: str) -> tuple[np.ndarray | None, np.ndarray | No
             log.warning("DB day-ahead load failed [%s]: %s", day, e)
             return None, None
 
-
 def _load_dayahead_bands_from_db(day: str) -> tuple[np.ndarray, np.ndarray]:
     """Return (kwh_lo, kwh_hi) slot arrays for a stored day-ahead forecast.
 
@@ -4099,7 +3967,6 @@ def _load_dayahead_bands_from_db(day: str) -> tuple[np.ndarray, np.ndarray]:
         log.warning("DB day-ahead bands load failed [%s]: %s", day, e)
     return lo, hi
 
-
 def _load_dayahead_from_legacy(day: str) -> tuple[np.ndarray | None, np.ndarray | None]:
     ctx = _load_json(FORECAST_CTX)
     da  = ctx.get("PacEnergy_DayAhead", {}).get(day)
@@ -4119,7 +3986,6 @@ def _load_dayahead_from_legacy(day: str) -> tuple[np.ndarray | None, np.ndarray 
             present[slot] = True
     return (out, present) if present.any() else (None, None)
 
-
 # See note on load_actual_loss_adjusted_with_presence regarding daemon-mode staleness.
 @lru_cache(maxsize=256)
 def load_dayahead_with_presence(day: str) -> tuple[np.ndarray | None, np.ndarray | None]:
@@ -4135,12 +4001,10 @@ def load_dayahead_with_presence(day: str) -> tuple[np.ndarray | None, np.ndarray
         MIN_DAYAHEAD_SOLAR_SLOTS,
     )
 
-
 @lru_cache(maxsize=256)
 def load_dayahead(day: str) -> np.ndarray | None:
     values, _ = load_dayahead_with_presence(day)
     return values
-
 
 def load_solcast_snapshot(day: str) -> dict | None:
     """
@@ -4159,7 +4023,6 @@ def load_solcast_snapshot(day: str) -> dict | None:
     _cycle_cache_put("solcast_snapshot", day, fresh)
     return _deepcopy_snapshot(fresh) if fresh is not None else None
 
-
 def _deepcopy_snapshot(snap: dict) -> dict:
     """Return a shallow-dict copy with numpy arrays copied."""
     out = {}
@@ -4169,7 +4032,6 @@ def _deepcopy_snapshot(snap: dict) -> dict:
         else:
             out[k] = v
     return out
-
 
 def _finalize_snapshot_from_rows(day: str, rows: list) -> dict | None:
     """
@@ -4297,7 +4159,6 @@ def _finalize_snapshot_from_rows(day: str, rows: list) -> dict | None:
         "est_actual_backfill_slots": est_actual_backfill_count,
     }
 
-
 def _load_solcast_snapshot_uncached(day: str) -> dict | None:
     if not APP_DB_FILE.exists():
         return None
@@ -4341,7 +4202,6 @@ def _load_solcast_snapshot_uncached(day: str) -> dict | None:
             log.warning("DB Solcast snapshot load failed [%s]: %s", day, e)
             return None
     return None
-
 
 def _load_solcast_snapshots_range_uncached(days: list[str]) -> dict[str, dict | None]:
     """
@@ -4411,7 +4271,6 @@ def _load_solcast_snapshots_range_uncached(days: list[str]) -> dict[str, dict | 
 
     return out
 
-
 def prime_solcast_snapshot_cache(days: list[str]) -> int:
     """
     Pre-populate the cycle cache with snapshots for *days*.
@@ -4432,7 +4291,6 @@ def prime_solcast_snapshot_cache(days: list[str]) -> int:
         if snap is not None:
             real += 1
     return real
-
 
 def build_solcast_reliability_artifact(today: date) -> dict | None:
     records = []
@@ -4718,7 +4576,6 @@ def build_solcast_reliability_artifact(today: date) -> dict | None:
         },
     }
 
-
 def save_solcast_reliability_artifact(artifact: dict | None) -> bool:
     if artifact is None:
         try:
@@ -4735,7 +4592,6 @@ def save_solcast_reliability_artifact(artifact: dict | None) -> bool:
         log.error("Solcast reliability save failed %s: %s", SOLCAST_RELIABILITY_FILE, e)
         return False
 
-
 def load_solcast_reliability_artifact(today: date | None = None, allow_build: bool = False) -> dict | None:
     if SOLCAST_RELIABILITY_FILE.exists():
         try:
@@ -4751,11 +4607,9 @@ def load_solcast_reliability_artifact(today: date | None = None, allow_build: bo
         return artifact
     return None
 
-
 def _metric_reliability_from_mape_pct(mape_pct: float) -> float:
     mape_frac = max(float(mape_pct or 0.0), 0.0) / 100.0
     return float(np.clip(1.0 - min(0.55, mape_frac) / 0.55, 0.25, 1.0))
-
 
 def _forecast_metric_summary(metrics: dict | None) -> dict | None:
     if not metrics or int(metrics.get("usable_slot_count", 0)) <= 0:
@@ -4776,7 +4630,6 @@ def _forecast_metric_summary(metrics: dict | None) -> dict | None:
         "sse_kwh2": float((rmse ** 2) * usable),
         "reliability": _metric_reliability_from_mape_pct(float(metrics.get("mape_pct", 0.0))),
     }
-
 
 def _aggregate_forecast_metric_rows(rows: list[dict] | None) -> dict | None:
     valid = [
@@ -4830,7 +4683,6 @@ def _aggregate_forecast_metric_rows(rows: list[dict] | None) -> dict | None:
         "reliability": _metric_reliability_from_mape_pct(mape),
     }
 
-
 def _build_resolution_profile(solcast_rows: list[dict] | None, dayahead_rows: list[dict] | None) -> dict:
     solcast_stats = _aggregate_forecast_metric_rows(solcast_rows)
     dayahead_stats = _aggregate_forecast_metric_rows(dayahead_rows)
@@ -4867,7 +4719,6 @@ def _build_resolution_profile(solcast_rows: list[dict] | None, dayahead_rows: li
         "support_days": common_days,
         "wape_gap_pct": wape_gap,
     }
-
 
 def _build_resolution_daily_record(
     day: str,
@@ -4907,7 +4758,6 @@ def _build_resolution_daily_record(
         ),
         "buckets": bucket_profiles,
     }
-
 
 def lookup_solcast_resolution_profile(
     artifact: dict | None,
@@ -4951,7 +4801,6 @@ def lookup_solcast_resolution_profile(
     out["profile_key"] = "overall"
     return out
 
-
 def lookup_solcast_resolution_weight_vector(
     artifact: dict | None,
     regime: str,
@@ -4983,7 +4832,6 @@ def lookup_solcast_resolution_weight_vector(
             np.clip(float(profile.get("support_days", 0)) / support_norm, 0.0, 1.0)
         )
     return weights, support
-
 
 def lookup_solcast_reliability(artifact: dict | None, regime: str, season: str | None = None) -> dict:
     _MIN_RELIABILITY_SAMPLES = 10  # FIX-18: Minimum day_count to trust regime-specific corrections
@@ -5053,7 +4901,6 @@ def lookup_solcast_reliability(artifact: dict | None, regime: str, season: str |
     out = dict(fallback)
     out.update(overall)
     return out
-
 
 def solcast_prior_from_snapshot(
     day: str,
@@ -5357,7 +5204,6 @@ def solcast_prior_from_snapshot(
         "slot_ts_local_ms": slot_ts_local_ms,
     }
 
-
 def blend_physics_with_solcast(
     baseline: np.ndarray,
     solcast_prior: dict | None,
@@ -5495,7 +5341,6 @@ def blend_physics_with_solcast(
         ),
     }
 
-
 def _load_intraday_adjusted_from_db(day: str) -> tuple[np.ndarray | None, np.ndarray | None]:
     if not APP_DB_FILE.exists():
         return None, None
@@ -5534,7 +5379,6 @@ def _load_intraday_adjusted_from_db(day: str) -> tuple[np.ndarray | None, np.nda
             log.warning("DB intraday load failed [%s]: %s", day, e)
             return None, None
 
-
 def _load_intraday_adjusted_from_legacy(day: str) -> tuple[np.ndarray | None, np.ndarray | None]:
     ctx = _load_json(FORECAST_CTX)
     da = ctx.get("PacEnergy_IntradayAdjusted", {}).get(day)
@@ -5554,7 +5398,6 @@ def _load_intraday_adjusted_from_legacy(day: str) -> tuple[np.ndarray | None, np
             present[slot] = True
     return (out, present) if present.any() else (None, None)
 
-
 @lru_cache(maxsize=256)
 def load_intraday_adjusted_with_presence(day: str) -> tuple[np.ndarray | None, np.ndarray | None]:
     db_rows, db_present = _load_intraday_adjusted_from_db(day)
@@ -5569,12 +5412,10 @@ def load_intraday_adjusted_with_presence(day: str) -> tuple[np.ndarray | None, n
         MIN_DAYAHEAD_SOLAR_SLOTS,
     )
 
-
 @lru_cache(maxsize=256)
 def load_intraday_adjusted(day: str) -> np.ndarray | None:
     values, _ = load_intraday_adjusted_with_presence(day)
     return values
-
 
 # ============================================================================
 # ERROR MEMORY  (rolling bias correction)
@@ -5756,7 +5597,6 @@ def _compute_error_memory_legacy(today: date, target_regime: str = "") -> np.nda
     mem_err = np.clip(mem_err, -100.0, 100.0)
     return mem_err
 
-
 def _has_sufficient_locked_history(conn, min_days: int = 30) -> bool:
     """
     Step 13: Feature flag checking if >=min_days distinct forecast_days exist in
@@ -5771,7 +5611,6 @@ def _has_sufficient_locked_history(conn, min_days: int = 30) -> bool:
         return row and int(row[0] or 0) >= min_days
     except Exception:
         return False
-
 
 def _spread_weight(spread_pct_cap_locked: float | None, capture_reason: str | None) -> float:
     """
@@ -5821,7 +5660,6 @@ def _spread_weight(spread_pct_cap_locked: float | None, capture_reason: str | No
         # FIX 4 M9: Log unknown capture_reason values for debugging
         log.debug("_spread_weight: unexpected capture_reason '%s', using base weight %.2f", capture_reason, base)
     return base
-
 
 def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: str = "") -> np.ndarray:
     """
@@ -6239,7 +6077,6 @@ def compute_error_memory(today: date, w_today_5: pd.DataFrame, target_regime: st
         }
     return mem_err
 
-
 def collect_history_days(
     today: date,
     lookback_days: int,
@@ -6482,7 +6319,6 @@ def collect_history_days(
     log.info("History basis accepted: %d day(s)", len(history))
     return history
 
-
 def build_forecast_artifacts(history_days: list[dict]) -> dict:
     """Build derived artifacts for activity gating.
 
@@ -6528,7 +6364,6 @@ def build_forecast_artifacts(history_days: list[dict]) -> dict:
         "activity_records": activity_records,
     }
 
-
 def save_forecast_artifacts(artifact: dict) -> bool:
     try:
         ARTIFACT_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -6537,7 +6372,6 @@ def save_forecast_artifacts(artifact: dict) -> bool:
     except Exception as e:
         log.error("Artifact save failed %s: %s", ARTIFACT_FILE, e)
         return False
-
 
 def load_forecast_artifacts(today: date | None = None, allow_build: bool = False) -> dict | None:
     if ARTIFACT_FILE.exists():
@@ -6562,7 +6396,6 @@ def load_forecast_artifacts(today: date | None = None, allow_build: bool = False
         return artifact
 
     return None
-
 
 def _weather_frame_to_records(df: pd.DataFrame) -> list[dict]:
     if df is None or df.empty:
@@ -6602,7 +6435,6 @@ def _weather_frame_to_records(df: pd.DataFrame) -> list[dict]:
         out.append(rec)
     return out
 
-
 def _weather_records_to_frame(records: list[dict], day: str) -> pd.DataFrame:
     if not isinstance(records, list) or not records:
         return pd.DataFrame()
@@ -6630,10 +6462,8 @@ def _weather_records_to_frame(records: list[dict], day: str) -> pd.DataFrame:
         return frame
     return _slice_weather_day(frame, day)
 
-
 def forecast_snapshot_path(day: str) -> Path:
     return FORECAST_SNAPSHOT_DIR / f"{str(day).strip()}.json"
-
 
 def weather_day_signature(day: str, hourly_df: pd.DataFrame) -> dict:
     w5 = interpolate_5min(hourly_df, day)
@@ -6650,7 +6480,6 @@ def weather_day_signature(day: str, hourly_df: pd.DataFrame) -> dict:
         "rainy": bool(stats.get("rainy", False)),
         "convective": bool(stats.get("convective", False)),
     }
-
 
 def save_forecast_weather_snapshot(
     day: str,
@@ -6671,11 +6500,9 @@ def save_forecast_weather_snapshot(
     }
     return _save_json(forecast_snapshot_path(day), payload)
 
-
 def load_forecast_weather_snapshot(day: str) -> dict | None:
     payload = _load_json(forecast_snapshot_path(day))
     return payload if isinstance(payload, dict) and payload else None
-
 
 def update_forecast_weather_snapshot_meta(day: str, updates: dict | None) -> bool:
     if not updates:
@@ -6688,7 +6515,6 @@ def update_forecast_weather_snapshot_meta(day: str, updates: dict | None) -> boo
     payload["meta"] = meta
     return _save_json(forecast_snapshot_path(day), payload)
 
-
 def _weather_bias_frame_5min(df: pd.DataFrame, day: str) -> pd.DataFrame:
     frame = _slice_weather_day(df, day)
     if frame.empty:
@@ -6699,7 +6525,6 @@ def _weather_bias_frame_5min(df: pd.DataFrame, day: str) -> pd.DataFrame:
         log.warning("Weather-bias 5-minute frame invalid [%s]: %s", day, reason)
         return pd.DataFrame()
     return w5
-
 
 def _weather_bias_slot_series_from_record(record: dict, key: str, default: float = 0.0) -> np.ndarray:
     raw = np.asarray(record.get(key, []), dtype=float).reshape(-1)
@@ -6718,7 +6543,6 @@ def _weather_bias_slot_series_from_record(record: dict, key: str, default: float
     src_idx = np.linspace(0.0, 1.0, num=raw.size)
     dst_idx = np.linspace(0.0, 1.0, num=SOLAR_SLOTS)
     return np.interp(dst_idx, src_idx, raw.astype(float)).astype(float)
-
 
 def build_weather_bias_artifact(today: date, lookback_days: int = WEATHER_BIAS_LOOKBACK_DAYS) -> dict:
     records = []
@@ -6809,7 +6633,6 @@ def build_weather_bias_artifact(today: date, lookback_days: int = WEATHER_BIAS_L
         "records": records,
     }
 
-
 def save_weather_bias_artifact(artifact: dict) -> bool:
     try:
         WEATHER_BIAS_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -6818,7 +6641,6 @@ def save_weather_bias_artifact(artifact: dict) -> bool:
     except Exception as e:
         log.error("Weather-bias artifact save failed %s: %s", WEATHER_BIAS_FILE, e)
         return False
-
 
 def load_weather_bias_artifact(today: date | None = None, allow_build: bool = False) -> dict | None:
     if WEATHER_BIAS_FILE.exists():
@@ -6848,7 +6670,6 @@ def load_weather_bias_artifact(today: date | None = None, allow_build: bool = Fa
 
     return None
 
-
 def _weather_bias_artifact_needs_upgrade(artifact: dict | None) -> bool:
     if not isinstance(artifact, dict):
         return True
@@ -6864,7 +6685,6 @@ def _weather_bias_artifact_needs_upgrade(artifact: dict | None) -> bool:
             return True
     return False
 
-
 def _weather_bias_similarity_score(record: dict, target: dict) -> float:
     score = 0.0
     if record.get("season") != target.get("season"):
@@ -6877,7 +6697,6 @@ def _weather_bias_similarity_score(record: dict, target: dict) -> float:
     score += abs(float(record.get("rh_mean", 0.0)) - float(target.get("rh_mean", 0.0))) / 22.0
     score += min(float(record.get("days_ago", WEATHER_BIAS_LOOKBACK_DAYS)), float(WEATHER_BIAS_LOOKBACK_DAYS)) / max(float(WEATHER_BIAS_LOOKBACK_DAYS), 1.0) * 0.24
     return score
-
 
 def apply_weather_bias_adjustment(
     hourly_df: pd.DataFrame,
@@ -7007,7 +6826,6 @@ def apply_weather_bias_adjustment(
         "mean_rad_factor": float(np.mean(rad_factors)) if rad_factors else 1.0,
     }
 
-
 # NOTE (v2.8 cleanup):
 # `_shape_similarity_score`, `select_shape_profile`, and `apply_hour_shape_correction`
 # were removed in v2.8 because Phase 4 made Solcast the 100% baseline. The hour-shape
@@ -7015,7 +6833,6 @@ def apply_weather_bias_adjustment(
 # (which is now always true), so all three functions plus their backing
 # `shape_records` artifact were dead code. The activity-records pipeline below
 # (`_activity_similarity_score`, `apply_activity_hysteresis`) is unrelated and stays.
-
 
 def _activity_similarity_score(record: dict, target: dict) -> float:
     score = 0.0
@@ -7030,7 +6847,6 @@ def _activity_similarity_score(record: dict, target: dict) -> float:
     score += abs(float(record.get("vol_index", 0.0)) - float(target.get("vol_index", 0.0))) / 0.20
     score += min(float(record.get("days_ago", SHAPE_LOOKBACK_DAYS)), float(SHAPE_LOOKBACK_DAYS)) / max(float(SHAPE_LOOKBACK_DAYS), 1.0) * 0.20
     return score
-
 
 def estimate_activity_window(
     day: str,
@@ -7112,7 +6928,6 @@ def estimate_activity_window(
         "history_matches": match_count,
     }
 
-
 def _redistribute_hour_energy(hour_values: np.ndarray, allowed_mask: np.ndarray, rising: bool) -> np.ndarray:
     values = np.clip(np.asarray(hour_values, dtype=float), 0.0, None)
     allowed = np.asarray(allowed_mask, dtype=bool)
@@ -7129,7 +6944,6 @@ def _redistribute_hour_energy(hour_values: np.ndarray, allowed_mask: np.ndarray,
         weights[~allowed] = 0.0
     weights = _normalize_profile(weights)
     return total * weights
-
 
 def apply_activity_hysteresis(
     forecast: np.ndarray,
@@ -7173,7 +6987,6 @@ def apply_activity_hysteresis(
     out[:first_slot] = 0.0
     out[last_slot + 1:] = 0.0
     return out, window
-
 
 def apply_block_staging(forecast: np.ndarray, w5: pd.DataFrame) -> tuple[np.ndarray, dict]:
     """
@@ -7236,7 +7049,6 @@ def apply_block_staging(forecast: np.ndarray, w5: pd.DataFrame) -> tuple[np.ndar
         "staged_slots": int(staged_slots),
     }
 
-
 # ============================================================================
 # MODEL TRAINING
 # ============================================================================
@@ -7250,7 +7062,6 @@ TRAIN_QUALITY_WEIGHT_BASE = 0.70        # weight when correlation is zero/negati
 TRAIN_QUALITY_WEIGHT_CORR_SCALE = 0.30  # additional weight scaled by max(corr, 0)
 TRAIN_QUALITY_WEIGHT_FLOOR = 0.55       # lower clip — never fully discard a usable day
 TRAIN_QUALITY_WEIGHT_CEIL = 1.00        # upper clip — never exceed full weight
-
 
 def collect_training_data_hardened(
     today: date,
@@ -7436,7 +7247,6 @@ def collect_training_data_hardened(
     )
     return X_train, y_train, w_train, class_scale_train, day_train
 
-
 def _lgbm_n_jobs():
     """Bounded LightGBM worker-thread count for the shared gateway box.
 
@@ -7459,7 +7269,6 @@ def _lgbm_n_jobs():
         cores = 2
     return max(1, cores - 2)
 
-
 def _make_residual_regressor_lgbm():
     if not _LIGHTGBM_AVAILABLE:
         raise RuntimeError("LightGBM is not installed")
@@ -7470,7 +7279,6 @@ def _make_residual_regressor_lgbm():
         verbose=-1, early_stopping_rounds=50,
     )
 
-
 def _make_error_classifier_lgbm():
     if not _LIGHTGBM_AVAILABLE:
         raise RuntimeError("LightGBM is not installed")
@@ -7480,13 +7288,11 @@ def _make_error_classifier_lgbm():
         n_jobs=_lgbm_n_jobs(), random_state=42, verbose=-1, early_stopping_rounds=30,
     )
 
-
 def _detect_ml_backend() -> str:
     """Return 'lightgbm' or 'sklearn_gbr' based on active config and availability."""
     if FORECAST_USE_LIGHTGBM and _LIGHTGBM_AVAILABLE:
         return "lightgbm"
     return "sklearn_gbr"
-
 
 def _detect_ml_backend_detail() -> dict:
     """T4.9 fix (Phase 7, 2026-04-14): richer backend metadata for /engine-health.
@@ -7512,7 +7318,6 @@ def _detect_ml_backend_detail() -> dict:
         "lightgbm_enabled_by_env": bool(FORECAST_USE_LIGHTGBM),
         "reason": reason,
     }
-
 
 def _collect_data_quality_warnings(bundle: dict) -> list:
     """
@@ -7610,7 +7415,6 @@ def _collect_data_quality_warnings(bundle: dict) -> list:
 
     return warnings
 
-
 def _make_residual_regressor(n_estimators: int | None = None):
     if FORECAST_USE_LIGHTGBM and _LIGHTGBM_AVAILABLE:
         return _make_residual_regressor_lgbm()
@@ -7638,7 +7442,6 @@ def _make_residual_regressor(n_estimators: int | None = None):
         tol=1e-4,
     )
 
-
 def _make_error_classifier(n_estimators: int | None = None):
     if FORECAST_USE_LIGHTGBM and _LIGHTGBM_AVAILABLE:
         return _make_error_classifier_lgbm()
@@ -7654,7 +7457,6 @@ def _make_error_classifier(n_estimators: int | None = None):
         n_iter_no_change=None,
         tol=1e-4,
     )
-
 
 def _select_residual_regressor_stage(
     X: pd.DataFrame,
@@ -7709,7 +7511,6 @@ def _select_residual_regressor_stage(
         "mae_best": None if not math.isfinite(best_mae) else float(best_mae),
     })
     return meta
-
 
 def _select_error_classifier_stage(
     X: pd.DataFrame,
@@ -7768,7 +7569,6 @@ def _select_error_classifier_stage(
     })
     return meta
 
-
 def fit_residual_model(
     X: pd.DataFrame,
     y: np.ndarray,
@@ -7807,7 +7607,6 @@ def fit_residual_model(
         "feature_importance_top10": _feat_imp_top10,
     }
     return model, None, meta
-
 
 def fit_error_classifier(
     X: pd.DataFrame,
@@ -7878,7 +7677,6 @@ def fit_error_classifier(
         "train_score": float(model.train_score_[-1]) if getattr(model, "train_score_", None) is not None and len(model.train_score_) else None,
     }
     return model, None, meta
-
 
 def build_weather_error_profiles(history_days: list[dict]) -> dict:
     """Aggregate residual behavior by day regime and slot weather bucket."""
@@ -7951,7 +7749,6 @@ def build_weather_error_profiles(history_days: list[dict]) -> dict:
         },
     }
 
-
 def _detect_regime_transition(history_days: list[dict], target_regime: str, lookback_days: int = 14) -> bool:
     """
     Detect if a weather regime transition is occurring (e.g., dry→monsoon, clear→overcast).
@@ -7985,7 +7782,6 @@ def _detect_regime_transition(history_days: list[dict], target_regime: str, look
     is_emerging = recent_target_count > 0 and recent_target_count > older_target_count
 
     return is_sparse and is_emerging
-
 
 def build_training_state(today: date) -> dict | None:
     """Build the in-memory model/artifact state for a given training cut-off date."""
@@ -8152,7 +7948,6 @@ def build_training_state(today: date) -> dict | None:
     _reset_train_rejection_streak(training_state)
     return training_state
 
-
 def save_model_bundle(bundle: dict) -> bool:
     try:
         MODEL_BUNDLE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -8183,7 +7978,6 @@ def save_model_bundle(bundle: dict) -> bool:
     except Exception as e:
         log.error("Model bundle save failed %s: %s", MODEL_BUNDLE_FILE, e)
         return False
-
 
 def load_model_bundle() -> dict | None:
     if MODEL_BUNDLE_FILE.exists():
@@ -8240,7 +8034,6 @@ def load_model_bundle() -> dict | None:
         except Exception as e:
             log.warning("Legacy model load failed: %s", e)
     return None
-
 
 def _align_bundle_features(
     block: dict,
@@ -8321,13 +8114,11 @@ def _align_bundle_features(
             )
     return X_pred
 
-
 def _transform_bundle_features(block: dict, X_pred: pd.DataFrame):
     scaler = block.get("scaler")
     if scaler is not None and hasattr(scaler, "transform"):
         return np.asarray(scaler.transform(X_pred), dtype=float)
     return X_pred
-
 
 def predict_residual_with_bundle(
     bundle: dict | None,
@@ -8427,7 +8218,6 @@ def predict_residual_with_bundle(
         "regime_samples": int(regime_meta.get("sample_count", 0)),
     }
 
-
 def _classifier_probabilities_to_full_vector(probs: np.ndarray, classes: list[int]) -> np.ndarray:
     out = np.zeros((len(probs), len(ERROR_CLASS_NAMES)), dtype=float)
     for idx, class_id in enumerate(classes):
@@ -8439,7 +8229,6 @@ def _classifier_probabilities_to_full_vector(probs: np.ndarray, classes: list[in
         out = np.divide(out, np.maximum(row_sum, 1e-9), out=np.zeros_like(out), where=row_sum > 0)
     return out
 
-
 def _expected_bias_from_classifier_probs(prob_matrix: np.ndarray, centroids: dict) -> np.ndarray:
     expected = np.zeros(prob_matrix.shape[0], dtype=float)
     for class_idx, class_name in enumerate(ERROR_CLASS_NAMES):
@@ -8448,7 +8237,6 @@ def _expected_bias_from_classifier_probs(prob_matrix: np.ndarray, centroids: dic
             continue
         expected += np.asarray(prob_matrix[:, class_idx], dtype=float) * centroid
     return expected
-
 
 def _error_class_support_weights(meta: dict | None) -> np.ndarray:
     meta_dict = meta if isinstance(meta, dict) else {}
@@ -8464,7 +8252,6 @@ def _error_class_support_weights(meta: dict | None) -> np.ndarray:
         count = max(float(class_counts.get(name, 0.0)), 0.0)
         weights[idx] = float(np.sqrt(np.clip(count / max(full_count, 1.0), 0.0, 1.0)))
     return weights
-
 
 def _stabilize_classifier_probabilities(
     prob_matrix: np.ndarray,
@@ -8488,7 +8275,6 @@ def _stabilize_classifier_probabilities(
     support_strength = np.clip(adjusted @ support_weights, 0.0, 1.0)
     return adjusted, support_weights, support_strength
 
-
 def _weather_profile_stat_reliability(stat: dict | None, cap_slot_kwh: float, full_count: float) -> float | None:
     if not isinstance(stat, dict):
         return None
@@ -8508,7 +8294,6 @@ def _weather_profile_stat_reliability(stat: dict | None, cap_slot_kwh: float, fu
             1.0,
         )
     )
-
 
 def _weather_profile_reliability_vector(
     weather_profiles: dict | None,
@@ -8560,7 +8345,6 @@ def _weather_profile_reliability_vector(
         else:
             out[idx] = ERROR_CLASS_PROFILE_DEFAULT_RELIABILITY
     return np.clip(out, 0.0, 1.0)
-
 
 def predict_error_classifier_with_bundle(
     bundle: dict | None,
@@ -8694,7 +8478,6 @@ def predict_error_classifier_with_bundle(
     }
     return expected_bias, meta
 
-
 def train_model(today: date) -> bool:
     """Train (or retrain) the residual correction model."""
     state = build_training_state(today)
@@ -8727,7 +8510,6 @@ def train_model(today: date) -> bool:
     )
     return True
 
-
 # ============================================================================
 # RAMP RATE LIMITER
 # ============================================================================
@@ -8743,14 +8525,12 @@ def apply_ramp_limit(arr: np.ndarray, max_step: float = 320.0) -> np.ndarray:
             arr[i] = arr[i - 1] - max_step
     return arr
 
-
 def identify_ramp_slots(rad: np.ndarray, sunrise_rel: np.ndarray, sunset_rel: np.ndarray) -> np.ndarray:
     """Identify sunrise/sunset ramp slots with high irradiance gradient near solar edges."""
     drad = np.abs(np.diff(rad, prepend=rad[0]))
     high_grad = drad > RAMP_DETECTION_DRAD_THRESHOLD
     near_edge = (sunrise_rel < RAMP_ONSET_SLOTS) | (sunset_rel < RAMP_ONSET_SLOTS)
     return high_grad & near_edge
-
 
 def residual_blend_vector(w5: pd.DataFrame, day: str, regime_confidence: float = 1.0) -> np.ndarray:
     """
@@ -8814,7 +8594,6 @@ def residual_blend_vector(w5: pd.DataFrame, day: str, regime_confidence: float =
     blend[SOLAR_END_SLOT:] = 0.0
     return blend
 
-
 def solcast_residual_damp_factor(solcast_meta: dict | None) -> float:
     if not solcast_meta or not bool(solcast_meta.get("used_solcast")):
         return 1.0
@@ -8856,7 +8635,6 @@ def solcast_residual_damp_factor(solcast_meta: dict | None) -> float:
         damp *= (1.0 + 0.5 * min(abs(_trend_m), SOLCAST_TREND_PENALTY_MAX))
     damp = float(np.clip(damp, SOLCAST_RESIDUAL_DAMP_MIN, SOLCAST_RESIDUAL_DAMP_MAX))
     return float(damp)
-
 
 # ============================================================================
 # CONFIDENCE BANDS
@@ -8953,7 +8731,6 @@ def confidence_bands(
 
     return lo, hi
 
-
 # ============================================================================
 # FORECAST QUALITY METRICS  (logged after each run)
 # ============================================================================
@@ -9040,7 +8817,6 @@ def compute_forecast_metrics(
         "last_active_error_min": None if last_actual is None or last_forecast is None else int((last_forecast - last_actual) * SLOT_MIN),
     }
 
-
 def compute_bucketed_forecast_metrics(
     actual: np.ndarray | None,
     forecast: np.ndarray | None,
@@ -9079,7 +8855,6 @@ def compute_bucketed_forecast_metrics(
         if metrics and int(metrics.get("usable_slot_count", 0)) > 0:
             out[bucket] = metrics
     return out
-
 
 def compute_error_class_metrics(
     actual: np.ndarray | None,
@@ -9152,7 +8927,6 @@ def compute_error_class_metrics(
         "mean_confidence": float(np.mean(conf_arr[:SLOTS_DAY][usable_mask])) if np.any(usable_mask) else 0.0,
     }
 
-
 def summarize_value_by_bucket(values: np.ndarray | None, bucket_labels: np.ndarray | list[str] | None) -> dict[str, dict]:
     if values is None or bucket_labels is None:
         return {}
@@ -9180,7 +8954,6 @@ def summarize_value_by_bucket(values: np.ndarray | None, bucket_labels: np.ndarr
         }
     return out
 
-
 def _format_bucket_metric_summary(bucket_metrics: dict[str, dict] | None) -> str:
     if not bucket_metrics:
         return "n/a"
@@ -9189,12 +8962,10 @@ def _format_bucket_metric_summary(bucket_metrics: dict[str, dict] | None) -> str
         parts.append(f"{bucket}:WAPE={float(metrics.get('wape_pct', 0.0)):.1f}%")
     return ", ".join(parts) if parts else "n/a"
 
-
 def _format_minutes(value: int | None) -> str:
     if value is None:
         return "n/a"
     return f"{int(value):+d}m"
-
 
 def _fetch_run_audit_meta(target_date: str) -> dict:
     fallback = {
@@ -9247,7 +9018,6 @@ def _fetch_run_audit_meta(target_date: str) -> dict:
         log.warning("Failed to fetch run audit for %s: %s", target_date, e)
     return fallback
 
-
 def _memory_source_weight(forecast_variant: str, provider_expected: str) -> float:
     variant = str(forecast_variant or "").strip().lower()
     expected = str(provider_expected or "").strip().lower()
@@ -9260,7 +9030,6 @@ def _memory_source_weight(forecast_variant: str, provider_expected: str) -> floa
     if variant == "ml_without_solcast":
         return 0.20 if expected in {"solcast", "ml_local"} else 0.50
     return 0.50
-
 
 def _persist_qa_comparison(
     target_date: str,
@@ -9697,7 +9466,6 @@ def _persist_qa_comparison(
             log.warning("Failed to persist forecast comparison for %s: %s", target_date, e)
             return
 
-
 def forecast_qa(today: date) -> None:
     """
     Compute and log forecast accuracy and skill score vs persistence for yesterday.
@@ -10020,7 +9788,6 @@ def forecast_qa(today: date) -> None:
             float(classifier_metrics.get("mean_confidence", 0.0)),
         )
 
-
 def backfill_qa_comparisons(days_back: int = 15) -> int:
     """Re-run QA comparison for recent past dates to apply est_actual reconstruction.
 
@@ -10038,7 +9805,6 @@ def backfill_qa_comparisons(days_back: int = 15) -> int:
                         target_today.isoformat(), e)
     log.info("backfill_qa_comparisons: reprocessed %d/%d dates", reprocessed, days_back)
     return reprocessed
-
 
 # ============================================================================
 # OUTPUT SERIALISER
@@ -10065,14 +9831,12 @@ def to_ui_series(
         for i, (v, l, h) in enumerate(zip(solar_vals, solar_lo, solar_hi))
     ]
 
-
 def _forecast_table_name_for_key(key: str) -> str | None:
     mapping = {
         "PacEnergy_DayAhead": "forecast_dayahead",
         "PacEnergy_IntradayAdjusted": "forecast_intraday_adjusted",
     }
     return mapping.get(str(key or "").strip())
-
 
 def _ensure_forecast_table(conn: sqlite3.Connection, table_name: str) -> None:
     index_prefix = "fd" if table_name == "forecast_dayahead" else "fia"
@@ -10094,7 +9858,6 @@ def _ensure_forecast_table(conn: sqlite3.Connection, table_name: str) -> None:
     )
     conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{index_prefix}_ts ON {table_name}(ts)")
     conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{index_prefix}_date_ts ON {table_name}(date, ts)")
-
 
 def _write_forecast_db(key: str, day: str, series: list[dict]) -> bool:
     """
@@ -10179,7 +9942,6 @@ def _write_forecast_db(key: str, day: str, series: list[dict]) -> bool:
             log.error("DB forecast write failed for %s:%s: %s", key, day, e)
             return False
 
-
 def _classify_variant_from_solcast_meta(solcast_meta: dict) -> str:
     """Derive forecast_variant string from solcast_meta dict."""
     if not solcast_meta or not bool(solcast_meta.get("used_solcast")):
@@ -10189,7 +9951,6 @@ def _classify_variant_from_solcast_meta(solcast_meta: dict) -> str:
     if coverage >= SOLCAST_COVERAGE_FRESH_THRESHOLD and mean_blend >= 0.5:
         return "ml_solcast_hybrid_fresh"
     return "ml_solcast_hybrid_stale"
-
 
 def _classify_solcast_freshness_python(solcast_meta: dict) -> str:
     """Derive Solcast freshness class from solcast_meta dict."""
@@ -10217,7 +9978,6 @@ def _classify_solcast_freshness_python(solcast_meta: dict) -> str:
         freshness_class = "stale_reject"
 
     return freshness_class
-
 
 def _write_forecast_run_audit_from_python(
     target_date,
@@ -10385,7 +10145,6 @@ def _write_forecast_run_audit_from_python(
             return None
     return None
 
-
 def write_forecast(key: str, day: str, series: list[dict]) -> bool:
     ctx = _load_json(FORECAST_CTX)
     ctx.setdefault(key, {})[day] = series
@@ -10399,7 +10158,6 @@ def write_forecast(key: str, day: str, series: list[dict]) -> bool:
         log.warning("Forecast DB write failed for %s; legacy JSON fallback succeeded.", day)
     return bool(ok_db) if _forecast_table_name_for_key(key) is not None else bool(ok_file)
 
-
 def load_forecast_weather_for_day(day: str) -> pd.DataFrame | None:
     snap = load_forecast_weather_snapshot(day)
     if snap:
@@ -10411,7 +10169,6 @@ def load_forecast_weather_for_day(day: str) -> pd.DataFrame | None:
             return raw
     source = "forecast" if not _is_past_day(day) else "archive"
     return fetch_weather(day, source=source)
-
 
 def build_intraday_adjusted_forecast(day: date) -> tuple[list[dict] | None, dict]:
     day_s = day.isoformat()
@@ -10531,7 +10288,6 @@ def build_intraday_adjusted_forecast(day: date) -> tuple[list[dict] | None, dict
     })
     return to_ui_series(adjusted, lo, hi, day_s), meta
 
-
 def run_intraday_adjusted(day: date) -> bool:
     series, meta = build_intraday_adjusted_forecast(day)
     day_s = day.isoformat()
@@ -10554,7 +10310,6 @@ def run_intraday_adjusted(day: date) -> bool:
             float(meta.get("strength", 0.0)),
         )
     return ok
-
 
 # ============================================================================
 # CORE FORECAST FUNCTION
@@ -11416,7 +11171,6 @@ def run_dayahead(
 
     return ok
 
-
 # ============================================================================
 # MANUAL GENERATION (CLI)
 # ============================================================================
@@ -11427,7 +11181,6 @@ def _parse_iso_date_safe(value: str) -> date:
     except Exception as e:
         raise ValueError(f"Invalid date '{value}'. Use YYYY-MM-DD.") from e
 
-
 def _iter_days(start_date: date, end_date: date) -> list[date]:
     if end_date < start_date:
         raise ValueError("End date must be on or after start date.")
@@ -11437,7 +11190,6 @@ def _iter_days(start_date: date, end_date: date) -> list[date]:
         days.append(cur)
         cur += timedelta(days=1)
     return days
-
 
 def run_manual_generation(dates: list[date]) -> bool:
     dates = sorted(set(dates))
@@ -11501,7 +11253,6 @@ def run_manual_generation(dates: list[date]) -> bool:
             log.error("Manual generation FAILED: %s", d.isoformat())
 
     return ok_all
-
 
 def run_backtest(dates: list[date]) -> bool:
     """
@@ -11669,7 +11420,6 @@ def run_backtest(dates: list[date]) -> bool:
         log.info("Backtest regimes: %s", ", ".join(regime_summary_parts))
     return True
 
-
 def parse_cli_args():
     parser = argparse.ArgumentParser(
         description="Inverter Dashboard Forecast Service - daemon mode or manual day-ahead generation",
@@ -11723,7 +11473,6 @@ def parse_cli_args():
         help="Re-run QA evaluation for a specific date (e.g. after substation meter data entry).",
     )
     return parser.parse_args()
-
 
 def run_cli_generation(args) -> int:
     try:
@@ -11800,7 +11549,6 @@ def run_cli_generation(args) -> int:
         log.error("Manual generation argument error: %s", e)
         return 2
 
-
 # ============================================================================
 # MAIN SERVICE LOOP
 # ============================================================================
@@ -11824,7 +11572,6 @@ def _read_setting_value(key: str) -> str | None:
         return None
     value = str(row[0]).strip()
     return value or None
-
 
 # Operator-tunable forecast knobs (option A, 2026-05-30). Read FRESH from the
 # settings table (NOT via the process-cached _read_setting_value) so a change
@@ -11855,7 +11602,6 @@ def _setting_float_or_none(key: str, lo: float, hi: float) -> float | None:
         return None
     return float(np.clip(val, lo, hi))
 
-
 def _setting_bool_or_default(key: str, default: bool) -> bool:
     """Read a boolean forecast tunable fresh from the settings table.
 
@@ -11878,7 +11624,6 @@ def _setting_bool_or_default(key: str, default: bool) -> bool:
     if raw in ('0', 'false', 'no', 'off'):
         return False
     return default
-
 
 @lru_cache(maxsize=1)
 def load_forecast_export_limit_mw() -> float:
@@ -11905,7 +11650,6 @@ def load_forecast_export_limit_mw() -> float:
         return float(EXPORT_MW)
     return float(value)
 
-
 def _read_operation_mode() -> str:
     """Read operationMode from the settings table. Returns 'gateway' or 'remote'."""
     try:
@@ -11913,7 +11657,6 @@ def _read_operation_mode() -> str:
         return "remote" if value == "remote" else "gateway"
     except Exception:
         return "gateway"
-
 
 def _register_forecast_failure(
     consecutive_failures: int,
@@ -11926,7 +11669,6 @@ def _register_forecast_failure(
         1800,
     )
     return next_failures, float(monotonic_now) + float(backoff), int(backoff)
-
 
 def _resolve_service_target_date(today: date, now_h: int, da_today_in_db: bool) -> date:
     """
@@ -11943,12 +11685,10 @@ def _resolve_service_target_date(today: date, now_h: int, da_today_in_db: bool) 
         return today
     return today + timedelta(days=1)
 
-
 def _dayahead_gen_lock_path(target_date) -> "Path":
     """Return the advisory lock path for a target date (see T4.4)."""
     day_s = target_date.isoformat() if hasattr(target_date, "isoformat") else str(target_date)
     return DAYAHEAD_GEN_LOCK_DIR / f"dayahead_{day_s}.lock"
-
 
 def _dayahead_gen_lock_acquire(target_date, owner: str) -> bool:
     """T4.4 fix: acquire an advisory generation lock for target_date.
@@ -11984,13 +11724,11 @@ def _dayahead_gen_lock_acquire(target_date, owner: str) -> bool:
         log.warning("Could not acquire day-ahead gen lock for %s: %s (proceeding without lock)", target_date, e)
         return True
 
-
 def _dayahead_gen_lock_release(target_date) -> None:
     try:
         _dayahead_gen_lock_path(target_date).unlink(missing_ok=True)
     except Exception:
         pass
-
 
 def _delegate_run_dayahead(target_date: date, trigger: str = "auto_service") -> dict | None:
     """Delegate day-ahead generation to the Node.js orchestrator.
@@ -12037,7 +11775,6 @@ def _delegate_run_dayahead(target_date: date, trigger: str = "auto_service") -> 
     except Exception as e:
         log.error("Failed to delegate generation to Node.js: %s", e)
         return None
-
 
 def main() -> None:
     _clear_service_stop_file()
@@ -12285,7 +12022,6 @@ def main() -> None:
                 break
 
     _clear_service_stop_file()
-
 
 if __name__ == "__main__":
     args = parse_cli_args()

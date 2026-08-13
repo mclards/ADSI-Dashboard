@@ -7,10 +7,8 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "services" / "inverter_engine.py"
-
 
 def _extract(fn_name, src):
     marker = f"def {fn_name}("
@@ -27,7 +25,6 @@ def _extract(fn_name, src):
         buf.append(line)
     return "".join(buf)
 
-
 def _load():
     src = MODULE_PATH.read_text(encoding="utf-8")
     ns = {}
@@ -36,7 +33,6 @@ def _load():
                  "parce_precision_ok", "trust_etotal", "trust_parce"):
         exec(_extract(name, src), ns)
     return ns
-
 
 class RtcYearValidTests(unittest.TestCase):
     @classmethod
@@ -58,7 +54,6 @@ class RtcYearValidTests(unittest.TestCase):
     def test_rtc_valid_false(self):
         state = {"rtc_valid": False, "rtc_ms": None}
         self.assertFalse(self.ns["rtc_year_valid"](state, datetime(2026, 4, 24)))
-
 
 class CounterAdvancingTests(unittest.TestCase):
     @classmethod
@@ -87,7 +82,6 @@ class CounterAdvancingTests(unittest.TestCase):
         self.assertTrue(self.ns["counter_advancing"]([]))
         self.assertTrue(self.ns["counter_advancing"]([{"ts_ms": 0, "etotal_kwh": 1, "pac_w": 5000}]))
 
-
 class ParcePrecisionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -103,7 +97,6 @@ class ParcePrecisionTests(unittest.TestCase):
 
     def test_empty_allowed(self):
         self.assertTrue(self.ns["parce_precision_ok"]([], 0))
-
 
 class TrustCompositionTests(unittest.TestCase):
     @classmethod
@@ -132,7 +125,6 @@ class TrustCompositionTests(unittest.TestCase):
         state = {"rtc_valid": True, "rtc_ms": int(datetime(2047, 5, 11).timestamp() * 1000)}
         h = self._hist([1000, 1001, 1002, 1003], [100, 102, 105, 108], [8000]*4)
         self.assertFalse(self.ns["trust_etotal"](state, h, datetime(2026, 4, 24)))
-
 
 if __name__ == "__main__":
     unittest.main()

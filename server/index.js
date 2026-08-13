@@ -6,6 +6,7 @@ const path = require("path");
 const fs = require("fs");
 const http = require("http");
 const https = require("https");
+const net = require("net");
 const os = require("os");
 const crypto = require("crypto");
 const vm = require("vm");
@@ -5677,9 +5678,181 @@ function buildRemoteProxyHeaders(tokenOverride = "") {
   return headers;
 }
 
+function buildHikvisionDeliveryMetadata() {
+  const remote = isRemoteMode();
+  return {
+    operationMode: remote ? "remote" : "gateway",
+    compactPath: remote ? "gateway-relay" : "local-hls",
+    nativePath: remote ? "tailscale-direct" : "local-direct",
+    gatewayUrl: remote ? getRemoteGatewayBaseUrl() : "",
+    relayAvailable: remote ? remoteHikvisionRelayCapability !== "missing" : true,
+  };
+}
+
+let remoteHikvisionRelayCapability = "unknown";
+
+function isMissingRemoteHikvisionRoute(result) {
+  if (Number(result?.status || 0) !== 404) return false;
+  return /cannot\s+(?:get|post)|resource\s+not\s+found|not\s+found/i.test(String(result?.text || ""));
+}
+
+function markRemoteHikvisionRelayResult(result) {
+  remoteHikvisionRelayCapability = isMissingRemoteHikvisionRoute(result) ? "missing" : "available";
+}
+
+async function requestRemoteGatewayJson(req, routePath = req.originalUrl, options = {}) {
+  const base = getRemoteGatewayBaseUrl();
+  if (!base) throw Object.assign(new Error("Remote gateway URL is not configured."), { httpStatus: 503 });
+  if (isUnsafeRemoteLoop(base)) {
+    throw Object.assign(new Error("Remote gateway URL cannot be localhost in remote mode."), { httpStatus: 400 });
+  }
+  const method = String(options.method || req.method || "GET").toUpperCase();
+  const target = `${base}${String(routePath || req.originalUrl || "")}`;
+  const headers = { ...buildRemoteProxyHeaders() };
+  const hasBody = !["GET", "HEAD"].includes(method);
+  if (hasBody) headers["Content-Type"] = "application/json";
+  const upstream = await fetch(target, buildRemoteFetchOptions(target, {
+    method,
+    headers,
+    body: hasBody ? JSON.stringify(options.body ?? req.body ?? {}) : undefined,
+    timeout: resolveProxyTimeout(target),
+  }));
+  const text = await upstream.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : {}; } catch (_) { data = null; }
+  return {
+    status: upstream.status,
+    contentType: String(upstream.headers.get("content-type") || ""),
+    text,
+    data,
+  };
+}
+
+function sendRemoteJsonResult(res, result) {
+  res.status(Number(result?.status || 502));
+  if (result?.data && typeof result.data === "object") return res.json(result.data);
+  if (/text\/html/i.test(String(result?.contentType || "")) || /^\s*<!doctype\s+html/i.test(String(result?.text || ""))) {
+    return res.json({
+      ok: false,
+      error: Number(result?.status || 0) === 404
+        ? "The gateway does not support Hikvision relay yet. Update or restart the gateway dashboard."
+        : `The gateway returned an unexpected HTML response (HTTP ${Number(result?.status || 502)}).`,
+    });
+  }
+  if (result?.contentType) res.set("Content-Type", result.contentType);
+  return res.send(result?.text || "");
+}
+
+async function proxyRemoteHikvisionJson(req, res) {
+  if (remoteHikvisionRelayCapability === "missing") {
+    return res.status(503).json({
+      ok: false,
+      error: "Hikvision gateway relay is unavailable. Update or restart the gateway dashboard.",
+    });
+  }
+  try {
+    const result = await requestRemoteGatewayJson(req);
+    markRemoteHikvisionRelayResult(result);
+    if (isMissingRemoteHikvisionRoute(result)) {
+      return res.status(503).json({
+        ok: false,
+        error: "Hikvision gateway relay is unavailable. Update or restart the gateway dashboard.",
+      });
+    }
+    return sendRemoteJsonResult(res, result);
+  } catch (err) {
+    return res.status(Number(err.httpStatus || 502)).json({ ok: false, error: err.message });
+  }
+}
+
+function proxyHikvisionMediaToRemote(req, res) {
+  if (remoteHikvisionRelayCapability === "missing") {
+    return res.status(503).json({
+      ok: false,
+      error: "Hikvision gateway relay is unavailable. Update or restart the gateway dashboard.",
+    });
+  }
+  const base = getRemoteGatewayBaseUrl();
+  if (!base) return res.status(503).json({ ok: false, error: "Remote gateway URL is not configured." });
+  if (isUnsafeRemoteLoop(base)) {
+    return res.status(400).json({ ok: false, error: "Remote gateway URL cannot be localhost in remote mode." });
+  }
+
+  let target;
+  try {
+    target = new URL(`${base}${req.originalUrl}`);
+  } catch (_) {
+    return res.status(400).json({ ok: false, error: "Remote Hikvision media URL is invalid." });
+  }
+  const transport = target.protocol === "https:" ? https : http;
+  const upstream = transport.request(target, {
+    method: "GET",
+    headers: {
+      Accept: String(req.headers.accept || "*/*"),
+      ...buildRemoteProxyHeaders(),
+    },
+  }, (mediaRes) => {
+    if (Number(mediaRes.statusCode || 0) === 404) {
+      remoteHikvisionRelayCapability = "missing";
+      mediaRes.resume();
+      mediaRes.once("end", () => {
+        if (!res.headersSent) {
+          res.status(503).json({
+            ok: false,
+            error: "Hikvision gateway relay is unavailable. Update or restart the gateway dashboard.",
+          });
+        }
+      });
+      return;
+    }
+    remoteHikvisionRelayCapability = "available";
+    res.status(mediaRes.statusCode || 502);
+    for (const name of [
+      "content-type",
+      "content-length",
+      "cache-control",
+      "content-range",
+      "accept-ranges",
+      "etag",
+      "last-modified",
+    ]) {
+      if (mediaRes.headers[name]) res.set(name, mediaRes.headers[name]);
+    }
+    mediaRes.pipe(res);
+  });
+  upstream.setTimeout(30000, () => upstream.destroy(new Error("Remote Hikvision media request timed out")));
+  upstream.on("error", (err) => {
+    if (!res.headersSent) res.status(502).json({ ok: false, error: `Remote Hikvision media failed: ${err.message}` });
+    else res.end();
+  });
+  res.on("close", () => {
+    if (!res.writableEnded) upstream.destroy();
+  });
+  upstream.end();
+}
+
+function checkTcpReachability(host, port, timeoutMs = 1800) {
+  return new Promise((resolve) => {
+    const startedAt = Date.now();
+    const socket = net.createConnection({ host, port: Number(port) });
+    let settled = false;
+    const finish = (reachable, error = "") => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve({ reachable, latencyMs: Date.now() - startedAt, error: String(error || "").slice(0, 180) });
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once("connect", () => finish(true));
+    socket.once("timeout", () => finish(false, "timeout"));
+    socket.once("error", (err) => finish(false, err.code || err.message));
+  });
+}
+
 // Centralized proxy timeout rules: [pathPrefix, timeoutMs]
 // Ordered from most specific to least specific; first match wins.
 const PROXY_TIMEOUT_RULES = [
+  ["/api/hikvision/",     30000],  // 30 s  — DVR start/profile checks over Tailscale
   ["/api/export/",       600000],  // 10 min — large CSV/Excel exports
   ["/api/report/",        45000],  // 45 s  — daily report generation
   ["/api/replication/",    45000],  // 45 s  — replication sync
@@ -6875,6 +7048,25 @@ function connectRemoteBridgeSocket() {
       return;
     }
     const type = String(msg?.type || "").trim().toLowerCase();
+    // Alarm acknowledgement is gateway-authoritative, but every renderer is
+    // connected to its own local server. Forward the gateway event through a
+    // remote-mode server so all open viewers reconcile immediately as well.
+    if (type === "alarm_ack") {
+      const alarmIds = [...new Set(
+        (Array.isArray(msg?.alarmIds) ? msg.alarmIds : [])
+          .map((value) => Math.trunc(Number(value || 0)))
+          .filter((value) => value > 0),
+      )];
+      broadcastUpdate({
+        type: "alarm_ack",
+        alarmIds,
+        all: Boolean(msg?.all),
+        count: Math.max(0, Math.trunc(Number(msg?.count || 0))),
+        acknowledged: true,
+        updatedTs: Math.max(0, Math.trunc(Number(msg?.updatedTs || 0))),
+      });
+      return;
+    }
     if (type !== "init" && type !== "live") return;
     applyRemoteBridgeLiveFrame(msg, {
       bridgeSessionId,
@@ -11641,7 +11833,6 @@ function sumEnergyRowsKwh(rows) {
   );
 }
 
-
 function buildForecastActualSupplementRowsForRange(
   startTs,
   endTs,
@@ -12280,7 +12471,6 @@ function buildDailyReportRowsForDate(dateText, options = {}) {
 
     const availWindowS        = genWindowS;  // alias kept for expectedNodeUptimeS
     const expectedNodeUptimeS = availWindowS * activeNodeCount;
-
 
     // v2.9.1 — derive per-source hardware totals from baseline + counter_state
     // (NULL when ANY contributing unit lacks a clean eod_clean anchor for the
@@ -12925,12 +13115,90 @@ function mergeHikvisionConfigInput(input) {
 }
 
 app.get("/api/hikvision/config", (req, res) => {
-  res.json({ ok: true, config: readHikvisionConfig({ redact: true }) });
+  if (!isRemoteMode()) {
+    const local = readHikvisionConfig();
+    return res.json({
+      ok: true,
+      config: {
+        ...hikvisionManager.sanitizeConfig(local, { redact: true }),
+        nativePasswordConfigured: Boolean(local.password),
+      },
+      delivery: buildHikvisionDeliveryMetadata(),
+    });
+  }
+  requestRemoteGatewayJson(req)
+    .then((result) => {
+      markRemoteHikvisionRelayResult(result);
+      if (isMissingRemoteHikvisionRoute(result)) {
+        const local = readHikvisionConfig();
+        return res.json({
+          ok: true,
+          config: {
+            ...hikvisionManager.sanitizeConfig(local, { redact: true }),
+            nativePasswordConfigured: Boolean(local.password),
+          },
+          delivery: buildHikvisionDeliveryMetadata(),
+          warning: "Gateway Hikvision relay is unavailable. Update or restart the gateway before Remote-mode card playback.",
+        });
+      }
+      if (result.status < 200 || result.status >= 300 || !result.data) return sendRemoteJsonResult(res, result);
+      const local = readHikvisionConfig();
+      const gatewayConfig = result.data.config && typeof result.data.config === "object"
+        ? result.data.config
+        : {};
+      // Keep the native viewer pointed at the same DVR/channel as the
+      // authoritative gateway without ever pulling the gateway password back
+      // across the link. The viewer-local password is retained separately.
+      const nativeConfig = hikvisionManager.sanitizeConfig({
+        ...local,
+        ...gatewayConfig,
+        password: local.password,
+      });
+      setSetting("hikvisionConfig", JSON.stringify(nativeConfig));
+      result.data.config = {
+        ...gatewayConfig,
+        nativePasswordConfigured: Boolean(nativeConfig.password),
+      };
+      result.data.delivery = buildHikvisionDeliveryMetadata();
+      return res.status(result.status).json(result.data);
+    })
+    .catch((err) => res.status(Number(err.httpStatus || 502)).json({ ok: false, error: err.message }));
 });
 
 app.post("/api/hikvision/config", async (req, res) => {
   try {
     const config = mergeHikvisionConfigInput(req.body);
+    if (isRemoteMode()) {
+      const remote = await requestRemoteGatewayJson(req, req.originalUrl, { method: "POST", body: req.body || {} });
+      markRemoteHikvisionRelayResult(remote);
+      if (isMissingRemoteHikvisionRoute(remote)) {
+        setSetting("hikvisionConfig", JSON.stringify(config));
+        if (hikvisionManager.getStatus().running) await hikvisionManager.stop();
+        return res.json({
+          ok: true,
+          config: {
+            ...hikvisionManager.sanitizeConfig(config, { redact: true }),
+            nativePasswordConfigured: Boolean(config.password),
+          },
+          service: hikvisionManager.getStatus(),
+          delivery: buildHikvisionDeliveryMetadata(),
+          warning: "Gateway Hikvision relay is unavailable. Native settings were saved on this viewer, but Remote-mode card playback requires the gateway update.",
+        });
+      }
+      if (remote.status < 200 || remote.status >= 300 || !remote.data) return sendRemoteJsonResult(res, remote);
+      // The gateway remains authoritative for compact HLS. Keep a local
+      // application copy solely because Hikvision LocalService runs on this
+      // viewer and must reach the DVR directly over the approved Tailscale
+      // subnet route. Never return or log the stored password.
+      setSetting("hikvisionConfig", JSON.stringify(config));
+      if (hikvisionManager.getStatus().running) await hikvisionManager.stop();
+      remote.data.config = {
+        ...(remote.data.config || hikvisionManager.sanitizeConfig(config, { redact: true })),
+        nativePasswordConfigured: Boolean(config.password),
+      };
+      remote.data.delivery = buildHikvisionDeliveryMetadata();
+      return res.status(remote.status).json(remote.data);
+    }
     setSetting("hikvisionConfig", JSON.stringify(config));
     let service = hikvisionManager.getStatus();
     if (service.running && config.playbackMode === "localservice") {
@@ -12943,6 +13211,7 @@ app.post("/api/hikvision/config", async (req, res) => {
       ok: true,
       config: hikvisionManager.sanitizeConfig(config, { redact: true }),
       service,
+      delivery: buildHikvisionDeliveryMetadata(),
     });
   } catch (err) {
     res.status(400).json({ ok: false, error: err.message });
@@ -12950,10 +13219,12 @@ app.post("/api/hikvision/config", async (req, res) => {
 });
 
 app.get("/api/hikvision/status", (req, res) => {
+  if (isRemoteMode()) return proxyRemoteHikvisionJson(req, res);
   res.json({ ok: true, ...hikvisionManager.getStatus() });
 });
 
 app.post("/api/hikvision/start", async (req, res) => {
+  if (isRemoteMode()) return proxyRemoteHikvisionJson(req, res);
   try {
     const result = await hikvisionManager.start(readHikvisionConfig());
     res.status(result.ok ? 200 : 400).json(result);
@@ -12963,6 +13234,7 @@ app.post("/api/hikvision/start", async (req, res) => {
 });
 
 app.post("/api/hikvision/stop", async (req, res) => {
+  if (isRemoteMode()) return proxyRemoteHikvisionJson(req, res);
   try {
     await hikvisionManager.stop();
     res.json({ ok: true, ...hikvisionManager.getStatus() });
@@ -12972,6 +13244,7 @@ app.post("/api/hikvision/stop", async (req, res) => {
 });
 
 app.post("/api/hikvision/test", async (req, res) => {
+  if (isRemoteMode()) return proxyRemoteHikvisionJson(req, res);
   try {
     const config = mergeHikvisionConfigInput(req.body);
     const result = await hikvisionManager.test(config);
@@ -12982,6 +13255,7 @@ app.post("/api/hikvision/test", async (req, res) => {
 });
 
 app.get("/api/hikvision/substream-profile", async (req, res) => {
+  if (isRemoteMode()) return proxyRemoteHikvisionJson(req, res);
   try {
     const profile = await hikvisionManager.getSubstreamProfile(readHikvisionConfig());
     delete profile.xml;
@@ -12992,6 +13266,7 @@ app.get("/api/hikvision/substream-profile", async (req, res) => {
 });
 
 app.post("/api/hikvision/substream-profile", async (req, res) => {
+  if (isRemoteMode()) return proxyRemoteHikvisionJson(req, res);
   try {
     const profile = await hikvisionManager.getSubstreamProfile(
       mergeHikvisionConfigInput(req.body),
@@ -13004,6 +13279,7 @@ app.post("/api/hikvision/substream-profile", async (req, res) => {
 });
 
 app.post("/api/hikvision/optimize-substream", async (req, res) => {
+  if (isRemoteMode()) return proxyRemoteHikvisionJson(req, res);
   try {
     const config = mergeHikvisionConfigInput(req.body);
     const result = await hikvisionManager.optimizeSubstream(config);
@@ -13025,23 +13301,64 @@ app.post("/api/hikvision/optimize-substream", async (req, res) => {
 });
 
 app.get("/api/hikvision/snapshot", async (req, res) => {
-  try {
-    const snapshot = await hikvisionManager.getSnapshot(readHikvisionConfig());
-    res.set("Content-Type", snapshot.contentType);
-    res.set("Cache-Control", "no-store, no-cache, must-revalidate");
-    res.set("Pragma", "no-cache");
-    res.send(snapshot.body);
-  } catch (err) {
-    res.status(502).json({ ok: false, error: err.message });
-  }
+  const serveLocal = async () => {
+    try {
+      const snapshot = await hikvisionManager.getSnapshot(readHikvisionConfig());
+      res.set("Content-Type", snapshot.contentType);
+      res.set("Cache-Control", "no-store, no-cache, must-revalidate");
+      res.set("Pragma", "no-cache");
+      res.send(snapshot.body);
+    } catch (err) {
+      res.status(502).json({ ok: false, error: err.message });
+    }
+  };
+  if (isRemoteMode()) return proxyHikvisionMediaToRemote(req, res);
+  return serveLocal();
 });
 
 app.get("/api/hikvision/hls/*", async (req, res) => {
-  if (!hikvisionManager.getStatus().running) {
-    const result = await hikvisionManager.start(readHikvisionConfig());
-    if (!result.ok) return res.status(503).json(result);
+  const serveLocal = async () => {
+    if (!hikvisionManager.getStatus().running) {
+      const result = await hikvisionManager.start(readHikvisionConfig());
+      if (!result.ok) return res.status(503).json(result);
+    }
+    return hikvisionManager.proxyMedia(req, res, readHikvisionConfig());
+  };
+  if (isRemoteMode()) return proxyHikvisionMediaToRemote(req, res);
+  return serveLocal();
+});
+
+app.post("/api/hikvision/route-status", async (req, res) => {
+  try {
+    const cfg = mergeHikvisionConfigInput(req.body);
+    const tailscale = getTailscaleStatusSnapshot();
+    const [sdk, rtsp] = await Promise.all([
+      checkTcpReachability(cfg.host, Number(cfg.httpPort || 80)),
+      checkTcpReachability(cfg.host, Number(cfg.rtspPort || 554)),
+    ]);
+    const remote = isRemoteMode();
+    res.json({
+      ok: true,
+      host: cfg.host,
+      recommendedRoute: net.isIP(cfg.host) === 4 ? `${cfg.host}/32` : cfg.host,
+      operationMode: remote ? "remote" : "gateway",
+      compactPath: buildHikvisionDeliveryMetadata().compactPath,
+      relayAvailable: buildHikvisionDeliveryMetadata().relayAvailable,
+      nativePath: remote ? "tailscale-direct" : "local-direct",
+      tailscale: {
+        installed: Boolean(tailscale.installed),
+        connected: Boolean(tailscale.connected),
+        backendState: String(tailscale.backendState || ""),
+        dnsName: String(tailscale.self?.dnsName || ""),
+      },
+      sdk: { port: Number(cfg.httpPort || 80), ...sdk },
+      rtsp: { port: Number(cfg.rtspPort || 554), ...rtsp },
+      nativeReady: Boolean(sdk.reachable && (!remote || tailscale.connected)),
+      browserDirectReady: Boolean(rtsp.reachable && (!remote || tailscale.connected)),
+    });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
   }
-  return hikvisionManager.proxyMedia(req, res, readHikvisionConfig());
 });
 
 // v2.10.0 — page-independence verification endpoint. The user reported a
@@ -14710,7 +15027,7 @@ app.get("/api/igbt/fleet.csv", (req, res) => {
     ];
 
     // Build CSV with BOM
-    let csv = "﻿" + headers.join(",") + "\r\n";
+    let csv = "" + headers.join(",") + "\r\n";
     for (const row of rows) {
       const cells = keys.map(k => escapeCsvCell(row[k]));
       csv += cells.join(",") + "\r\n";
@@ -15455,7 +15772,7 @@ app.get("/api/contactor/fleet.csv", (req, res) => {
       "last_event_iso","last_event_motive","computed_at_iso",
     ];
 
-    let csv = "﻿" + headers.join(",") + "\r\n";
+    let csv = "" + headers.join(",") + "\r\n";
     for (const row of rows) {
       csv += keys.map(k => escapeCsvCell(row[k])).join(",") + "\r\n";
     }
@@ -20487,7 +20804,6 @@ app.post("/api/substation-meter/:date/recalculate", (req, res) => {
   res.status(202).json({ ok: true, message: `QA recalculation for ${dateStr} scheduled (5s debounce).` });
 });
 
-
 // --- REMOTE MODE PROXY SUPPORT ---
 async function _applySettingsPostRemote(req, res, targetUrl, token, modeBefore) {
   try {
@@ -20497,7 +20813,7 @@ async function _applySettingsPostRemote(req, res, targetUrl, token, modeBefore) 
     if (payload.remoteApiToken !== undefined) delete payload.remoteApiToken;
     if (payload.cameraConfig !== undefined) delete payload.cameraConfig;
     if (payload.operationMode === 'gateway') delete payload.operationMode;
-    
+
     // Attempt remote save
     const { default: fetch } = await import('node-fetch');
     const response = await fetch(`${targetUrl}/api/settings`, {
@@ -20505,10 +20821,10 @@ async function _applySettingsPostRemote(req, res, targetUrl, token, modeBefore) 
       headers: { 'Content-Type': 'application/json', 'x-auth-token': token },
       body: JSON.stringify(payload)
     });
-    
+
     if (response.ok) {
       // Allow local update of things like operationMode and token if they exist in original request
-      // But we intercept the rest. Actually, let's just let the normal save proceed locally too, 
+      // But we intercept the rest. Actually, let's just let the normal save proceed locally too,
       // so local DB matches remote gateway, but we swallow the fact it was done locally.
       return { remoteSuccess: true, response: await response.json() };
     } else {
@@ -20518,7 +20834,6 @@ async function _applySettingsPostRemote(req, res, targetUrl, token, modeBefore) 
     return { remoteSuccess: false, error: err.message };
   }
 }
-
 
 app.post("/api/settings", async (req, res) => {
   const currentMode = readOperationMode();
@@ -21391,19 +21706,54 @@ app.get("/api/alarms", (req, res) => {
   res.setHeader("X-Perf-Ms", String(Date.now() - _t0));
   res.json(out);
 });
+
+function nextAlarmAcknowledgementTs(nowTs = Date.now()) {
+  const maxStored = Math.max(
+    0,
+    Math.trunc(Number(stmts.getMaxAlarmUpdatedTs.get()?.updated_ts || 0)),
+  );
+  return Math.max(Math.trunc(Number(nowTs || 0)), maxStored + 1);
+}
+
+function broadcastAlarmAcknowledgement({ alarmIds = [], all = false, count = 0, updatedTs = 0 } = {}) {
+  const normalizedIds = [...new Set(
+    (Array.isArray(alarmIds) ? alarmIds : [])
+      .map((value) => Math.trunc(Number(value || 0)))
+      .filter((value) => value > 0),
+  )];
+  broadcastUpdate({
+    type: "alarm_ack",
+    alarmIds: normalizedIds,
+    all: Boolean(all),
+    count: Math.max(0, Math.trunc(Number(count || 0))),
+    acknowledged: true,
+    updatedTs: Math.max(0, Math.trunc(Number(updatedTs || 0))),
+  });
+}
+
 app.post("/api/alarms/:id/ack", (req, res) => {
   if (isRemoteMode()) return proxyToRemote(req, res);
   const id = Number(req.params.id);
   if (!Number.isFinite(id) || id <= 0) {
     return res.status(400).json({ ok: false, error: "Invalid alarm id" });
   }
-  const info = stmts.ackAlarm.run(id);
-  res.json({ ok: true, count: Number(info?.changes || 0) });
+  const updatedTs = nextAlarmAcknowledgementTs();
+  const info = stmts.ackAlarm.run(updatedTs, id);
+  const count = Number(info?.changes || 0);
+  if (count > 0) {
+    broadcastAlarmAcknowledgement({ alarmIds: [id], count, updatedTs });
+  }
+  res.json({ ok: true, count, updatedTs: count > 0 ? updatedTs : 0 });
 });
 app.post("/api/alarms/ack-all", (req, res) => {
   if (isRemoteMode()) return proxyToRemote(req, res);
-  const info = stmts.ackAllAlarms.run();
-  res.json({ ok: true, count: Number(info?.changes || 0) });
+  const updatedTs = nextAlarmAcknowledgementTs();
+  const info = stmts.ackAllAlarms.run(updatedTs);
+  const count = Number(info?.changes || 0);
+  if (count > 0) {
+    broadcastAlarmAcknowledgement({ all: true, count, updatedTs });
+  }
+  res.json({ ok: true, count, updatedTs: count > 0 ? updatedTs : 0 });
 });
 
 app.get("/api/audit", (req, res) => {
@@ -22052,7 +22402,6 @@ app.post("/api/forecast/solcast/test", async (req, res) => {
     return res.status(500).json({ ok: false, error: e.message });
   }
 });
-
 
 app.post("/api/forecast/solcast/preview", async (req, res) => {
   try {

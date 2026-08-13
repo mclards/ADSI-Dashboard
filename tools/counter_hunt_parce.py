@@ -18,16 +18,13 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-
 def u32_hi_lo(a, b):
     if a is None or b is None: return None
     return ((int(a) & 0xFFFF) << 16) | (int(b) & 0xFFFF)
 
-
 def u32_lo_hi(a, b):
     if a is None or b is None: return None
     return ((int(b) & 0xFFFF) << 16) | (int(a) & 0xFFFF)
-
 
 def main():
     if len(sys.argv) < 2:
@@ -171,7 +168,6 @@ def main():
             print(f"   off={off:<3} order={order:<5} band={band:<7} ratio={ratio:<10.6f} delta={delta:<12} dec={dec:<3} first={first} last={last}")
 
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

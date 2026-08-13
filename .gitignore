@@ -40,7 +40,13 @@ scripts/.smoke-pytest-junit.xml
 SOLCAST_TRI_BAND_*.md
 IMPLEMENTATION_*.md
 IMPLEMENTATION_*.txt
-d*ADSI-Dashboardtest-electron.js
+# Private operational and vendor materials must never be committed or packaged.
+docs/Fire-Incident/
+docs/hik-cctv-camera/
+docs/Ingecon_*.docx
+docs/Ingecon_*.csv
+docs/Ingecon_*.xlsx
+docs/Inverter - Manual.pdf
 test-results/
 .tmp/
 release_pre_*/

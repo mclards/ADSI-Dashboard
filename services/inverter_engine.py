@@ -61,7 +61,6 @@ except (TypeError, ValueError):
 if SLOW_POLL_INTERVAL_S != 0:
     SLOW_POLL_INTERVAL_S = max(5, min(300, SLOW_POLL_INTERVAL_S))
 
-
 # -------------------------------------------------
 #   FastAPI app  —  created ONCE with CORS middleware
 # -------------------------------------------------
@@ -109,7 +108,6 @@ def _signed_int16(raw):
     u16 = int(raw) & 0xFFFF
     return u16 - 0x10000 if u16 > 0x7FFF else u16
 
-
 def free_engine_port():
     """Kill any process currently listening on ENGINE_PORT (Windows only)."""
     try:
@@ -122,7 +120,6 @@ def free_engine_port():
     except Exception as e:
         print(f"[PORT {ENGINE_PORT}] Error:", e)
 
-
 def hex_h_to_dec(val):
     """Convert a HEX+H string (e.g. '01000H') to an integer. Returns None on failure."""
     try:
@@ -132,14 +129,12 @@ def hex_h_to_dec(val):
         pass
     return None
 
-
 def inverter_number_from_ip(ip):
     """Return the inverter number (1–27) for a given IP address, or None."""
     for inv_num, inv_ip in ip_map.items():
         if inv_ip == ip:
             return int(inv_num)
     return None
-
 
 # -------------------------------------------------
 #   Configuration  —  paths & tunables
@@ -225,7 +220,6 @@ READ_SPACING    = 0.005  # seconds between input / holding reads
 RECONNECT_DELAY = 0.5    # seconds to wait after reconnect before retry read
 _modbus_timeout = 1.0    # Modbus TCP read timeout (passed to create_client)
 
-
 # -------------------------------------------------
 #   Global state
 # -------------------------------------------------
@@ -298,7 +292,6 @@ DISABLE_IP_CLIENT_REBUILD = os.environ.get(
 # ip -> {"last_success": float monotonic, "last_rebuild": float monotonic}
 _ip_health = {}
 
-
 def should_rebuild_client(now, last_success, last_rebuild,
                           disabled, write_pending, fw_active):
     """Pure decision: should this IP's Modbus client be rebuilt now?
@@ -316,7 +309,6 @@ def should_rebuild_client(now, last_success, last_rebuild,
     if (now - last_rebuild) < IP_REBUILD_MIN_INTERVAL_S:
         return False
     return True
-
 
 def _swap_ip_client(ip, new_client):
     """Close the old per-IP client and install `new_client`, holding the per-IP
@@ -341,7 +333,6 @@ def _swap_ip_client(ip, new_client):
         except Exception:
             pass
         clients[ip] = new_client
-
 
 async def rebuild_ip_client(ip, reason):
     """Discard a wedged per-IP Modbus client and install a fresh one.
@@ -400,13 +391,11 @@ WRITE_WAIT_TIMEOUT_MIN_SEC = 8.0
 WRITE_WAIT_TIMEOUT_MAX_SEC = 20.0
 WRITE_QUEUE_SLOT_SEC = 1.5
 
-
 def service_stop_requested():
     try:
         return bool(SERVICE_STOP_FILE and SERVICE_STOP_FILE.exists())
     except Exception:
         return False
-
 
 def clear_service_stop_file():
     if not SERVICE_STOP_FILE:
@@ -422,7 +411,6 @@ def clear_service_stop_file():
     except Exception:
         pass
 
-
 def _resolve_future_threadsafe(loop, fut, value):
     try:
         if fut.done():
@@ -431,13 +419,11 @@ def _resolve_future_threadsafe(loop, fut, value):
     except Exception:
         pass
 
-
 # -------------------------------------------------
 #   ipconfig.json  —  load
 # -------------------------------------------------
 
 DEFAULT_LOSS_PCT = 2.5
-
 
 def _default_ipconfig():
     cfg = {"inverters": {}, "poll_interval": {}, "units": {}, "losses": {}}
@@ -448,7 +434,6 @@ def _default_ipconfig():
         cfg["units"][key] = [1, 2, 3, 4]
         cfg["losses"][key] = float(DEFAULT_LOSS_PCT)
     return cfg
-
 
 def _sanitize_ipconfig(data):
     out = _default_ipconfig()
@@ -498,7 +483,6 @@ def _sanitize_ipconfig(data):
 
     return out
 
-
 def _read_ipconfig_from_db():
     if not DB_PATH.exists():
         return None
@@ -522,7 +506,6 @@ def _read_ipconfig_from_db():
         except Exception:
             pass
 
-
 def _read_ipconfig_file(path_obj):
     try:
         if not path_obj.exists():
@@ -532,7 +515,6 @@ def _read_ipconfig_file(path_obj):
     except Exception:
         return None
 
-
 def _write_ipconfig_file(path_obj, cfg):
     try:
         path_obj.parent.mkdir(parents=True, exist_ok=True)
@@ -541,7 +523,6 @@ def _write_ipconfig_file(path_obj, cfg):
         return True
     except Exception:
         return False
-
 
 def _load_ipconfig_sync():
     """Synchronous load; called via executor so the event loop stays unblocked."""
@@ -580,11 +561,9 @@ def _load_ipconfig_sync():
     print("[IPCONFIG] Created default ipconfig.json at", IPCONFIG_PATH)
     return cfg
 
-
 async def load_ipconfig():
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(executor, _load_ipconfig_sync)
-
 
 # -------------------------------------------------
 #   inverterPollConfig  —  live-tunable constants
@@ -614,7 +593,6 @@ def _load_poll_config_sync():
         except Exception:
             pass
 
-
 def _apply_poll_config(cfg):
     """Apply a poll-config dict to the module-level tunable constants."""
     global READ_SPACING, RECONNECT_DELAY, _modbus_timeout
@@ -628,7 +606,6 @@ def _apply_poll_config(cfg):
     if "modbusTimeout" in cfg:
         v = float(cfg["modbusTimeout"])
         _modbus_timeout = max(0.2, min(v, 10.0))
-
 
 # -------------------------------------------------
 #   autoreset.json  —  load
@@ -647,7 +624,6 @@ def load_autoreset_config():
             auto_reset_cfg = json.load(f)
     except Exception as e:
         print("[AUTORESET] Load failed:", e)
-
 
 # -------------------------------------------------
 #   Write worker thread  (one per inverter)
@@ -822,7 +798,6 @@ def write_worker_loop(ip, lock, q):
                     if q.empty():
                         pending_evt.clear()
 
-
 # -------------------------------------------------
 #   Safe reads  (run in executor, auto-reconnect)
 # -------------------------------------------------
@@ -834,14 +809,12 @@ def _threaded_read_input(client, addr, count, unit, lock):
     except Exception:
         return None
 
-
 def _threaded_read_holding(client, addr, count, unit, lock):
     try:
         with lock:
             return read_holding(client, addr, count, unit)
     except Exception:
         return None
-
 
 async def safe_read(func, client, addr, count, unit, ip):
     """
@@ -885,11 +858,9 @@ async def safe_read(func, client, addr, count, unit, ip):
     except Exception:
         return None
 
-
 def is_write_pending(ip):
     evt = write_pending.get(ip)
     return bool(evt and evt.is_set())
-
 
 # ── Cross-process firmware-flash bus lock ────────────────────────────────
 # While the standalone calibrator flashes an inverter's firmware over the
@@ -903,7 +874,6 @@ def is_write_pending(ip):
 _fw_active_cache = {"ts": 0.0, "ips": set()}
 _FW_ACTIVE_CACHE_TTL_S = 2.0
 
-
 def firmware_flash_active(ip):
     now = time.time()
     c = _fw_active_cache
@@ -914,7 +884,6 @@ def firmware_flash_active(ip):
             c["ips"] = set()          # fail-open — never silence polling
         c["ts"] = now
     return ip in c["ips"]
-
 
 def compute_write_wait_timeout(ip, step_count=1):
     q = write_queues.get(ip)
@@ -934,7 +903,6 @@ def compute_write_wait_timeout(ip, step_count=1):
         timeout += max(WRITE_QUEUE_SLOT_SEC, _modbus_timeout * 2.0)
     return max(WRITE_WAIT_TIMEOUT_MIN_SEC, min(WRITE_WAIT_TIMEOUT_MAX_SEC, timeout))
 
-
 def mark_write_pending(ip):
     evt = write_pending.get(ip)
     if evt is None:
@@ -942,7 +910,6 @@ def mark_write_pending(ip):
         write_pending[ip] = evt
     evt.set()
     return evt
-
 
 def enqueue_write_atomically(ip, job):
     """T3.3 fix: atomically mark pending and enqueue.
@@ -965,11 +932,9 @@ def enqueue_write_atomically(ip, job):
             )
         mark_write_pending(ip)
 
-
 class WriteQueueFullError(RuntimeError):
     """T3.11 fix (Phase 6): raised when per-IP write queue is at capacity."""
     pass
-
 
 def note_operator_write(ip, unit):
     """T3.5 fix: record the time of an operator-initiated write so
@@ -980,7 +945,6 @@ def note_operator_write(ip, unit):
     except Exception:
         pass
 
-
 def operator_write_hold_active(ip, unit):
     try:
         ts = last_operator_write_ts.get((ip, int(unit)))
@@ -989,7 +953,6 @@ def operator_write_hold_active(ip, unit):
     if ts is None:
         return False
     return (time.monotonic() - ts) < AUTO_RESET_WRITE_HOLD_SEC
-
 
 # -------------------------------------------------
 #   Auto-reset alarm handler
@@ -1145,7 +1108,6 @@ async def handle_auto_reset(ip, unit, alarm_val):
         if entry:
             entry["busy"] = False
 
-
 # -------------------------------------------------
 #   Unit detection
 # -------------------------------------------------
@@ -1182,7 +1144,6 @@ async def detect_units_async(ip):
 
     return units
 
-
 # -------------------------------------------------
 #   Fast packet read
 # -------------------------------------------------
@@ -1199,7 +1160,6 @@ def _u32_hi_lo(regs, off):
     a = regs[off] or 0
     b = regs[off + 1] or 0
     return ((a & 0xFFFF) << 16) | (b & 0xFFFF)
-
 
 def _rtc_from_regs(regs, server_year=None):
     """
@@ -1233,7 +1193,6 @@ def _rtc_from_regs(regs, server_year=None):
         return (_dt(y, mo, dy, h, mi, s), True)
     except Exception:
         return (None, False)
-
 
 async def read_fast_async(client, unit, ip):
     """
@@ -1418,7 +1377,6 @@ async def read_fast_async(client, unit, ip):
         "pt100_2":       int(reg(46) or 0),        # PT100 probe 2 (raw ADC)
     }
 
-
 async def read_slow_async(client, unit, ip):
     """
     Read 53 diagnostic input registers (addr 64–116).
@@ -1539,7 +1497,6 @@ async def read_slow_async(client, unit, ip):
         "unit":                 unit,  # Pass along for frame merge
     }
 
-
 async def read_standard_stop_reasons(client, slave, ip):
     """
     Read 31 input registers (30078–30108) — standard-Modbus stop-reason ring buffer.
@@ -1652,7 +1609,6 @@ async def read_standard_stop_reasons(client, slave, ip):
         "slots": slots,
     }
 
-
 def _get_motive_label(code):
     """
     Get the human-readable label for a motive code (0–30, or edge cases like -1).
@@ -1698,7 +1654,6 @@ def _get_motive_label(code):
     }
     code_num = int(code)
     return motive_labels.get(code_num, f"unknown({code_num})")
-
 
 # -------------------------------------------------
 #   Slow-poll loop (one coroutine per inverter)
@@ -1789,7 +1744,6 @@ async def slow_poll_inverter(ip):
             # Log and continue; do not let a single bad slow-poll cycle freeze
             print(f"[SLOW-POLL] {ip} cycle error (continuing): {type(e).__name__}: {e}")
             await asyncio.sleep(min(slow_interval, 1.0))
-
 
 # -------------------------------------------------
 #   Poll loop (one coroutine per inverter)
@@ -2004,7 +1958,6 @@ async def poll_inverter(ip):
                 print(f"[POLL] {ip} cycle error (continuing): {type(e).__name__}: {e}")
                 await asyncio.sleep(min(interval, 1.0))
 
-
 # -------------------------------------------------
 #   Global map rebuild
 # -------------------------------------------------
@@ -2168,7 +2121,6 @@ async def rebuild_global_maps(cfg=None):
 
     print(f"[IPCONFIG] Maps rebuilt — {len(inverters)} inverter(s) active")
 
-
 # -------------------------------------------------
 #   v2.9.0 Slice C/E/F — health gates, crash recovery, clock triggers
 # -------------------------------------------------
@@ -2184,7 +2136,6 @@ _last_drift_sync_at = {}
 _DRIFT_SYNC_COOLDOWN_MS = 4 * 3600 * 1000    # 4 h
 _DRIFT_TRIGGER_THRESHOLD_S = 3600.0          # 1 h — overrideable by Node setting
 
-
 def _http_get_json(url: str, timeout_s: float = 5.0):
     """Stdlib HTTP GET returning parsed JSON or None on failure."""
     import urllib.request
@@ -2197,7 +2148,6 @@ def _http_get_json(url: str, timeout_s: float = 5.0):
             return json.loads(body) if body else None
     except Exception:
         return None
-
 
 def _http_post_json(url: str, payload: dict, timeout_s: float = 3.0):
     """Stdlib HTTP POST of JSON body. Returns parsed JSON or None."""
@@ -2217,7 +2167,6 @@ def _http_post_json(url: str, payload: dict, timeout_s: float = 3.0):
     except Exception:
         return None
 
-
 # ── Slice F — health gates ────────────────────────────────────────────────
 
 def rtc_year_valid(frame_or_state: dict, server_now=None) -> bool:
@@ -2234,7 +2183,6 @@ def rtc_year_valid(frame_or_state: dict, server_now=None) -> bool:
         return False
     now = server_now or _dt.now()
     return abs(rtc_dt.year - now.year) <= 1
-
 
 def counter_advancing(history: list, window_s: int = 300,
                        pac_idle_w: int = 500) -> bool:
@@ -2258,7 +2206,6 @@ def counter_advancing(history: list, window_s: int = 300,
     vals = [r.get("etotal_kwh", 0) for r in recent]
     return any(b > a for a, b in zip(vals, vals[1:]))
 
-
 def parce_precision_ok(history: list, pac_integrated_wh: float,
                        window_s: int = 300) -> bool:
     """parcE delta/PAC ratio sanity: catches firmware that exposes parcE at wrong scale."""
@@ -2270,16 +2217,13 @@ def parce_precision_ok(history: list, pac_integrated_wh: float,
     ratio = dp / float(pac_integrated_wh)
     return 0.00050 <= ratio <= 0.01100
 
-
 def trust_etotal(frame_state, history, server_now=None) -> bool:
     return rtc_year_valid(frame_state, server_now) and counter_advancing(history)
-
 
 def trust_parce(frame_state, history, pac_wh, server_now=None) -> bool:
     return (rtc_year_valid(frame_state, server_now)
             and counter_advancing(history)
             and parce_precision_ok(history, pac_wh))
-
 
 # ── Slice C — crash-recovery seed ────────────────────────────────────────
 
@@ -2298,7 +2242,6 @@ async def audit_counter_recovery(inverter, unit, source, recovered_kwh, reason):
         await loop.run_in_executor(executor, _post)
     except Exception:
         pass
-
 
 def classify_seed_decision(
     cur_etotal,
@@ -2362,7 +2305,6 @@ def classify_seed_decision(
         reason = "counter_flat"
 
     return 0.0, "zero", reason
-
 
 async def seed_pac_from_baseline():
     """
@@ -2506,7 +2448,6 @@ async def seed_pac_from_baseline():
 
     print(f"[RECOVERY] done — seeded={seeded} zero-fallback={fallbacks}")
 
-
 # ── Slice E — drift + year-invalid triggers ──────────────────────────────
 
 async def _post_sync_clock_for(inv: int, unit: int, trigger: str):
@@ -2523,7 +2464,6 @@ async def _post_sync_clock_for(inv: int, unit: int, trigger: str):
     except Exception:
         return None
 
-
 async def maybe_trigger_drift_sync(ip, unit, drift_s):
     """Throttled drift-based sync: at most once per 4 h per (inv, unit)."""
     inv = inverter_number_from_ip(ip)
@@ -2538,7 +2478,6 @@ async def maybe_trigger_drift_sync(ip, unit, drift_s):
     print(f"[CLOCK] drift trigger inv {inv}/u{unit} drift={drift_s:.0f}s")
     await _post_sync_clock_for(inv, unit, "drift")
 
-
 async def trigger_year_invalid_sync(ip, unit, y_probe):
     """Year-invalid trigger — light throttle (10 min) to avoid hammering."""
     inv = inverter_number_from_ip(ip)
@@ -2552,7 +2491,6 @@ async def trigger_year_invalid_sync(ip, unit, y_probe):
     _last_drift_sync_at[key] = now
     print(f"[CLOCK] YEAR-INVALID trigger inv {inv}/u{unit} year_probe={y_probe}")
     await _post_sync_clock_for(inv, unit, "year_invalid")
-
 
 # -------------------------------------------------
 #   v2.9.0 Slice D — clock-sync transport
@@ -2667,7 +2605,6 @@ async def sync_clock(ip: str, unit: int, target_dt=None,
             "target_iso": target_dt.isoformat(),
         }
 
-
 async def sync_clock_inverter(ip: str, units, target_dt=None,
                               readback_delay_ms: int = 1000):
     """
@@ -2781,7 +2718,6 @@ async def sync_clock_inverter(ip: str, units, target_dt=None,
     except Exception as exc:
         return {**base, "error": f"executor_error: {exc}"}
 
-
 # ── Bulk-auth helper (mirrors server/bulkControlAuth.js adsiMM pattern) ──
 def _check_bulk_auth(header_value: str) -> bool:
     """Accept `adsiMM` for the prior, current OR next minute (±1 in both
@@ -2804,7 +2740,6 @@ def _check_bulk_auth(header_value: str) -> bool:
         candidates.add(f"adsi{m}")
         candidates.add(f"adsi{m:02d}")
     return raw in candidates
-
 
 # -------------------------------------------------
 #   Polling manager  (supervises poll tasks)
@@ -2838,7 +2773,6 @@ async def start_polling_manager():
             await asyncio.sleep(1)
 
     asyncio.create_task(_supervisor())
-
 
 # -------------------------------------------------
 #   File watcher  (hot-reload ipconfig.json)
@@ -2893,7 +2827,6 @@ async def ipconfig_watcher():
 
         await asyncio.sleep(1)
 
-
 # -------------------------------------------------
 #   Metrics state  (mirrors Node-RED global context)
 # -------------------------------------------------
@@ -2909,9 +2842,7 @@ metrics_state = {
 OFFLINE_THRESHOLD_MS = 30_000
 FREEZE_THRESHOLD_MS  = 30_000
 
-
 def _pad2(n): return str(int(n)).zfill(2)
-
 
 def _update_metrics_from_frame(frame: dict):
     """Replicates Node-RED parser + engine: update in-memory metrics state from one raw frame."""
@@ -3033,7 +2964,6 @@ def _update_metrics_from_frame(frame: dict):
         ms["pacEnergyHistory"][nk] = {}
     ms["pacEnergyHistory"][nk][formatted_date] = round(kwh_pac, 6)
 
-
 def _build_metrics() -> list:
     """
     Replicates the Node-RED ENGINE NODE output exactly.
@@ -3103,7 +3033,6 @@ def _build_metrics() -> list:
     results.sort(key=lambda x: (x["Inverter"], x["Module"]))
     return results
 
-
 # -------------------------------------------------
 #   REST endpoints  (registered on the app above)
 # -------------------------------------------------
@@ -3138,7 +3067,6 @@ def get_health():
         "now_ms": now_ms,
     }
 
-
 @app.get("/data")
 def get_data():
     """Return a flat list of all live inverter data frames (raw modbus).
@@ -3172,7 +3100,6 @@ def get_data():
                     flat.append(enriched)
     return flat
 
-
 @app.get("/metrics")
 def get_metrics():
     """
@@ -3182,18 +3109,15 @@ def get_metrics():
     """
     return _build_metrics()
 
-
 class WriteCommand(BaseModel):
     inverter: int
     unit:     int
     value:    int
 
-
 class WriteBatchCommand(BaseModel):
     inverter: int
     units:    list[int]
     value:    int
-
 
 def _sanitize_write_units(units_raw):
     units = []
@@ -3205,7 +3129,6 @@ def _sanitize_write_units(units_raw):
         if 1 <= unit <= 4 and unit not in units:
             units.append(unit)
     return units
-
 
 @app.post("/write")
 async def write_command(cmd: WriteCommand):
@@ -3260,7 +3183,6 @@ async def write_command(cmd: WriteCommand):
         return JSONResponse({"status": "error", "msg": "write failed"}, 500)
 
     return {"status": "ok"}
-
 
 @app.post("/write/batch")
 async def write_batch_command(cmd: WriteBatchCommand):
@@ -3352,7 +3274,6 @@ async def write_batch_command(cmd: WriteBatchCommand):
         500,
     )
 
-
 # ─── v2.9.0 Slice D — clock-sync endpoints ────────────────────────────────
 
 def _extract_auth_header(request):
@@ -3366,7 +3287,6 @@ def _extract_auth_header(request):
         if val:
             return str(val).strip()
     return ""
-
 
 @app.post("/sync-clock/{inverter}/{unit}")
 async def api_sync_clock_one(inverter: int, unit: int, request: Request):
@@ -3382,7 +3302,6 @@ async def api_sync_clock_one(inverter: int, unit: int, request: Request):
     target_dt = _dt.now()
     result = await sync_clock(ip, int(unit), target_dt)
     return {"inverter": int(inverter), "unit": int(unit), **result}
-
 
 @app.post("/sync-clock/inverter/{inverter}")
 async def api_sync_clock_inverter(inverter: int, request: Request):
@@ -3429,7 +3348,6 @@ async def api_sync_clock_inverter(inverter: int, request: Request):
         "total":      result.get("total"),
         "results":    tagged_units,
     }
-
 
 @app.post("/sync-clock/broadcast")
 async def api_sync_clock_all(request: Request):
@@ -3484,7 +3402,6 @@ async def api_sync_clock_all(request: Request):
         "results":    flat_results,
     }
 
-
 # ─── 2026-06-08 — Manual comms reconnect (force fresh Modbus client) ────────
 
 @app.post("/reconnect/{inverter}")
@@ -3509,7 +3426,6 @@ async def api_reconnect_inverter(inverter: int, request: Request):
 
     ok = await rebuild_ip_client(ip, "operator reconnect")
     return {"inverter": inv_int, "ip": ip, "ok": bool(ok)}
-
 
 # ─── v2.10.0 Slice B — Stop Reasons (vendor FC 0x71 SCOPE peek) ────────────
 
@@ -3597,7 +3513,6 @@ async def api_stop_reasons_read(inverter: int, slave: int, request: Request):
         "histogram": result.get("histogram"),
     }
 
-
 # ─── v2.10.x Slice ε — Standard-Modbus Stop-Reason Cross-Check ──────────────
 
 @app.post("/stop-reasons/standard/{inverter}/{slave}")
@@ -3646,7 +3561,6 @@ async def api_stop_reasons_standard(inverter: int, slave: int, request: Request)
         **result,  # inverter_ip, read_at_ms, pointer, slots
     }
 
-
 # ─── v2.10.0 Slice C — Serial Number Read / Edit / Send ────────────────────
 
 @app.get("/serial/ports")
@@ -3663,7 +3577,6 @@ async def api_serial_ports():
         return rs485_bridge.list_serial_ports()
     except Exception:
         return []
-
 
 @app.get("/serial/{inverter}/{slave}")
 async def api_serial_read(inverter: int, slave: int, request: Request):
@@ -3735,7 +3648,6 @@ async def api_serial_read(inverter: int, slave: int, request: Request):
         **{k: v for k, v in result.items() if k not in ("ok", "slave")},
     }
 
-
 @app.post("/serial/{inverter}/{slave}")
 async def api_serial_write(inverter: int, slave: int, request: Request):
     """UNLOCK + WRITE + readback-VERIFY pipeline for one inverter+slave.
@@ -3805,7 +3717,6 @@ async def api_serial_write(inverter: int, slave: int, request: Request):
         **result,
     }
 
-
 # ─── Active Power Control (APC) — Continuous %P Setpoint ────────────────────
 # Transport-agnostic core exported from calibration_io.py (2026-05-17 C1 move).
 # Verified protocol 2026-05-04: FC16 → reg 0x03E8 (1000)
@@ -3831,7 +3742,6 @@ ramp_jobs: dict = {}
 
 # Serializes job creation; ramp execution itself is per-job async.
 ramp_lock = threading.Lock()
-
 
 # ───────────────────────────────────────────────────────────────────────────
 # Slice ζ — Reactive power + grid-code controls (PDF §3 cmd 1, 9, 11 + read-back).
@@ -3859,13 +3769,11 @@ _GC_PHI_TANGENT_MAX = 15870  # ±0.484 tan(φ) ≈ PF 0.90 lag/lead.
 _GC_READ_BASE_ADDR = 0x03ED   # 1005 = 41006
 _GC_READ_COUNT     = 5         # 41006, 41007, 41008, 41009 (reserved), 41010
 
-
 def _signed16_to_raw(value: int) -> int:
     """Encode a signed Int16 as the raw UInt16 the Modbus wire expects.
     Mirror of `_signed_int16` (decode side) at module top. Clamps to ±0x7FFF."""
     v = max(-0x8000, min(0x7FFF, int(value)))
     return v & 0xFFFF
-
 
 async def set_phi_tangent(ip: str, slave: int, phi_raw: int) -> dict:
     """Cmd 1 — set tan(φ) target. `phi_raw` is the Int16 wire value (NOT a PF
@@ -3881,7 +3789,6 @@ async def set_phi_tangent(ip: str, slave: int, phi_raw: int) -> dict:
     else:
         print(f"[grid-control] {ip}/{slave} cmd 1 (phi-tangent) FAIL raw={raw}: {result.get('error')}")
     return {**result, "raw": raw}
-
 
 async def set_reactive_kvar(ip: str, slave: int, kvar_div10: int) -> dict:
     """Cmd 9 — set reactive power reference.
@@ -3900,7 +3807,6 @@ async def set_reactive_kvar(ip: str, slave: int, kvar_div10: int) -> dict:
         print(f"[grid-control] {ip}/{slave} cmd 9 (reactive) FAIL raw={raw}: {result.get('error')}")
     return {**result, "raw": raw}
 
-
 async def disable_reactive(ip: str, slave: int) -> dict:
     """Cmd 11 — disable reactive reference, restore device default."""
     result = await write_command_register(ip, slave, _GC_OPCODE_DISABLE_REACTIVE)
@@ -3909,7 +3815,6 @@ async def disable_reactive(ip: str, slave: int) -> dict:
     else:
         print(f"[grid-control] {ip}/{slave} cmd 11 (disable-reactive) FAIL: {result.get('error')}")
     return result
-
 
 def _read_grid_control_state_sync(client, lock, slave: int) -> dict:
     """Blocking holding-register read for 41006-41010. Returns the raw decoded
@@ -3942,7 +3847,6 @@ def _read_grid_control_state_sync(client, lock, slave: int) -> dict:
     except Exception as exc:
         return {"ok": False, "error": f"exception: {exc}"}
 
-
 async def read_grid_control_state(ip: str, slave: int) -> dict:
     """Single-transaction read of holding 41006-41010 (5 regs). Used by the
     Slice ζ read-back UI chip and by Slice θ Test T3 step capture."""
@@ -3958,7 +3862,6 @@ async def read_grid_control_state(ip: str, slave: int) -> dict:
         _read_grid_control_state_sync,
         client, lock, slave,
     )
-
 
 def _compute_ramp_plan(current_pct: float, target_pct: float, targets: list,
                        mag_step: float = 25.0, batch_count: int = 4) -> dict:
@@ -3984,7 +3887,6 @@ def _compute_ramp_plan(current_pct: float, target_pct: float, targets: list,
         "batch_count":   bc,
         "target_count":  len(targets),
     }
-
 
 async def _execute_ramp(job_id: str, targets: list, sub_setpoints: list,
                         batches: list, opcode_str: str,
@@ -4091,12 +3993,10 @@ async def _execute_ramp(job_id: str, targets: list, sub_setpoints: list,
     job["completed_writes"] = completed
     job["errors"]           = errors
 
-
 class ApcPreviewRequest(BaseModel):
     targets:     list
     target_pct:  float
     current_pct: Optional[float] = 100.0
-
 
 class ApcRunRequest(BaseModel):
     targets:    list
@@ -4104,7 +4004,6 @@ class ApcRunRequest(BaseModel):
     opcode:     Optional[str]   = "set"   # "set" | "stop" | "start"
     mode:       str             = "ramp"
     force:      bool            = False
-
 
 @app.post("/curtail/preview")
 async def curtail_preview(req: ApcPreviewRequest):
@@ -4139,7 +4038,6 @@ async def curtail_preview(req: ApcPreviewRequest):
         "est_total_ms":  est_ms,
         "est_total_s":   round(est_ms / 1000, 1),
     }
-
 
 @app.post("/curtail/run")
 async def curtail_run(req: ApcRunRequest):
@@ -4224,7 +4122,6 @@ async def curtail_run(req: ApcRunRequest):
 
     return {"ok": True, "job_id": job_id}
 
-
 @app.post("/curtail/abort/{job_id}")
 async def curtail_abort(job_id: str):
     """Signal an in-flight ramp to stop after its current write. Returns job snapshot."""
@@ -4236,7 +4133,6 @@ async def curtail_abort(job_id: str):
     job["abort"] = True
     return {"ok": True, "job_id": job_id, "status": "abort_requested"}
 
-
 @app.get("/curtail/state")
 async def curtail_state_view():
     """Return all known per-slave setpoint states."""
@@ -4245,7 +4141,6 @@ async def curtail_state_view():
         rows.append({"ip": ip, "slave": slave, **st})
     return {"ok": True, "states": rows}
 
-
 @app.get("/curtail/jobs/{job_id}")
 async def curtail_job_view(job_id: str):
     """Return snapshot of one ramp job."""
@@ -4253,7 +4148,6 @@ async def curtail_job_view(job_id: str):
     if not job:
         raise HTTPException(404, f"job {job_id} not found")
     return {"ok": True, "job": dict(job)}
-
 
 # ── Slice ζ — Grid-control endpoints (reactive + PF + read-back) ─────────
 # All write paths are auth-gated by Node-side `gridControlEnabled` flag +
@@ -4275,31 +4169,26 @@ class GridControlDisableReq(BaseModel):
     ip:    str
     slave: int
 
-
 @app.post("/grid-control/phi")
 async def api_grid_control_phi(req: GridControlPhiReq):
     """Cmd 1 — set tan(φ) target. Caller passes raw Int16 (already scaled)."""
     return await set_phi_tangent(req.ip, int(req.slave), int(req.phi_raw))
-
 
 @app.post("/grid-control/reactive")
 async def api_grid_control_reactive(req: GridControlReactiveReq):
     """Cmd 9 — set reactive power reference. Caller passes raw Int16 (kVAr ÷ 10)."""
     return await set_reactive_kvar(req.ip, int(req.slave), int(req.kvar_div10))
 
-
 @app.post("/grid-control/disable")
 async def api_grid_control_disable(req: GridControlDisableReq):
     """Cmd 11 — disable reactive reference, restore default."""
     return await disable_reactive(req.ip, int(req.slave))
-
 
 @app.get("/grid-control/state/{ip}/{slave}")
 async def api_grid_control_state(ip: str, slave: int):
     """Read holding 41006-41010 in one transaction. Returns raw regs +
     convenience-decoded fields. Sign-cast for phi/reactive is left to Node."""
     return await read_grid_control_state(ip, int(slave))
-
 
 # ───────────────────────────────────────────────────────────────────────────
 # Field Calibration (Phase 1 — read-only) — display-bypass calibration tool.
@@ -4318,7 +4207,6 @@ from .calibration_core import (
     _CALIB_READ_COUNT,
 )
 
-
 async def read_calibration_block(ip: str, slave: int) -> dict:
     """Single-transaction FC03 read of holding 0x50..0x5E (15 regs)."""
     client = clients.get(ip)
@@ -4334,9 +4222,6 @@ async def read_calibration_block(ip: str, slave: int) -> dict:
         client, lock, int(slave),
     )
 
-
-
-
 async def read_live_for_calibration(ip: str, slave: int) -> dict:
     """Async wrapper around `_read_live_for_calibration_sync` (per-IP lock)."""
     client = clients.get(ip)
@@ -4351,7 +4236,6 @@ async def read_live_for_calibration(ip: str, slave: int) -> dict:
         _read_live_for_calibration_sync,
         client, lock, int(slave),
     )
-
 
 @app.get("/calibration/state/{ip}/{slave}")
 async def api_calibration_state(ip: str, slave: int):
@@ -4382,7 +4266,6 @@ async def api_calibration_state(ip: str, slave: int):
         "live":         live,
         "read_at_ms":   int(time.time() * 1000),
     }
-
 
 @app.post("/calibration/write")
 async def api_calibration_write(req: Request):
@@ -4435,7 +4318,6 @@ async def api_calibration_write(req: Request):
     result["slave"] = slave
     result["read_at_ms"] = int(time.time() * 1000)
     return result
-
 
 @app.post("/calibration/write-bulk")
 async def api_calibration_write_bulk(req: Request):
@@ -4497,9 +4379,7 @@ async def api_calibration_write_bulk(req: Request):
     result["read_at_ms"] = int(time.time() * 1000)
     return result
 
-
 _calibration_lockdown = {"active": False, "inverter": None, "slave": None, "session_id": None}
-
 
 def _is_under_calibration(inverter: int, unit: int) -> bool:
     """Returns True if the (inverter, slave) is the active calibration target.
@@ -4510,7 +4390,6 @@ def _is_under_calibration(inverter: int, unit: int) -> bool:
         return False
     return (int(_calibration_lockdown["inverter"]) == int(inverter)
             and int(_calibration_lockdown["slave"]) == int(unit))
-
 
 @app.post("/calibration/lockdown")
 async def api_calibration_lockdown(req: Request):
@@ -4535,7 +4414,6 @@ async def api_calibration_lockdown(req: Request):
         })
     print(f"[calibration-lockdown] now active={_calibration_lockdown['active']} target={_calibration_lockdown.get('inverter')}/{_calibration_lockdown.get('slave')}", flush=True)
     return {"ok": True, "state": dict(_calibration_lockdown)}
-
 
 @app.post("/calibration/config-write")
 async def api_calibration_config_write(req: Request):
@@ -4612,7 +4490,6 @@ async def api_calibration_config_write(req: Request):
     result["read_at_ms"] = int(time.time() * 1000)
     return result
 
-
 @app.post("/calibration/consign")
 async def api_calibration_consign(req: Request):
     """Drive APC setpoint (opcode 0x0003) to specified percent for calibration consign.
@@ -4652,7 +4529,6 @@ async def api_calibration_consign(req: Request):
         client, lock, int(slave), float(pct),
     )
 
-
 @app.get("/calibration/preflight/{ip}/{slave}")
 async def api_calibration_preflight(ip: str, slave: int):
     """Read sentinel + 81-94 and report sentinel_ok. Used before session start."""
@@ -4667,7 +4543,6 @@ async def api_calibration_preflight(ip: str, slave: int):
         executor,
         lambda: preflight_read_with_lock(client, lock, int(slave)),
     )
-
 
 @app.get("/calibration/cfg-map")
 async def api_calibration_cfg_map():
@@ -4686,7 +4561,6 @@ async def api_calibration_cfg_map():
         }
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
-
 
 @app.get("/calibration/full-config/{ip}/{slave}")
 async def api_calibration_full_config(ip: str, slave: int):
@@ -4747,7 +4621,6 @@ async def api_calibration_full_config(ip: str, slave: int):
         "regs_hex":   " ".join(f"{v & 0xFFFF:04X}" for v in raw["regs"]),
         "read_at_ms": int(time.time() * 1000),
     }
-
 
 @app.get("/calibration/scan/{ip}/{slave}")
 async def api_calibration_scan(ip: str, slave: int):
@@ -4832,7 +4705,6 @@ async def api_calibration_scan(ip: str, slave: int):
         }
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
-
 
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -4931,7 +4803,6 @@ async def main():
             except Exception as e:
                 print(f"[RS485-BRIDGE] Shutdown error: {e}")
         clear_service_stop_file()
-
 
 if __name__ == "__main__":
     try:

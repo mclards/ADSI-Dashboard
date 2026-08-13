@@ -21,7 +21,6 @@ from services.calibration_io import (
     APC_Q15_MAX,
 )
 
-
 class FakeModbusResponse:
     """Fake pymodbus response for testing."""
     def __init__(self, registers=None, is_error=False):
@@ -30,7 +29,6 @@ class FakeModbusResponse:
 
     def isError(self):
         return self._is_error
-
 
 class FakeModbusClient:
     """Fake pymodbus client for testing."""
@@ -42,7 +40,6 @@ class FakeModbusClient:
         self.call_log.append(('write_registers', address, values, unit))
         key = (address, tuple(values), unit)
         return self.write_registers_returns.get(key, FakeModbusResponse())
-
 
 class TestConsignApcCoreScaling(unittest.TestCase):
     """Test Q15 scaling accuracy for reactive calibration consign points."""
@@ -87,7 +84,6 @@ class TestConsignApcCoreScaling(unittest.TestCase):
         from services.calibration_io import _q15_from_pct
         q15 = _q15_from_pct(150.0)
         self.assertEqual(q15, APC_Q15_MAX)
-
 
 class TestConsignApcWithLock(unittest.TestCase):
     """Test consign_apc_with_lock — the single-source calibration-grade APC writer."""
@@ -245,7 +241,6 @@ class TestConsignApcWithLock(unittest.TestCase):
         # Error field optional (only if ok=False)
         if not result["ok"]:
             self.assertIn("error", result)
-
 
 if __name__ == "__main__":
     unittest.main()

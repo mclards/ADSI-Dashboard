@@ -140,6 +140,6 @@ For questions about these findings or remediation approach:
 
 ---
 
-**Audit completed:** 2026-04-28 16:08 UTC+8  
-**Report generated:** security-audit.md (653 lines, 30 KB)  
+**Audit completed:** 2026-04-28 16:08 UTC+8
+**Report generated:** security-audit.md (653 lines, 30 KB)
 **Verification checklist:** security-audit-verification.txt (111 lines, 6.6 KB)

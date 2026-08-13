@@ -61,14 +61,12 @@ _X_FLASH_ADDR_BASE = 0x200000  # addr ≥ this ⇒ X (data) flash; subtract it
 # last-resort guard so even a mis-wired call can't memory-exhaust.
 MAX_SREC_BYTES = 8 * 1024 * 1024  # 8 MiB
 
-
 class FirmwareError(Exception):
     """Raised on any firmware-file / flash-model error.
 
     Mirrors ISM `CargaDeFirmwareException`. Message text is kept verbatim
     from ISM where the operator-facing wording matters.
     """
-
 
 class TransportError(FirmwareError):
     """A live/dry transport failed to deliver/receive a frame.
@@ -79,7 +77,6 @@ class TransportError(FirmwareError):
     must surface, never be silently masked as a missing reply on a live
     flash where masking a real bug could brick a unit.
     """
-
 
 @runtime_checkable
 class Transport(Protocol):
@@ -98,9 +95,7 @@ class Transport(Protocol):
         """
         ...
 
-
 # ─── SREC line checksum (ISM Cargador.ValidaLineaDeSFile) ──────────────────
-
 
 def valida_linea_de_sfile(line: str) -> bool:
     """Return True if the S-record `line` is well-formed and checksum-valid.
@@ -143,9 +138,7 @@ def valida_linea_de_sfile(line: str) -> bool:
         return False
     return (checksum & 0xFF) == (actual & 0xFF)
 
-
 # ─── Flash bank model (ISM Cargador+flash_constants struct) ────────────────
-
 
 @dataclass
 class FlashBank:
@@ -174,7 +167,6 @@ class FlashBank:
         expression repeatedly; the allocated `data` length is +1)."""
         return self.flash_end - self.flash_start
 
-
 # CargaMapaFlashDSP80x map strings, verbatim from IL. Token layout
 # (split on space/tab): [_, Page_Erase(dec), Flash_start(hex), Flash_end(hex),
 # Program_memory(dec), Interface_address(hex), <8 ignored>].
@@ -195,7 +187,6 @@ _FLASH_MAP_DSP803 = (
 # arg_dsp values that select the DSP807 map (ISM: `argDSP == 1 || argDSP == 6`).
 _DSP807_ARG_DSP = (1, 6)
 
-
 def _conv_u16(token: str, base: int) -> int:
     """ISM Convert.ToUInt16 — base 10 or 16; accepts a 0x prefix at base 16.
 
@@ -204,7 +195,6 @@ def _conv_u16(token: str, base: int) -> int:
     case-insensitive. Python int() with base 16 does too.
     """
     return int(token, base) & 0xFFFF
-
 
 def build_flash_map(arg_dsp: int) -> List[FlashBank]:
     """Build the FLASH_STRUCT bank list — port of `CargaMapaFlashDSP80x`.
@@ -251,9 +241,7 @@ def build_flash_map(arg_dsp: int) -> List[FlashBank]:
         b.data = [_BLANK_WORD] * (b.flash_end - b.flash_start + 1)
     return banks
 
-
 # ─── Address → bank index (ISM Cargador.DirFlash_2_IndexFlashstruct) ───────
-
 
 def dir_flash_2_index(banks: List[FlashBank], dir_datos: int, tipo_flash: int) -> int:
     """Return the bank index whose program_memory == tipo_flash and whose
@@ -271,9 +259,7 @@ def dir_flash_2_index(banks: List[FlashBank], dir_datos: int, tipo_flash: int) -
         i += 1
     return i
 
-
 # ─── S3 record → flash words (ISM Cargador.RellenaDatosFlash) ──────────────
-
 
 def rellena_datos_flash(line: str, banks: List[FlashBank]) -> None:
     """Decode one S3 line into the flash banks. Port of `RellenaDatosFlash`.
@@ -321,9 +307,7 @@ def rellena_datos_flash(line: str, banks: List[FlashBank]) -> None:
                     b.page_erase_map[page] = 2
         pos += 1
 
-
 # ─── Start_addr / Data_count trim (ISM ImportSFile IL_013A..0247) ──────────
-
 
 def compute_start_addr_data_count(banks: List[FlashBank]) -> None:
     """For every bank, trim leading/trailing 0xFFFF (erased) words to derive
@@ -343,9 +327,7 @@ def compute_start_addr_data_count(banks: List[FlashBank]) -> None:
         span = e - b.start_addr + 1
         b.data_count = (span & 0xFFFF) if span > 0 else 0
 
-
 # ─── Frame-count math (ISM Cargador.CalculaCantidadTramas) ─────────────────
-
 
 def _ceil_div(n: int, d: int) -> int:
     """ISM pattern: q = n / d (unsigned); if n % d != 0: q += 1."""
@@ -354,7 +336,6 @@ def _ceil_div(n: int, d: int) -> int:
         q += 1
     return q
 
-
 @dataclass
 class FrameCounts:
     num_tramas_pflash: int       # banks[1] (P-flash 0x0004..)
@@ -362,7 +343,6 @@ class FrameCounts:
     num_tramas_xflash: int       # banks[0] (X data flash)
     flag_flash_externa: int
     num_tramas_total: int
-
 
 def calcula_cantidad_tramas(banks: List[FlashBank], arg_longitud_trama: int,
                             arg_dsp: int) -> FrameCounts:
@@ -386,9 +366,7 @@ def calcula_cantidad_tramas(banks: List[FlashBank], arg_longitud_trama: int,
         total = n_p + n_x
     return FrameCounts(n_p, n_p2, n_x, flag_externa, total)
 
-
 # ─── ImportSFile (file-ingest half) ────────────────────────────────────────
-
 
 @dataclass
 class FirmwareImage:
@@ -406,7 +384,6 @@ class FirmwareImage:
     counts: FrameCounts
     flag_flash_externa: int
     dir_flash_init: int          # ISM _dirFlash seed (0xEFFF or 0x7FFF)
-
 
 def load_srec(path: str, arg_dsp: int, arg_longitud_trama: int) -> FirmwareImage:
     """Parse + validate an S-record and build the flash model.
@@ -513,7 +490,6 @@ def load_srec(path: str, arg_dsp: int, arg_longitud_trama: int) -> FirmwareImage
         dir_flash_init=dir_flash_init,
     )
 
-
 # ─── Embedded firmware-code verification (ISM VerificaFicheroFirmware) ──────
 #
 # ISM's primary anti-"wrong file" guard. Before flashing, ISM opens the .S,
@@ -540,7 +516,6 @@ _FW_CODE_POS_DSP803 = "S35100201000"
 
 _RE_IJK = re.compile(r"ijk[0-9][0-9]", re.IGNORECASE)   # ISM RemoveIJKcode
 
-
 def fw_code_from_filename(path: str) -> str:
     """`AAV1003IJK01BC_InverterFirmware.S` → `AAV1003IJK01BC` (upper, the bare
     code before any `_` suffix). Shared so the embedded-code check and the
@@ -548,14 +523,12 @@ def fw_code_from_filename(path: str) -> str:
     stem = os.path.splitext(os.path.basename(path))[0].upper()
     return stem.split("_")[0]
 
-
 def _remove_ijk_code(name: str) -> str:
     """Port of ISM CodigoFirmware.RemoveIJKcode — strip every `ijkNN`
     (case-insensitive) group. `AAV1003IJK01BC` → `AAV1003BC`."""
     if not name:
         raise FirmwareError("Empty Codfirmware")
     return _RE_IJK.sub("", name)
-
 
 def _invierte_endianness(s: str) -> str:
     """Port of ISM Utiles.InvierteEndianness — swap adjacent character pairs
@@ -566,7 +539,6 @@ def _invierte_endianness(s: str) -> str:
         out[i], out[i + 1] = a[i + 1], a[i]
     return "".join(out)
 
-
 def _string_to_hex(s: str) -> str:
     """Port of ISM Utiles.String2HexString — each char → 2 uppercase hex
     digits of its ASCII byte. .NET ASCIIEncoding maps non-ASCII to '?'
@@ -574,11 +546,9 @@ def _string_to_hex(s: str) -> str:
     return "".join("{:02X}".format(ord(c) if ord(c) <= 0x7F else 0x3F)
                    for c in s)
 
-
 def _embedded_code_position(arg_dsp: int) -> str:
     return (_FW_CODE_POS_DSP807 if arg_dsp in _DSP807_ARG_DSP
             else _FW_CODE_POS_DSP803)
-
 
 def verify_embedded_firmware_code(path: str, arg_dsp: int) -> str:
     """Port of ISM FreescaleDSP56F.VerificaFicheroFirmware.
@@ -630,7 +600,6 @@ def verify_embedded_firmware_code(path: str, arg_dsp: int) -> str:
     # No S-record carried the firmware-code at the expected flash address.
     raise FirmwareError("Invalid firmware")
 
-
 # ════════════════════════════════════════════════════════════════════════════
 #  Phase 1b — frame construction (still pure: builds byte[] frames in RAM,
 #  sends NOTHING). Byte-for-byte port of ISM Cargador.CrearTrama0x90/91/92/96,
@@ -655,10 +624,8 @@ _PFLASH2_BASE = 32768       # bank[2] flash_start (0x8000)
 _XFLASH_BASE_807 = 8192     # bank[0] flash_start, DSP807 (0x2000)
 _XFLASH_BASE_803 = 4096     # bank[0] flash_start, DSP803 (0x1000)
 
-
 def _xflash_base(arg_dsp: int) -> int:
     return _XFLASH_BASE_807 if arg_dsp in _DSP807_ARG_DSP else _XFLASH_BASE_803
-
 
 def xor_checksum(frame_so_far) -> int:
     """ISM trailing checksum: UInt16 XOR-accumulate every byte, then % 256.
@@ -670,7 +637,6 @@ def xor_checksum(frame_so_far) -> int:
     for b in frame_so_far:
         acc = (acc ^ (b & 0xFFFF)) & 0xFFFF
     return acc % 256
-
 
 def calculo_checksum_global(banks: List[FlashBank], flag_flash_externa: int) -> int:
     """Port of `Calculo_CheckSum_Global` — 16-bit XOR over flashed words with
@@ -702,7 +668,6 @@ def calculo_checksum_global(banks: List[FlashBank], flag_flash_externa: int) -> 
             chk = (chk ^ banks[1].data[i]) & 0xFFFF
     return (chk + 2) & 0xFFFF
 
-
 class _CargadorState:
     """Runtime mirror of the ISM Cargador fields used during frame build.
 
@@ -730,14 +695,12 @@ class _CargadorState:
         self.tipo_memoria = 0
         self.tramas_creadas = 0
 
-
 def crear_trama_0x90(node: int, legacy: bool) -> bytes:
     """START frame — 6 bytes `[node, 0x50|0x90, 0,0,0,0]` (ISM new Byte[6])."""
     f = bytearray(6)
     f[0] = node & 0xFF
     f[1] = FUNC_START_LEGACY if legacy else FUNC_START_MODERN
     return bytes(f)
-
 
 def crear_trama_0x96(node: int) -> bytes:
     """SPEED-probe frame — 6 bytes `[node, 0x96, 0,0,0,0]`."""
@@ -746,7 +709,6 @@ def crear_trama_0x96(node: int) -> bytes:
     f[1] = FUNC_SPEED
     return bytes(f)
 
-
 def _emit_words(out: list, data: List[int], lo_idx: int, hi_idx: int) -> None:
     """Append data[lo_idx..hi_idx] inclusive, each 16-bit word big-endian
     (word // 256 then word % 256) — ISM CrearTrama0x91 inner loop."""
@@ -754,7 +716,6 @@ def _emit_words(out: list, data: List[int], lo_idx: int, hi_idx: int) -> None:
         w = data[i] & 0xFFFF
         out.append(w // 256)
         out.append(w % 256)
-
 
 def crear_trama_0x91(st: _CargadorState, legacy: bool) -> bytes:
     """DATA frame — exact port of CrearTrama0x91.
@@ -805,7 +766,6 @@ def crear_trama_0x91(st: _CargadorState, legacy: bool) -> bytes:
     out.append(xor_checksum(out))
     return bytes(b & 0xFF for b in out)
 
-
 def crear_trama_0x92(st: _CargadorState, legacy: bool) -> bytes:
     """END frame — `[node, 0x52|0x92, gck/256, gck%256, XOR%256]`."""
     gck = calculo_checksum_global(st.banks, st.flag_flash_externa)
@@ -816,7 +776,6 @@ def crear_trama_0x92(st: _CargadorState, legacy: bool) -> bytes:
     out.append((gck % 256) & 0xFF)
     out.append(xor_checksum(out))
     return bytes(b & 0xFF for b in out)
-
 
 def avanza_flash(st: _CargadorState) -> None:
     """Port of `AvanzaFlash` — advance the bank cursor between data frames.
@@ -880,7 +839,6 @@ def avanza_flash(st: _CargadorState) -> None:
                 st.byte_count = b[st.num_struct].data_count - (n_p - 1) * L
         # else: no change
 
-
 def build_all_frames(image: FirmwareImage, node: int,
                       legacy50: bool = False) -> List[bytes]:
     """Pre-build the full frame sequence — port of ImportSFile's frame loop.
@@ -909,7 +867,6 @@ def build_all_frames(image: FirmwareImage, node: int,
     frames.append(crear_trama_0x92(st, legacy50))
     return frames
 
-
 # ════════════════════════════════════════════════════════════════════════════
 #  Phase 1c — wire state machine + MockDSP bootloader emulator.
 #
@@ -927,10 +884,8 @@ def build_all_frames(image: FirmwareImage, node: int,
 #            3=fatal. Empty/short/None response = no reply.
 # ════════════════════════════════════════════════════════════════════════════
 
-
 class GlobalChecksumError(FirmwareError):
     """ISM GlobalChecksumException — END frame rejected / unanswered."""
-
 
 @dataclass
 class FlashResult:
@@ -950,7 +905,6 @@ class FlashResult:
                 f"FlashErrors:{self.flash_errors}   "
                 f"RXFrameError:{self.rx_frame_errors}")
 
-
 # Default protocol delays (seconds) — decoded from ISM Thread.Sleep calls.
 ERASE_WAIT_S = 5.0          # after 0x90 accept (DSP mass-erase)
 FIRST_FRAME_WAIT_S = 5.0    # extra pause after first 0x91 (erase completion)
@@ -960,13 +914,11 @@ ERR2_WAIT_S = 0.4           # status 2 backoff
 NOREPLY_WAIT_S = 1.0        # timeout backoff
 DEFAULT_QUERY_TIMEOUT_S = 4.0
 
-
 def _resp_status(resp: Optional[bytes]):
     """Return (node, func, status) or None if the reply is missing/short."""
     if resp is None or len(resp) < 3:
         return None
     return resp[0], resp[1], resp[2]
-
 
 def flash_node(frames: List[bytes], transport: Transport, *, node: int,
                 legacy: bool = False, num_intentos: int = 4,
@@ -1164,7 +1116,6 @@ def flash_node(frames: List[bytes], transport: Transport, *, node: int,
     return FlashResult(True, total, acked, no_replies, chk_errors,
                        flash_errors, rx_errors, "Firmware loaded correctly")
 
-
 class MockDSP:
     """In-process emulator of the INGECON DSP bootloader for dry-runs.
 
@@ -1276,7 +1227,6 @@ class MockDSP:
             if 0 <= idx < len(bank):
                 bank[idx] = w
             idx += 1
-
 
 def dry_run(image: FirmwareImage, node: int, *, legacy50: bool = False,
             faults: Optional[Dict[int, str]] = None,

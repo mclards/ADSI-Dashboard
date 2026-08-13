@@ -34,7 +34,6 @@ MAX_MARKER_BYTES = 100_000  # ~1000 claims; oversized => fail-open (no DoS stall
 
 _LOCK = threading.Lock()  # serialise this process's own read-modify-write
 
-
 def _marker_path() -> str:
     # Mirror calibrator_app._fw_audit_path() resolution exactly.
     base = os.getenv("PROGRAMDATA") or os.path.dirname(__file__)
@@ -45,10 +44,8 @@ def _marker_path() -> str:
         d = os.path.dirname(__file__)
     return os.path.join(d, "firmware-active.json")
 
-
 def _now_ms() -> int:
     return int(time.time() * 1000)
-
 
 def _read_raw():
     """Return the parsed marker dict, or None on any problem (fail-open)."""
@@ -60,7 +57,6 @@ def _read_raw():
             return json.load(fh)
     except (OSError, ValueError):
         return None
-
 
 def filter_active(raw, now_ms):
     """PURE: given the parsed marker (or None) return the list of claims
@@ -83,7 +79,6 @@ def filter_active(raw, now_ms):
             out.append(c)
     return out
 
-
 def active_ips(now_ms=None):
     """Set of gateway IPs with a live firmware claim. Fail-open: {} on any
     error. Cheap enough to call every poll cycle; callers may still cache."""
@@ -93,7 +88,6 @@ def active_ips(now_ms=None):
         return {c["inverter_ip"] for c in filter_active(_read_raw(), now_ms)}
     except Exception:
         return set()
-
 
 def _write(claims):
     """Atomically replace the marker with `claims` (temp + os.replace)."""
@@ -110,7 +104,6 @@ def _write(claims):
             os.unlink(tmp)
         except OSError:
             pass
-
 
 def _upsert(inverter_ip, node, slave, job_id, ttl_s):
     """Drop expired + this job's prior claim, append a fresh one."""
@@ -137,16 +130,13 @@ def _upsert(inverter_ip, node, slave, job_id, ttl_s):
         })
         _write(kept)
 
-
 def claim(inverter_ip, node, slave, job_id, ttl_s=DEFAULT_TTL_S):
     """Calibrator: publish/refresh a flash claim for `inverter_ip`."""
     _upsert(inverter_ip, node, slave, job_id, ttl_s)
 
-
 def heartbeat(inverter_ip, node, slave, job_id, ttl_s=DEFAULT_TTL_S):
     """Calibrator: extend the claim's expiry while the flash runs."""
     _upsert(inverter_ip, node, slave, job_id, ttl_s)
-
 
 def release(job_id):
     """Calibrator: drop this job's claim (best-effort; TTL is the net)."""

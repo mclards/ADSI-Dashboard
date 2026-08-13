@@ -14,7 +14,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "services" / "inverter_engine.py"
 
-
 def _load_slow_poll_helpers():
     """
     Load the pure _u32_hi_lo and _signed_int16 helpers from inverter_engine.py.
@@ -41,7 +40,6 @@ def _load_slow_poll_helpers():
     exec(extract("_u32_hi_lo"), ns)
     exec(extract("_signed_int16"), ns)
     return ns
-
 
 class SlowPollDecodeTests(unittest.TestCase):
     """
@@ -348,7 +346,6 @@ class SlowPollDecodeTests(unittest.TestCase):
         self.assertEqual(regs[6], 0)
         # Power reduction
         self.assertEqual(regs[52], 0)
-
 
 if __name__ == "__main__":
     unittest.main()

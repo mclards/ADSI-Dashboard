@@ -34,7 +34,6 @@ DEFAULT_SOURCE_DB = r"C:\ProgramData\InverterDashboard\db\backups\adsi_backup_1.
 # Plant capacity fallback if settings query fails (matches computePlantMaxKwFromConfig default)
 FALLBACK_PLANT_CAP_MW = 26.94  # 108 nodes × 249.41 kW (Ingeteam template Pmax per stage) / 1000
 
-
 def read_plant_cap_mw(db_path: str) -> float:
     """Read plant capacity from live settings. Fall back to 26.94 MW if unavailable."""
     try:
@@ -56,7 +55,6 @@ def read_plant_cap_mw(db_path: str) -> float:
         print(f"  warn: could not read plant cap from settings: {e}")
     return FALLBACK_PLANT_CAP_MW
 
-
 def compute_spread_pct_cap(p10, p90, plant_cap_mw):
     if p10 is None or p90 is None:
         return None
@@ -64,14 +62,12 @@ def compute_spread_pct_cap(p10, p90, plant_cap_mw):
         return None
     return ((p90 - p10) / plant_cap_mw) * 100.0
 
-
 def format_local_ts(ts_ms: int) -> str:
     try:
         dt = datetime.fromtimestamp(ts_ms / 1000.0)
         return dt.strftime("%Y-%m-%dT%H:%M:%S")
     except Exception:
         return ""
-
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -280,7 +276,6 @@ def main() -> int:
     print("NOTE: rows labeled capture_reason='backfill_approx' should be weighted")
     print("      at 0.3x in the error memory learning loop (see Step 11 spec).")
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

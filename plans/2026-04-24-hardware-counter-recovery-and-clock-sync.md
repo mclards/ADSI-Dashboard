@@ -268,7 +268,6 @@ def _u32_hi_lo(regs, off):
     b = regs[off + 1] or 0
     return ((a & 0xFFFF) << 16) | (b & 0xFFFF)
 
-
 def _rtc_from_regs(regs):
     """
     Decode RTC from regs(20..25). Returns (dt_naive_or_None, valid: bool).
@@ -647,7 +646,6 @@ async def seed_pac_from_baseline():
             # Audit-log the decision via Node
             await audit_log_via_node(inv, unit, source, recovered_kwh, reason)
 
-
 async def audit_log_via_node(inv, unit, source, recovered_kwh, reason):
     """Single audit_log entry per unit per recovery pass."""
     try:
@@ -780,7 +778,6 @@ _SYNC_FRAME_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / \
 _SYNC_FRAME_TEMPLATE = _SYNC_FRAME_TEMPLATE_PATH.read_bytes()  # 19 bytes
 assert len(_SYNC_FRAME_TEMPLATE) == 19, "sync template must be 19 bytes"
 
-
 def _build_sync_frame(dt, unit_id):
     """
     Build the 19-byte vendor time-sync frame from the template + current DateTime.
@@ -812,7 +809,6 @@ def _build_sync_frame(dt, unit_id):
     buf[16] = dt.minute & 0xFF
     buf[18] = dt.second & 0xFF
     return bytes(buf)
-
 
 async def sync_clock(ip: str, unit: int, target_dt: datetime,
                      double_send_gap_ms: int = 300,
@@ -899,7 +895,6 @@ async def api_sync_clock_one(inverter: int, unit: int,
     result = await sync_clock(ip, unit, target_dt)
     return { "inverter": inverter, "unit": unit, **result,
              "target_iso": target_dt.isoformat() }
-
 
 @app.post("/sync-clock/broadcast")
 async def api_sync_clock_all(request: Request):
@@ -1053,7 +1048,6 @@ Inside the Python poll loop, after the frame is returned and persisted:
 if frame["rtc_valid"] and abs(frame["rtc_drift_s"]) > 3600:
     await maybe_trigger_drift_sync(ip, unit, frame["rtc_drift_s"])
 
-
 # New helper with throttle:
 _last_drift_sync_at = {}  # {(inv, unit): ts_ms}
 
@@ -1079,7 +1073,6 @@ if not frame["rtc_valid"]:
     y_probe = frame.get("year") or 0
     if y_probe > 2100 or y_probe < 2000:
         await trigger_year_invalid_sync(ip, unit, y_probe)
-
 
 async def trigger_year_invalid_sync(ip, unit, y_probe):
     inv = inverter_number_from_ip(ip)
@@ -1129,7 +1122,6 @@ def rtc_year_valid(frame_or_state: dict, server_now: datetime) -> bool:
     rtc_dt = datetime.fromtimestamp(rtc_ms / 1000.0)
     return abs(rtc_dt.year - server_now.year) <= 1
 
-
 def counter_advancing(history: list, window_s: int = 300,
                        pac_idle_w: int = 500) -> bool:
     """
@@ -1149,7 +1141,6 @@ def counter_advancing(history: list, window_s: int = 300,
     if mean_pac < pac_idle_w: return True
     vals = [r["etotal_kwh"] for r in recent]
     return any(b > a for a, b in zip(vals, vals[1:]))
-
 
 def parce_precision_ok(history: list, pac_integrated_wh: float,
                        window_s: int = 300) -> bool:
@@ -1174,7 +1165,6 @@ Same signatures, same semantics, lives in [server/index.js](server/index.js) for
 ```python
 def trust_etotal(frame, history, server_now):
     return rtc_year_valid(frame, server_now) and counter_advancing(history)
-
 
 def trust_parce(frame, history, server_now, pac_wh):
     return (rtc_year_valid(frame, server_now)

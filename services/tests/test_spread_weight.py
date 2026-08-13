@@ -22,7 +22,6 @@ if str(_REPO_ROOT) not in sys.path:
 
 from services.forecast_engine import _spread_weight  # noqa: E402
 
-
 class TestSpreadWeightUnknownSpread:
     """H2: unknown/zero spread should return 0.5, not 1.0."""
 
@@ -47,7 +46,6 @@ class TestSpreadWeightUnknownSpread:
         # Unknown spread × backfill = 0.5 * 0.3 = 0.15
         assert _spread_weight(None, "backfill_approx") == 0.15
 
-
 class TestSpreadWeightMeasuredSpread:
     """Fresh (non-backfill) measured spread → linear discount down to 0.3 floor."""
 
@@ -70,7 +68,6 @@ class TestSpreadWeightMeasuredSpread:
         assert math.isclose(_spread_weight(100.0, None), 0.30, abs_tol=1e-9)
         # 150% spread (nonsensical but shouldn't explode)
         assert math.isclose(_spread_weight(150.0, None), 0.30, abs_tol=1e-9)
-
 
 class TestSpreadWeightBackfillCompound:
     """H1: backfill × spread compounds can return below 0.3 → [0.09, 0.30] range."""
@@ -100,7 +97,6 @@ class TestSpreadWeightBackfillCompound:
         # upper bound is achieved by any spread > 0 that's very small)
         highest = _spread_weight(0.001, None)
         assert math.isclose(highest, 0.99999, abs_tol=1e-4)
-
 
 class TestSpreadWeightDoesNotCrash:
     """Defensive: no input combination should raise."""

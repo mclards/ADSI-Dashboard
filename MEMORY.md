@@ -2,12 +2,21 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Repo/package version baseline:** 2.12.1
+- **Repo/package version baseline:** 2.12.4
 - **Operator-noted deployed server-side app version:** 2.2.32
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
 - **Version source-of-truth rule:** `package.json` is the repo version source of truth; hardcoded footer/about strings may lag and must not be trusted blindly.
+
+## v2.12.4 Changes — Camera resilience, unified configuration, and alarm acknowledgement sync (2026-08-14)
+- **Hikvision hybrid/native viewer hardening:** Added a dedicated native-viewer surface and lifecycle controls, with browser/native readiness diagnostics and safer password handling that never returns or logs the stored camera password.
+- **Unified Global Configuration:** Consolidated the former IP configuration surface into `global-config.html`, retained remote-to-gateway source-of-truth behavior, and covered the complete settings window with Electron UI tests.
+- **Alarm acknowledgement persistence and replication:** Acknowledgement state now survives restart and synchronizes through gateway/remote flows, backed by new persistence and source-contract tests.
+- **Release payload privacy hardening:** Replaced the broad `docs/**/*.pdf` package glob with an explicit product-document allowlist; private incident, vendor-camera, and RCA materials are ignored and excluded from the installer.
+- **Forecast/nowcasting plan:** Reworked `plans/2026-08-14-virtual-nowcasting-ml-upgrades.md` into a phased, evidence-gated implementation plan with leakage controls, shadow evaluation, rollback criteria, and operational acceptance gates.
+- **Regression corrections found during release review:** Restored the UTF-8 BOM required by compliance CSV exports and updated stale `ip-config.html` fallback/test references to `global-config.html`.
+- **Validation and release build:** 104/104 Node test files, 559/559 Python tests, and 2/2 Electron UI suites passed. All three Python service EXEs were rebuilt, Electron native dependencies were restored, and the signed installer passed certificate-pin, payload-size, and updater-hash gates.
 
 ## v2.11.7 Changes — IGBT Asset Health card-grid redesign + snapshot writer + fixes (2026-07-18)
 - **IGBT fleet view overhauled from table to card grid:** Retired the dense `<table id="igbtFleetTable">` and replaced it with a modern responsive CSS Grid layout (`#igbtFleetGrid`). Cards use `backdrop-filter`, tier-coloured borders, hover-lift micro-animations, and pill-shaped health-tier badges (Healthy/Watch/Aging/EOL).

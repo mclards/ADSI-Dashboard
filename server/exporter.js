@@ -388,7 +388,6 @@ function iterateLocalDates(startTs, endTs) {
   return out;
 }
 
-
 function normalizeFormat(format) {
   const f = String(format || 'csv').trim().toLowerCase();
   return f === 'xlsx' ? 'xlsx' : 'csv';
@@ -2982,7 +2981,6 @@ async function exportSolcastPreview({
   );
   return await writeExport(headers, finalRows, dir, fileBase, format || 'xlsx');
 }
-
 
 async function exportSolcastWeekAhead({ days, slotRows, format, resolution, startDay, endDay }) {
   const dir = resolveForecastExportDir(FORECAST_EXPORT_SUBFOLDERS.solcastWeekAhead);

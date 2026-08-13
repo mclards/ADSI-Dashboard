@@ -20,7 +20,6 @@ if "services.inverter_engine" in sys.modules:
     # Explicitly unload it for this test
     del sys.modules["services.inverter_engine"]
 
-
 class FakeModbusResponse:
     """Fake pymodbus response for testing."""
     def __init__(self, registers=None, is_error=False):
@@ -29,7 +28,6 @@ class FakeModbusResponse:
 
     def isError(self):
         return self._is_error
-
 
 class FakeModbusClient:
     """Fake pymodbus client exposing read_holding_registers, read_input_registers, write_registers."""
@@ -64,7 +62,6 @@ class FakeModbusClient:
 
     def close(self):
         self.connected = False
-
 
 class TestCalibratorServiceIsolation(unittest.TestCase):
     """Test that CalibratorService is truly independent of inverter_engine."""
@@ -109,7 +106,6 @@ class TestCalibratorServiceIsolation(unittest.TestCase):
         self.assertIn("/health", route_names)
         self.assertIn("/transport/select", route_names)
         self.assertIn("/calibration/state/{slave}", route_names)
-
 
 class TestTransportRegistry(unittest.TestCase):
     """Test the TransportRegistry that manages dual transport clients."""
@@ -184,7 +180,6 @@ class TestTransportRegistry(unittest.TestCase):
         self.assertIs(lock1, lock2)
         self.assertIsInstance(lock1, threading.Lock)
 
-
 class TestLockdownState(unittest.TestCase):
     """Test the calibration lockdown state module variable."""
 
@@ -202,7 +197,6 @@ class TestLockdownState(unittest.TestCase):
         # We can't easily test inverter_engine's without importing it,
         # but we can verify calibrator_app's state is independent.
         self.assertIsNotNone(calib_ld)
-
 
 class TestConsignApcCore(unittest.TestCase):
     """Test the calibration_io.consign_apc_with_lock single-source core."""
@@ -328,7 +322,6 @@ class TestConsignApcCore(unittest.TestCase):
         self.assertIn(('write_registers', 0x03E8, [0x0003, expected_q15], 1),
                       self.client.call_log)
 
-
 class TestConsignApcServiceEndpoint(unittest.TestCase):
     """Test CalibratorService /calibration/consign endpoint."""
 
@@ -347,7 +340,6 @@ class TestConsignApcServiceEndpoint(unittest.TestCase):
                          "calibrator_app should not have 'consign not implemented' stub")
         self.assertNotIn("APC commands require full inverter engine integration", source,
                          "calibrator_app should not defer consign to Node")
-
 
 class TestTransportSelectInputValidation(unittest.TestCase):
     """FIX E: Test /transport/select endpoint input validation.
@@ -423,7 +415,6 @@ class TestTransportSelectInputValidation(unittest.TestCase):
         from services.calibrator_app import _validate_baud_and_params
         self.assertFalse(_validate_baud_and_params(9600, "N", 1, 5))  # too low
         self.assertFalse(_validate_baud_and_params(9600, "N", 1, 9))  # too high
-
 
 if __name__ == "__main__":
     unittest.main()
