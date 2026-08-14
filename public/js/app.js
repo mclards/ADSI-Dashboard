@@ -12790,11 +12790,8 @@ function buildCameraCard() {
         <button class="cam-ctrl-btn" id="btnCamMute" title="Toggle mute" style="display:none">
           <span class="mdi mdi-volume-off"></span>
         </button>
-        <button class="cam-ctrl-btn" id="btnCamPopout" title="Open camera in a new window">
-          <span class="mdi mdi-open-in-new"></span>
-        </button>
-        <button class="cam-ctrl-btn" id="btnCamFullscreen" title="Fullscreen">
-          <span class="mdi mdi-fullscreen"></span>
+        <button class="cam-ctrl-btn" id="btnCamFullscreen" title="Open flexible camera viewer window">
+          <span class="mdi mdi-monitor-eye"></span>
         </button>
       </div>
       <div class="camera-overlay" id="cameraOverlay">
@@ -15440,6 +15437,7 @@ function connectWS() {
 
 /* ── Camera Streaming ──────────────────────────────────────────────── */
 let cameraPlayer = null;
+let cameraUiAbortController = null;
 let hikvisionPlayer = null;
 let hikvisionUiAbortController = null;
 let hikvisionNativeViewerActive = false;
@@ -15868,6 +15866,9 @@ function initCameraPlayer() {
   const card = $("cameraCard");
   if (!card) return;
 
+  cameraUiAbortController?.abort();
+  cameraUiAbortController = new AbortController();
+  const cameraUiSignal = cameraUiAbortController.signal;
   cameraPlayer = new CameraPlayer();
 
   // ── Electron IPC: camera popout lifecycle ──
@@ -15878,24 +15879,30 @@ function initCameraPlayer() {
   const _isPopoutWindow = document.body.classList.contains("popout-mode");
   if (!_isPopoutWindow && window.electronAPI) {
     if (typeof window.electronAPI.onCameraPopoutOpened === "function") {
-      window.electronAPI.onCameraPopoutOpened(() => {
-        if (cameraPlayer && cameraPlayer.active) {
-          cameraPlayer.stop();
-          cameraPlayer._pausedForPopout = true;
-        }
+      const offOpened = window.electronAPI.onCameraPopoutOpened(() => {
+        if (!cameraPlayer) return;
+        cameraPlayer._pausedForPopout = true;
+        if (cameraPlayer.active) cameraPlayer.stop();
       });
+      cameraUiSignal.addEventListener("abort", () => offOpened?.(), { once: true });
     }
     if (typeof window.electronAPI.onCameraPopoutClosed === "function") {
-      window.electronAPI.onCameraPopoutClosed(() => {
+      const offClosed = window.electronAPI.onCameraPopoutClosed(() => {
         if (cameraPlayer && cameraPlayer._pausedForPopout) {
           cameraPlayer._pausedForPopout = false;
           // Only restart if the user is currently on the camera/inverters page.
           if (State.currentPage === "camera" || State.currentPage === "inverters") {
             // Small delay to let go2rtc finish tearing down the popout's connection.
-            setTimeout(() => { cameraPlayer.reconnect(); }, 1200);
+            setTimeout(() => {
+              const ownsVisiblePage = State.currentPage === "camera" || State.currentPage === "inverters";
+              if (cameraPlayer && ownsVisiblePage && !cameraPlayer._pausedForPopout && !cameraPlayer.active) {
+                cameraPlayer.reconnect();
+              }
+            }, 1200);
           }
         }
       });
+      cameraUiSignal.addEventListener("abort", () => offClosed?.(), { once: true });
     }
   }
 
@@ -16040,8 +16047,11 @@ function initCameraPlayer() {
     cameraPlayer.reconnect();
   });
 
-  // ── Popout ──
-  $("btnCamPopout")?.addEventListener("click", () => {
+  // ── Dedicated viewer window ──
+  // Tapo uses the same standard framed-window behavior as the Hikvision
+  // native viewer. The main card pauses while the viewer owns the stream and
+  // resumes only after the viewer closes on a visible camera-owning page.
+  const openCameraViewerWindow = () => {
     const page = "camera";
     try {
       if (window.electronAPI && typeof window.electronAPI.openPopoutWindow === "function") {
@@ -16051,24 +16061,14 @@ function initCameraPlayer() {
         window.open("/?popout=" + encodeURIComponent(page), "_blank", "noopener");
       }
     } catch (err) {
-      console.warn("[camera] open window failed:", err?.message || err);
+      console.warn("[camera] viewer window failed:", err?.message || err);
     }
-  });
-
-  // ── Fullscreen ──
-  $("btnCamFullscreen")?.addEventListener("click", () => {
-    if (document.fullscreenElement) {
-      document.exitFullscreen().catch(() => {});
-    } else {
-      card.requestFullscreen().catch((err) => {
-        console.warn("[camera] fullscreen failed:", err.message);
-      });
-    }
-  });
-  document.addEventListener("fullscreenchange", () => {
-    const icon = $("btnCamFullscreen")?.querySelector(".mdi");
-    if (icon) icon.className = document.fullscreenElement ? "mdi mdi-fullscreen-exit" : "mdi mdi-fullscreen";
-  });
+  };
+  $("btnCamFullscreen")?.addEventListener("click", openCameraViewerWindow);
+  if (!_isPopoutWindow) {
+    $("cameraVideo")?.addEventListener("dblclick", openCameraViewerWindow);
+    $("cameraCanvas")?.addEventListener("dblclick", openCameraViewerWindow);
+  }
 
   // ── Mute / unmute (for HLS/WebRTC with audio) ──
   $("btnCamMute")?.addEventListener("click", () => {
@@ -16348,7 +16348,7 @@ class HikVisionPlayer {
     if (!this._isCurrent(generation)) return;
     this._teardown();
     this._setLive(false);
-    const requiresGatewayUpdate = /gateway (?:does not support|relay is unavailable)|update or restart the gateway/i.test(String(message || ""));
+    const requiresGatewayUpdate = /gateway(?: hikvision)? (?:does not support|relay is unavailable)|complete remote mode requires|update or restart the gateway/i.test(String(message || ""));
     if (!requiresGatewayUpdate && this.reconnectCount < 2) {
       const delay = 3000 * Math.pow(2, this.reconnectCount);
       this.reconnectCount += 1;
@@ -16524,7 +16524,7 @@ function initHikvisionPlayer() {
   let hikDelivery = {
     operationMode: getActiveOperationModeClient(),
     compactPath: getActiveOperationModeClient() === "remote" ? "gateway-relay" : "local-hls",
-    nativePath: getActiveOperationModeClient() === "remote" ? "tailscale-direct" : "local-direct",
+    nativePath: getActiveOperationModeClient() === "remote" ? "direct" : "local-direct",
   };
   let nativePasswordConfigured = false;
   const configFromForm = () => ({
@@ -16542,19 +16542,82 @@ function initHikvisionPlayer() {
     autoStart: Boolean($("hikAutoStart")?.checked),
   });
 
+  const compactRouteLabel = (path) => ({
+    "gateway-relay": "Gateway HLS relay",
+    "lan-direct-hls": "Direct HLS over local LAN",
+    "tailscale-direct-hls": "Direct HLS over Tailscale",
+    "direct-hls": "Direct workstation HLS",
+    "local-hls": "Local H.264 HLS",
+    unavailable: "No reachable HLS path",
+  }[path] || "H.264 HLS");
+  const nativeRouteLabel = (path) => ({
+    "lan-direct": "Direct DVR over local LAN",
+    "tailscale-direct": "Direct DVR over Tailscale",
+    "local-direct": "Direct DVR over plant LAN",
+    direct: "Direct DVR from this workstation",
+  }[path] || "Direct DVR route");
+
   const renderDelivery = (delivery = hikDelivery) => {
     hikDelivery = { ...hikDelivery, ...(delivery || {}) };
     const remote = hikDelivery.operationMode === "remote";
+    const localFallback = remote && (Boolean(hikDelivery.localFallback) || /-direct-hls$/.test(hikDelivery.compactPath || ""));
+    const relayBlocked = remote && hikDelivery.relayAvailable === false && !localFallback;
+    const overLan = hikDelivery.nativePath === "lan-direct";
     const subtitle = $("hikTitleSubtitle");
     const note = $("hikDeliveryNote");
+    const operationBadge = $("hikOperationBadge");
+    const operationBanner = $("hikOperationBanner");
+    const operationTitle = $("hikOperationTitle");
+    const operationDescription = $("hikOperationDescription");
+    if (operationBadge) {
+      operationBadge.dataset.mode = remote ? "remote" : "gateway";
+      operationBadge.textContent = remote ? "Remote mode" : "Gateway mode";
+    }
+    if (operationBanner) operationBanner.dataset.mode = remote ? "remote" : "gateway";
     if (subtitle) subtitle.textContent = remote
-      ? "Gateway-relayed card and Tailscale native route"
-      : "Local HLS card and direct native playback";
+      ? "Remote viewer camera routing"
+      : "Gateway-hosted camera routing";
+    if (operationTitle) operationTitle.textContent = remote ? "Remote camera viewer" : "Gateway camera host";
+    if (operationDescription) operationDescription.textContent = remote
+      ? relayBlocked
+        ? "The gateway camera relay is unavailable and this workstation has no direct DVR route. Inverter data remains connected to the gateway, but camera video needs a gateway update or approved DVR /32 route."
+        : localFallback
+          ? `The gateway relay is unavailable, so this workstation supplies camera HLS directly over ${overLan ? "the local LAN" : "its secure DVR route"}. Inverter data remains gateway-authoritative.`
+          : "The dashboard card uses the gateway relay; the native viewer connects from this workstation using the best reachable DVR route."
+      : "This computer hosts dashboard HLS and reaches the DVR directly over the plant LAN.";
     if (note) note.textContent = remote
-      ? "The dashboard card is streamed only by the gateway. The native viewer runs on this workstation and reaches the DVR through its approved Tailscale subnet route."
+      ? relayBlocked
+        ? "Complete Remote mode cannot transcode a DVR it cannot reach. Update or restart the gateway with Hikvision relay support, or advertise and approve only the DVR host through Tailscale."
+        : localFallback
+          ? "Remote operation mode remains active for plant data. Camera playback is independently using this workstation's saved DVR account because the DVR is directly reachable."
+          : "Plant data stays on the gateway. Camera HLS is relayed by the gateway, while native playback runs on this workstation over LAN or Tailscale."
       : "Both playback paths use the DVR's local account on this plant network. Hik-Connect cloud credentials are not required.";
-    if ($("hikCompactPath")) $("hikCompactPath").textContent = remote ? "Gateway HLS relay" : "Local H.264 HLS";
-    if ($("hikNativePath")) $("hikNativePath").textContent = remote ? "Direct DVR over Tailscale" : "Direct DVR over LAN";
+    if ($("hikCompactPath")) $("hikCompactPath").textContent = compactRouteLabel(hikDelivery.compactPath);
+    if ($("hikNativePath")) $("hikNativePath").textContent = nativeRouteLabel(hikDelivery.nativePath);
+    if ($("hikConnectionSubtitle")) $("hikConnectionSubtitle").textContent = remote
+      ? "Viewer-local DVR route and login"
+      : "Plant LAN and DVR login";
+    if ($("hikPlaybackSubtitle")) $("hikPlaybackSubtitle").textContent = remote
+      ? relayBlocked ? "No reachable remote camera source" : localFallback ? "Workstation-direct source and view" : "Gateway-relayed source and view"
+      : "Gateway source and dashboard view";
+    if ($("hikProfileScope")) $("hikProfileScope").childNodes[0].textContent = remote
+      ? localFallback ? "Viewer-direct channel " : "Gateway channel "
+      : "Gateway channel ";
+    if ($("hikProfileNoteText")) $("hikProfileNoteText").innerHTML = remote
+      ? localFallback
+        ? "Preparing H.264 changes the selected substream directly on the reachable DVR. Main recording <strong>xx01</strong> stays unchanged."
+        : "Preparing H.264 is executed by the gateway against the selected DVR substream. Main recording <strong>xx01</strong> stays unchanged."
+      : "Preparing H.264 changes only the selected substream on the gateway DVR. Main recording <strong>xx01</strong> stays unchanged.";
+    if ($("hikServiceTitle")) $("hikServiceTitle").textContent = remote
+      ? relayBlocked ? "Remote Camera Route Unavailable" : localFallback ? "Workstation Direct Playback" : "Gateway Relay Playback"
+      : "Gateway Hikvision Playback";
+    if ($("hikStartLabel")) $("hikStartLabel").textContent = remote
+      ? relayBlocked ? "Unavailable" : localFallback ? "Start Direct" : "Start Relay"
+      : "Start";
+    if ($("hikStopLabel")) $("hikStopLabel").textContent = remote
+      ? localFallback ? "Stop Direct" : "Stop Relay"
+      : "Stop";
+    if ($("btnHikTest")) $("btnHikTest").disabled = relayBlocked;
   };
 
   const renderConfig = (cfg = {}, delivery = null) => {
@@ -16609,37 +16672,48 @@ function initHikvisionPlayer() {
         operationMode: result.operationMode,
         compactPath: result.compactPath,
         nativePath: result.nativePath,
+        relayAvailable: result.relayAvailable,
+        localFallback: result.localFallback,
       });
       const tsReady = Boolean(result.tailscale?.connected);
       const nativeReady = Boolean(result.nativeReady);
       const rtspReady = Boolean(result.rtsp?.reachable);
-      if ($("hikTailscalePath")) $("hikTailscalePath").textContent = tsReady
-        ? (result.tailscale?.dnsName || "Connected")
-        : result.tailscale?.installed ? "Installed, not connected" : "Not installed";
+      const sameLan = Boolean(result.sameLan);
+      const directFallback = Boolean(remote && result.relayAvailable === false && result.browserDirectReady);
+      if ($("hikTailscalePath")) $("hikTailscalePath").textContent = sameLan
+        ? "Optional — local LAN active"
+        : tsReady ? (result.tailscale?.dnsName || "Connected")
+          : result.tailscale?.installed ? "Installed, not connected" : "Not installed";
       setRouteState(
         "hikCompactState",
-        remote ? result.relayAvailable === false ? "unavailable" : "relayed" : rtspReady ? "ready" : "offline",
-        remote ? result.relayAvailable === false ? "error" : "ready" : rtspReady ? "ready" : "error",
+        remote ? directFallback ? "direct" : result.relayAvailable === false ? "blocked" : "relayed" : rtspReady ? "ready" : "offline",
+        remote ? directFallback || result.relayAvailable !== false ? "ready" : "error" : rtspReady ? "ready" : "error",
       );
       setRouteState("hikNativeState", nativeReady ? "ready" : "blocked", nativeReady ? "ready" : "error");
-      setRouteState("hikTailscaleState", tsReady ? "connected" : remote ? "offline" : "optional", tsReady ? "ready" : remote ? "error" : "warning");
+      setRouteState(
+        "hikTailscaleState",
+        sameLan ? "not needed" : tsReady ? "connected" : remote ? "offline" : "optional",
+        sameLan ? "warning" : tsReady ? "ready" : remote ? "error" : "warning",
+      );
       if ($("hikRouteSummary")) $("hikRouteSummary").textContent = remote
-        ? result.relayAvailable === false
-          ? "Gateway relay is unavailable. Update or restart the gateway; Remote mode will not start a viewer-side transcoder."
-          : "Compact video stays on the gateway; native playback uses the viewer's direct DVR route."
+        ? directFallback
+          ? `Gateway relay unavailable; this workstation will supply HLS directly over ${sameLan ? "the local LAN" : "the secure DVR route"}.`
+          : result.relayAvailable === false
+            ? "Gateway relay and direct RTSP route are both unavailable."
+            : `Gateway supplies card HLS; native playback uses this workstation's ${sameLan ? "local-LAN" : "secure"} DVR route.`
         : "Compact and native playback reach the DVR directly on the plant LAN.";
       const guidance = $("hikRouteGuidance");
       if (guidance) {
         if (!remote) {
           guidance.textContent = `Local route: SDK port ${result.sdk?.port || 80} ${result.sdk?.reachable ? "reachable" : "unreachable"}; RTSP port ${result.rtsp?.port || 554} ${rtspReady ? "reachable" : "unreachable"}. Tailscale is optional on the gateway.`;
-        } else if (nativeReady && nativePasswordConfigured) {
-          guidance.innerHTML = `Native route ready: <code>${escapeHtml(result.host)}</code> is reachable on SDK port ${Number(result.sdk?.port || 80)}. Compact playback remains authenticated through the gateway relay.`;
+        } else if ((nativeReady || rtspReady) && nativePasswordConfigured) {
+          guidance.innerHTML = `${sameLan ? "Local LAN" : "Secure direct"} route ready: <code>${escapeHtml(result.host)}</code> is reachable.${directFallback ? " This workstation will automatically replace the unavailable gateway HLS relay." : " The gateway relay remains preferred for the dashboard card."}`;
         } else {
           const passwordHint = nativePasswordConfigured ? "" : " Enter the DVR password and save it on this viewer.";
           guidance.innerHTML = `Native playback needs an approved <code>${escapeHtml(result.recommendedRoute || result.host)}</code> subnet route on the gateway and TCP ports ${Number(result.sdk?.port || 80)}/${Number(result.rtsp?.port || 554)} allowed for this viewer.${passwordHint}`;
         }
       }
-      if (panel) panel.dataset.state = nativeReady || !remote ? "ready" : "warning";
+      if (panel) panel.dataset.state = nativeReady || directFallback || !remote ? "ready" : "warning";
     } catch (err) {
       if ($("hikRouteSummary")) $("hikRouteSummary").textContent = err.message || "Route check failed";
       setRouteState("hikCompactState", "unknown", "warning");
@@ -16676,18 +16750,30 @@ function initHikvisionPlayer() {
         hikvisionPlayer.card?.querySelector("#hikvisionLiveDot")?.classList.contains("active"),
       );
       const relayRunning = Boolean(relayStatus?.running);
-      const presentationRunning = Boolean(status.running || browserRunning || relayRunning);
-      if ($("hikServiceStatus")) $("hikServiceStatus").textContent = presentationRunning ? "running" : "stopped";
-      if ($("hikServicePid")) $("hikServicePid").textContent = status.running ? "LocalService" : relayRunning && remote ? "Gateway HLS" : browserRunning ? "HLS" : "-";
-      if ($("hikServiceHealth")) $("hikServiceHealth").textContent = status.connected ? "Hardware decoded" : relayRunning && remote ? "Tailscale relay" : browserRunning ? "Browser decoded" : "-";
-      if ($("btnHikStart")) $("btnHikStart").disabled = presentationRunning;
+      const routeBlocked = Boolean(remote && hikDelivery.relayAvailable === false && !hikDelivery.localFallback);
+      const directService = Boolean(remote && (
+        relayStatus?.source === "viewer-direct" ||
+        hikDelivery.localFallback ||
+        /-direct-hls$/.test(hikDelivery.compactPath || "")
+      ));
+      const presentationRunning = Boolean(!routeBlocked && (status.running || browserRunning || relayRunning));
+      if ($("hikServiceStatus")) $("hikServiceStatus").textContent = routeBlocked ? "unavailable" : presentationRunning ? "running" : "stopped";
+      if ($("hikServicePid")) $("hikServicePid").textContent = status.running
+        ? "LocalService"
+        : relayRunning && remote ? directService ? "Workstation HLS" : "Gateway HLS"
+          : browserRunning ? "HLS" : "-";
+      if ($("hikServiceHealth")) $("hikServiceHealth").textContent = status.connected
+        ? "Hardware decoded"
+        : relayRunning && remote ? directService ? "Direct DVR route" : "Gateway relay"
+          : browserRunning ? "Browser decoded" : "-";
+      if ($("btnHikStart")) $("btnHikStart").disabled = routeBlocked || presentationRunning;
       if ($("btnHikStop")) $("btnHikStop").disabled = !presentationRunning;
       const headerStatus = $("hikHeaderStatus");
       if (headerStatus) {
         const isRunning = presentationRunning;
         const state = isRunning ? "running" : "stopped";
         headerStatus.dataset.state = state;
-        headerStatus.innerHTML = `<span></span>${status.running ? "Native Viewer Online" : relayRunning && remote ? "Gateway Relay Ready" : browserRunning ? "HLS Stream Online" : "Stopped"}`;
+        headerStatus.innerHTML = `<span></span>${routeBlocked ? "Camera Route Unavailable" : status.running ? "Native Viewer Online" : relayRunning && remote ? directService ? "Direct HLS Ready" : "Gateway Relay Ready" : browserRunning ? "HLS Stream Online" : "Stopped"}`;
       }
     } catch (_) {}
   };
@@ -16697,6 +16783,12 @@ function initHikvisionPlayer() {
     if ($("hikSubstreamId")) $("hikSubstreamId").textContent = `${channel}02`;
     const profileEl = $("hikSubstreamProfile");
     const button = $("btnHikOptimize");
+    const routeBlocked = hikDelivery.operationMode === "remote" && hikDelivery.relayAvailable === false && !hikDelivery.localFallback;
+    if (routeBlocked) {
+      if (profileEl) profileEl.textContent = "Unavailable until a camera route is restored";
+      if (button) button.disabled = true;
+      return;
+    }
     if (profileEl) profileEl.textContent = "Checking DVR...";
     try {
       const profile = await api("/api/hikvision/substream-profile", "POST", configFromForm());
@@ -16812,13 +16904,26 @@ function initHikvisionPlayer() {
   });
   on($("btnHikStart"), "click", async () => {
     try {
+      const result = await api("/api/hikvision/start", "POST", {});
+      if (result?.ok === false) throw new Error(result.error || "Hikvision playback could not start");
       await hikvisionPlayer.reconnect();
+      showMsg("hikConfigMsg", hikDelivery.operationMode === "remote"
+        ? hikDelivery.localFallback ? "Workstation-direct camera playback started." : "Gateway camera relay started."
+        : "Gateway Hikvision playback started.", "ok");
     } catch (err) { showMsg("hikConfigMsg", err.message, "error"); }
     refreshStatus();
   });
   on($("btnHikStop"), "click", async () => {
     hikvisionPlayer.stop();
     await window.electronAPI?.hikvisionNativeStop?.().catch((err) => showMsg("hikConfigMsg", err.message, "error"));
+    try {
+      await api("/api/hikvision/stop", "POST", {});
+      showMsg("hikConfigMsg", hikDelivery.operationMode === "remote"
+        ? hikDelivery.localFallback ? "Workstation-direct camera playback stopped." : "Gateway camera relay stopped."
+        : "Gateway Hikvision playback stopped.", "ok");
+    } catch (err) {
+      showMsg("hikConfigMsg", err.message, "error");
+    }
     refreshStatus();
   });
   on($("hikvisionRetryBtn"), "click", () => hikvisionPlayer.reconnect());
@@ -34973,6 +35078,9 @@ async function _fcalHandleToggleWrites() {
 
   // Apply popout-mode class to hide sidebar + titlebar chrome.
   try { document.body.classList.add("popout-mode"); } catch (_) {}
+  if (popoutPage === "camera") {
+    try { document.body.classList.add("camera-popout-mode"); } catch (_) {}
+  }
 
   // Override the window title so the OS taskbar shows a useful name.
   var POPOUT_TITLES = {
@@ -34980,7 +35088,7 @@ async function _fcalHandleToggleWrites() {
     alarms:        "ADSI \u2013 Alarms",
     forecast:      "ADSI \u2013 Forecast",
     "igbt-health": "ADSI \u2013 Asset Health",
-    camera:        "ADSI \u2013 Camera Viewer",
+    camera:        "ADSI \u2013 Tapo Camera Viewer",
   };
   function setPopoutTitle() {
     try {

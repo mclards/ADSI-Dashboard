@@ -5,8 +5,10 @@
 Implemented on 2026-08-13 with three safety refinements discovered during the code audit:
 
 - Compact card playback uses the internal `browser` route, which is the browser-safe FFmpeg-to-H.264 HLS feed. The existing `hls` route is raw DVR codec pass-through and would not provide the compatibility described by this plan.
-- Native playback uses an Analytics-style Electron window with the standard Windows frame, title bar, and minimize/maximize/restore/close controls. The native surface fills its entire content area and tracks window resizing.
+- Native playback uses an Analytics-style Electron window with the standard Windows frame, title bar, and minimize/maximize/restore/close controls. The native surface fills its entire content area, tracks window resizing, and supports a compact 480×300 minimum for multi-window monitor layouts.
 - Native-viewer starts are generation-cancelled and the Electron native bridge is serialized, rectangle-validated, and scoped to its owning BrowserWindow. Rapid closes, grid rebuilds, navigation, owner shutdown, and competing windows cannot revive or steal a stale LocalService surface.
+- Remote operation is gateway-relay-first but no longer camera-route-locked. The viewer validates gateway HLS and automatically uses a directly reachable DVR over the workstation's local LAN or approved Tailscale subnet route when the relay is missing, unhealthy, or invalid. This fallback affects camera delivery only; gateway authority for inverter data is unchanged. The settings modal visibly separates Gateway-host and Remote-viewer behavior.
+- Complete Remote mode is explicit: when neither the gateway relay nor the workstation-to-DVR SDK/RTSP route exists, route-dependent actions are blocked and the card reports the actual topology requirement. The viewer does not launch a local transcoder against an unreachable DVR.
 
 The recommended `localservice` setting now means hybrid HLS/native presentation. Explicit `compatible` snapshot and direct `hls` diagnostic selections keep their original HTML fullscreen behavior and do not open the native viewer. Per operator follow-up decisions, the dashboard card exists only on the Inverters page and exposes only Settings plus Native Viewer controls; navigating elsewhere hides it and stops HLS, and the redundant HLS popout was removed entirely.
 

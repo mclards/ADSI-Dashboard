@@ -4463,40 +4463,6 @@ label[data-required]::after {
   margin-bottom: 2px;
 }
 
-/* Fullscreen mode — break out of card constraints */
-.camera-card:fullscreen,
-.camera-card:-webkit-full-screen {
-  inset: 0;
-  width: 100vw;
-  height: 100vh;
-  aspect-ratio: auto;
-  max-height: none;
-  border-radius: 0;
-  border: none;
-}
-.camera-card:fullscreen .camera-body,
-.camera-card:-webkit-full-screen .camera-body {
-  background: #000;
-}
-.camera-card:fullscreen .camera-body video,
-.camera-card:fullscreen .camera-body canvas,
-.camera-card:-webkit-full-screen .camera-body video,
-.camera-card:-webkit-full-screen .camera-body canvas {
-  object-fit: contain;
-}
-.camera-card:fullscreen .cam-controls,
-.camera-card:-webkit-full-screen .cam-controls {
-  opacity: 1;
-}
-.camera-card:fullscreen .cam-modal-backdrop,
-.camera-card:-webkit-full-screen .cam-modal-backdrop {
-  padding: 40px;
-}
-.camera-card:fullscreen .cam-modal,
-.camera-card:-webkit-full-screen .cam-modal {
-  max-width: 360px;
-}
-
 /* ── Camera Settings Modal (page-level) ─────────────────────────────── */
 .cam-settings-card {
   width: min(400px, 92vw);
@@ -4825,6 +4791,7 @@ select.cam-field-input { appearance: auto; }
 
 .hik-title-wrap,
 .hik-header-actions,
+.hik-operation-banner,
 .hik-panel-heading,
 .hik-profile-main,
 .hik-profile-note,
@@ -4840,6 +4807,21 @@ select.cam-field-input { appearance: auto; }
 
 .hik-title-wrap { gap: 10px; }
 .hik-header-actions { gap: 10px; }
+
+.hik-operation-badge {
+  padding: 4px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--border));
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: .35px;
+  text-transform: uppercase;
+}
+.hik-operation-badge[data-mode="remote"] {
+  border-color: color-mix(in srgb, var(--warn, #f5a623) 42%, var(--border));
+  color: var(--warn, #f5a623);
+}
 
 .hik-title-icon {
   width: 34px;
@@ -4895,6 +4877,29 @@ select.cam-field-input { appearance: auto; }
 .hik-settings-card .cam-settings-body {
   padding: 14px 18px 4px;
 }
+
+.hik-operation-banner {
+  gap: 9px;
+  margin-bottom: 8px;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  border-radius: 8px;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 11%, var(--surface2)), var(--surface2));
+}
+.hik-operation-banner[data-mode="remote"] {
+  border-color: color-mix(in srgb, var(--warn, #f5a623) 34%, var(--border));
+  background: linear-gradient(90deg, color-mix(in srgb, var(--warn, #f5a623) 9%, var(--surface2)), var(--surface2));
+}
+.hik-operation-icon {
+  flex: 0 0 auto;
+  color: var(--accent);
+  font-size: 18px;
+}
+.hik-operation-banner[data-mode="remote"] .hik-operation-icon { color: var(--warn, #f5a623); }
+.hik-operation-banner strong,
+.hik-operation-banner small { display: block; }
+.hik-operation-banner strong { color: var(--text); font-size: 10px; }
+.hik-operation-banner small { margin-top: 2px; color: var(--text2); font-size: 8px; line-height: 1.4; }
 
 .hik-config-note {
   gap: 7px;
@@ -22639,6 +22644,52 @@ body.calib-session-active #fieldCalibrationSection {
 
 /* Hide every page except the one being popped out (suppresses flash). */
 .popout-mode #main > .page:not(.active) {
+  display: none !important;
+}
+
+/* Tapo's former DOM fullscreen is presented as a standard framed Electron
+   window. Keep only the media surface inside the native OS frame: all other
+   dashboard siblings and in-card labels/controls stay out of this viewer. */
+body.camera-popout-mode > :not(#main) {
+  display: none !important;
+}
+
+.camera-popout-mode #main > :not(#page-camera) {
+  display: none !important;
+}
+
+.camera-popout-mode #main,
+.camera-popout-mode #page-camera {
+  background: #000;
+}
+
+.camera-popout-mode #page-camera {
+  inset: 0 !important;
+  gap: 0;
+  padding: 0;
+}
+
+.camera-popout-mode #page-camera .camera-card {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  max-height: none;
+  border: 0;
+  border-radius: 0;
+  cursor: default;
+}
+
+.camera-popout-mode #page-camera .camera-body {
+  width: 100%;
+  height: 100%;
+  background: #000;
+}
+
+.camera-popout-mode #page-camera :is(video, canvas) {
+  object-fit: contain;
+}
+
+.camera-popout-mode #page-camera .camera-body > :not(video):not(canvas) {
   display: none !important;
 }
 

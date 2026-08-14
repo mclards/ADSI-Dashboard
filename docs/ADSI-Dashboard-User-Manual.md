@@ -1,12 +1,12 @@
 # ADSI Inverter Dashboard User Manual
 
-**Applies to:** ADSI Inverter Dashboard `v2.12.4`
+**Applies to:** ADSI Inverter Dashboard `v2.12.5`
 **Document type:** Operator and administrator reference
 **Scope:** Main dashboard, forecast workspace, settings center, cloud backup, standby database workflow, alarm handling, exports, IP Configuration, and Topology
 
 ---
 
-## Service documentation (v2.12.4+)
+## Service documentation (v2.12.5+)
 
 Four Ingeteam reference PDFs ship with the installer under `docs/` and are
 also hosted on GitHub for in-app auto-download from the alarm drilldown:
@@ -1771,10 +1771,12 @@ The camera card is a draggable card that participates in the inverter grid layou
 - **Bottom controls bar**:
   - ⚙️ Settings — opens the Camera Settings modal
   - 🔇/🔊 Mute/unmute toggle
-  - ⛶ Fullscreen toggle
+  - **Viewer window** — opens the Tapo stream in a standard framed Electron window
 - **Loading spinner** while buffering
 - **Error overlay** with `Retry` button when the stream fails
 - **Auto-reconnect** every 5 seconds on stream drop
+
+The viewer-window control replaces browser DOM fullscreen. It pauses the dashboard card and opens **ADSI – Tapo Camera Viewer** with normal Windows move, resize, minimize, maximize/restore, and close controls. Inside that operating-system frame, only the video surface is rendered—card labels, settings controls, messages, alarms, footers, and other dashboard HTML are excluded. The viewer opens at 1280×820, can be reduced to **480×300**, and keeps the video full-bleed with its aspect ratio preserved. Closing it releases the viewer stream and resumes the dashboard card only when its owning page is visible. Double-clicking Tapo video opens the same viewer.
 
 ### Stream Modes
 
@@ -1857,30 +1859,33 @@ The service status grid polls `GET /api/streaming/go2rtc-status` every 5 seconds
 
 The Hikvision DVR uses its own draggable dashboard card, settings modal, browser stream, native decoder bridge, and API routes. Its DVR-specific connection stays separate from the Tapo configuration. The polished modal groups secure stream paths, device identity, DVR connection, channel/playback, stream profile, and playback status into separate panels. Enter the DVR's local username and password; Hik-Connect cloud credentials and camera access codes are not used. The SDK/HTTP port defaults to `80`, while RTSP defaults to `554`.
 
-Use **Hybrid HLS + native viewer window** for normal operation. On the Inverters-page card, FFmpeg supplies browser-safe H.264 HLS. Expect roughly 2–3 seconds of latency and modest transcoding loss. The native-viewer control pauses card HLS and opens a standard Electron window like the Analytics popout. Hikvision LocalService fills its content area at the DVR's original quality and frame rate. Use the normal Windows title-bar controls to move, resize, minimize, maximize, restore, or close it. Closing the window stops the native decoder and resumes HLS automatically when Inverters is visible.
+Use **Hybrid HLS + native viewer window** for normal operation. On the Inverters-page card, FFmpeg supplies browser-safe H.264 HLS. Expect roughly 2–3 seconds of latency and modest transcoding loss. The native-viewer control pauses card HLS and opens a standard Electron window like the Analytics popout. Hikvision LocalService fills its content area at the DVR's original quality and frame rate. Use the normal Windows title-bar controls to move, resize, minimize, maximize, restore, or close it. The viewer can be reduced to **480×300** for flexible side-by-side and multi-monitor layouts. Closing the window stops the native decoder and resumes HLS automatically when Inverters is visible.
 
 When the operator navigates away from Inverters, the Hikvision card disappears with that page and its HLS playback stops. Returning to Inverters restores the card in its saved grid position and reconnects playback. The card provides **Settings** and **Open native viewer window** controls. Closing the native viewer resumes the card only when Inverters is visible. Native playback is restricted to its owning viewer window, and rapid window transitions cancel stale starts. If LocalService cannot start, the viewer shows a **Retry** button; otherwise the native video fills the content area.
 
 **Compatible snapshots** remains a low-frame-rate fallback, while **Direct HLS** remains a raw-codec diagnostic mode; these explicit modes use ordinary HTML fullscreen instead of opening the native viewer. **Prepare H.264 Substream** is an optional isolated change to channel **xx02** and never modifies **xx01**. A blank password means “keep the existing password.”
 
-#### Hikvision over Tailscale
+#### Hikvision routing in Gateway and Remote modes
 
-The delivery path follows the dashboard operating mode:
+The settings modal has an explicit **Gateway mode** or **Remote mode** context banner. Camera routing is selected independently from inverter-data authority:
 
 | Playback surface | Gateway mode | Remote mode |
 | --- | --- | --- |
-| Inverters-page camera card | Local H.264 HLS generated beside the DVR | Authenticated HLS/snapshot relay from the gateway over the configured gateway link |
-| Native viewer window | LocalService connects directly to the DVR over the plant LAN | LocalService connects directly to the DVR through a Tailscale subnet route |
+| Inverters-page camera card | Local H.264 HLS generated beside the DVR | Prefers the authenticated gateway HLS relay; automatically uses workstation-direct HLS over the local LAN or Tailscale when the relay is missing, unhealthy, or invalid and the DVR is reachable |
+| Native viewer window | LocalService connects directly to the DVR over the plant LAN | LocalService connects directly over the local LAN when the workstation shares the DVR subnet; otherwise it uses the approved Tailscale subnet route |
 
-The Remote workstation does not start a second go2rtc/FFmpeg pipeline. The gateway remains authoritative for the compact stream and retains its DVR password. Native LocalService runs on the viewer, so that viewer stores its own DVR password locally; the gateway password is never returned through the API. Gateway host, port, channel, stream, and username changes synchronize to the viewer so both playback paths target the same source.
+In Remote mode the gateway relay remains preferred. A workstation-side go2rtc/FFmpeg pipeline starts only as a camera fallback when the relay cannot provide a valid HLS stream and the configured DVR RTSP port is directly reachable. This does not switch operation mode: inverter telemetry, history, writes, replication, and forecasts remain gateway-authoritative. Native LocalService and direct HLS use the DVR password saved locally on that viewer; the gateway password is never returned through the API. Gateway host, port, channel, stream, and username changes synchronize to the viewer when the gateway supports the Hikvision routes.
 
-During a rolling deployment, an older gateway may not yet expose `/api/hikvision/*`. The viewer detects and contains that HTML/404 response instead of sending it to the HLS parser or displaying markup inside the camera card. Remote mode never starts a viewer-side transcoder: update or restart the gateway to enable compact playback.
+In **Complete Remote mode**—where the workstation is outside the plant LAN and has no approved DVR subnet route—the workstation cannot create camera HLS itself. A compatible gateway Hikvision relay is therefore required. If both the gateway relay and direct DVR route are unavailable, the modal reports **No reachable HLS path**, disables route-dependent actions, and tells the operator to update/restart the gateway camera relay or approve the least-privilege DVR `/32` route. It does not start an idle local transcoder or misreport an HTML response as HLS.
+
+During a rolling deployment, an older gateway may not expose `/api/hikvision/*`, may return HTML with HTTP 200, or may have an unhealthy camera service. The viewer validates the playlist before Hls.js sees it, contains invalid markup, marks the relay degraded, and selects the direct workstation path when available.
 
 For least privilege, configure the gateway as a Tailscale subnet router advertising only the DVR host, for example `192.168.1.12/32`, instead of the entire plant subnet. Approve that route in the Tailscale admin console and grant only approved viewer devices access to the configured SDK/HTTP and RTSP ports (normally TCP `80` and `554`). The **Secure Stream Paths** panel and **Check Routes** button report:
 
-- whether the dashboard card is local or gateway-relayed
+- whether the dashboard card is gateway-relayed or using workstation-direct HLS
 - whether this workstation can reach the DVR's SDK port for native playback
-- whether Tailscale is installed and connected
+- whether the DVR is on the workstation's local subnet; Tailscale is shown as optional in that case
+- whether Tailscale is installed and connected when a subnet route is required
 - the recommended `/32` route when native playback is blocked
 
 The route check is read-only. It opens bounded TCP connectivity probes and never starts video, changes the DVR, or activates a microphone.
@@ -1892,7 +1897,7 @@ The route check is read-only. It opens bounded TCP connectivity probes and never
 | Windows title-bar controls | Move, resize, minimize, maximize/restore, or close the native viewer; closing stops the decoder and resumes H.264 HLS |
 | `Playback Mode` | Selects hybrid HLS/native playback, compatible snapshots, or diagnostic direct HLS |
 | `SDK / HTTP` | Port used by LocalService native playback; default `80` |
-| `Secure Stream Paths` / `Check Routes` | Shows gateway-relay, direct-native, and Tailscale readiness without starting playback |
+| Mode banner and `Secure Stream Paths` / `Check Routes` | Separates Gateway-hosted playback from Remote relay/direct-fallback behavior and reports the active LAN or Tailscale route without starting playback |
 | `Verify Connection` | Saves the current fields and verifies the browser-safe HLS stream against the DVR |
 | `Prepare H.264 Substream` | Converts only the selected channel's xx02 profile to browser-compatible H.264 after confirmation |
 | `Save & View` | Persists the Hikvision configuration and reconnects the dedicated card |
@@ -1909,9 +1914,10 @@ The route check is read-only. It opens bounded TCP connectivity probes and never
 | Service controls hidden | Remote operation mode | Switch to Gateway mode in Settings > Connectivity |
 | Status shows `error` | 3+ consecutive crashes | Check RTSP source and `go2rtc.yaml` config, then manually restart |
 | Hikvision card stays on “Starting” | The Hikvision media service is unavailable, the DVR is unreachable, or the local DVR login failed | Verify the DVR/LAN connection, then use `Verify Connection` |
+| Remote gateway relay is unavailable | The gateway is older, its camera service is unhealthy, or it returned a non-HLS response | Use **Check Routes**. If RTSP is reachable, the viewer selects direct HLS automatically; otherwise restore the gateway relay or the DVR subnet route |
 | HLS works but the native viewer is blank | Hikvision LocalService is unavailable or blocked on the workstation | Start LocalService and select **Retry**, or close the viewer with the normal Windows close button |
 | Remote card works but native viewer is blocked | The gateway relay is healthy, but the viewer has no approved route to the DVR or no viewer-local DVR password | Advertise and approve the DVR `/32` route, allow the SDK/RTSP ports in the tailnet grant, enter the password on the viewer, then use **Check Routes** |
-| Secure Stream Paths shows Tailscale offline | Tailscale is stopped or signed out on the Remote workstation | Connect Tailscale, confirm the correct tailnet, then rerun **Check Routes** |
+| Secure Stream Paths shows Tailscale offline | Tailscale is stopped or signed out on a workstation that is not on the DVR's local subnet | If the modal says **local LAN active**, no action is required. Otherwise connect Tailscale, confirm the correct tailnet, then rerun **Check Routes** |
 | Hikvision profile or stream is unavailable | DVR IP, RTSP account, or LAN route is incorrect | Verify the DVR is reachable, then use `Test Stream` |
 
 ---

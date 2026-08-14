@@ -14,6 +14,12 @@ const PROGRAMDATA_ROOT = path.join(
 );
 const API_HOST = "127.0.0.1";
 const API_PORT = 1994;
+// go2rtc's FFmpeg source publishes its transcoded output back through the
+// embedded RTSP module. The general Tapo go2rtc instance owns the default
+// 8554 port, so the Hikvision instance needs an isolated loopback listener.
+// If this listener cannot bind, go2rtc otherwise stays alive while returning
+// an empty HTTP 200 HLS manifest for hikvision_browser.
+const RTSP_PORT = 8564;
 const WEBRTC_PORT = 8565;
 const STREAM_DIRECT = "hikvision_direct";
 const STREAM_BROWSER = "hikvision_browser";
@@ -29,6 +35,7 @@ let healthTimer = null;
 let lastHealthTs = 0;
 let crashCount = 0;
 let stopping = false;
+let startPromise = null;
 const digestCache = new Map();
 const isapiAgent = new http.Agent({ keepAlive: true, maxSockets: 6, maxFreeSockets: 4 });
 
@@ -177,6 +184,7 @@ function writeRuntimeConfig(cfg) {
     // The dashboard is served from localhost:3500 while this isolated player
     // listens only on loopback:1994. Allow that cross-origin WebSocket handshake.
     api: { listen: `${API_HOST}:${API_PORT}`, origin: "*" },
+    rtsp: { listen: `${API_HOST}:${RTSP_PORT}` },
     webrtc: { listen: `${API_HOST}:${WEBRTC_PORT}` },
     ffmpeg: {
       // The DVR's HEVC stream does not tolerate go2rtc's default
@@ -373,7 +381,7 @@ async function waitUntilReady() {
   while (Date.now() < deadline) {
     try {
       const r = await requestLocal("/api/streams", 1000);
-      if (r.statusCode > 0 && r.statusCode < 500) return true;
+      if (r.statusCode > 0 && r.statusCode < 500 && await isPortListening(RTSP_PORT)) return true;
     } catch (_) {}
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
@@ -408,6 +416,23 @@ function isPortFree(port) {
   });
 }
 
+function isPortListening(port, timeoutMs = 500) {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host: API_HOST, port });
+    let settled = false;
+    const finish = (listening) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(listening);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once("connect", () => finish(true));
+    socket.once("timeout", () => finish(false));
+    socket.once("error", () => finish(false));
+  });
+}
+
 function terminateProcessTree(proc) {
   if (!proc || !Number.isInteger(proc.pid) || proc.pid <= 0) return;
   if (process.platform !== "win32") {
@@ -429,16 +454,13 @@ function terminateProcessTree(proc) {
   }
 }
 
-async function start(configRaw) {
-  const cfg = sanitizeConfig(configRaw);
+async function performStart(cfg) {
   if (!cfg.enabled) return { ok: false, error: "Hikvision camera is disabled" };
   if (!cfg.password) return { ok: false, error: "Hikvision DVR password is not configured" };
-  if (child && child.exitCode === null) {
-    return { ok: true, already: true, pid: child.pid, ...getStatus() };
-  }
   const exe = resolveGo2rtcPath();
   if (!exe) return { ok: false, error: "Bundled go2rtc binary not found" };
   if (!(await isPortFree(API_PORT))) return { ok: false, error: `Hikvision media port ${API_PORT} is already in use` };
+  if (!(await isPortFree(RTSP_PORT))) return { ok: false, error: `Hikvision internal RTSP port ${RTSP_PORT} is already in use` };
   if (!(await isPortFree(WEBRTC_PORT))) return { ok: false, error: `Hikvision WebRTC port ${WEBRTC_PORT} is already in use` };
 
   const configPath = writeRuntimeConfig(cfg);
@@ -490,6 +512,24 @@ async function start(configRaw) {
   lastHealthTs = Date.now();
   startHealthLoop();
   return { ok: true, pid: child?.pid || null, ...getStatus() };
+}
+
+function start(configRaw) {
+  const cfg = sanitizeConfig(configRaw);
+  // The card, settings status, and an explicit Retry can request startup at
+  // nearly the same time. Every caller must await the same readiness check;
+  // seeing a spawned child process is not enough because its API may not be
+  // listening yet.
+  if (startPromise) return startPromise;
+  if (child && child.exitCode === null) {
+    return Promise.resolve({ ok: true, already: true, pid: child.pid, ...getStatus() });
+  }
+  const operation = performStart(cfg);
+  const wrapped = operation.finally(() => {
+    if (startPromise === wrapped) startPromise = null;
+  });
+  startPromise = wrapped;
+  return wrapped;
 }
 
 function stop() {
@@ -548,6 +588,7 @@ function getStatus() {
     crashCount,
     lastHealthTs,
     apiPort: API_PORT,
+    rtspPort: RTSP_PORT,
     webrtcPort: WEBRTC_PORT,
     selectedStream: selectedStream(),
     config: sanitizeConfig(activeConfig || {}, { redact: true }),
@@ -597,7 +638,11 @@ function proxyMedia(req, res, configRaw) {
   const suffix = String(req.params?.[0] || "master.m3u8").replace(/^\/+/, "");
   let upstreamPath;
   if (suffix === "master.m3u8") {
-    upstreamPath = `/api/stream.m3u8?src=${encodeURIComponent(selectedStream(cfg))}`;
+    // go2rtc 1.9.x MPEG-TS HLS can expose video-only TS fragments without
+    // transport program tables, which hls.js rejects as fragParsingError.
+    // Its official fragmented-MP4 HLS output supplies an init segment and
+    // standards-compliant .m4s fragments that Chromium can append directly.
+    upstreamPath = `/api/stream.m3u8?src=${encodeURIComponent(selectedStream(cfg))}&mp4`;
   } else if (suffix.startsWith("hls/")) {
     upstreamPath = `/api/${suffix}${req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : ""}`;
   } else {

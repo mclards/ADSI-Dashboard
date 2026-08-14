@@ -2,12 +2,20 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Repo/package version baseline:** 2.12.4
+- **Repo/package version baseline:** 2.12.5
 - **Operator-noted deployed server-side app version:** 2.2.32
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
 - **Version source-of-truth rule:** `package.json` is the repo version source of truth; hardcoded footer/about strings may lag and must not be trusted blindly.
+
+## v2.12.5 Changes — Adaptive Hikvision remote routing and flexible camera windows (2026-08-14)
+- **Complete Remote Hikvision delivery:** Gateway HLS remains preferred, manifests are validated before playback, and a directly reachable LAN/Tailscale DVR route is used only when available. Complete Remote mode now reports a blocked route instead of launching an unusable viewer-side transcoder.
+- **Hikvision native viewer reliability:** LocalService waits for and rebinds to its dedicated Electron window, uses corrected SDK authentication, and falls back between SDK and RTSP playback attempts when necessary.
+- **Gateway Hikvision HLS hardening:** Dedicated internal RTSP binding, serialized media-service startup, fragmented-MP4 HLS, authenticated child-path rewriting, and invalid-manifest containment address black video and manifest parsing failures.
+- **Mode-specific camera settings:** Gateway-host and Remote-viewer behavior now have separate context banners, route labels, service scopes, status guidance, and action availability.
+- **Flexible camera windows:** Hikvision and Tapo viewers use standard resizable Electron frames with 480×300 minimums. The Tapo viewer contains only its video surface inside the operating-system frame.
+- **Lifecycle coverage and documentation:** Added route/fallback, compact-window, page-ownership, and full-bleed smoke coverage; synchronized the HTML, Markdown, and PDF user guides.
 
 ## v2.12.4 Changes — Camera resilience, unified configuration, and alarm acknowledgement sync (2026-08-14)
 - **Hikvision hybrid/native viewer hardening:** Added a dedicated native-viewer surface and lifecycle controls, with browser/native readiness diagnostics and safer password handling that never returns or logs the stored camera password.

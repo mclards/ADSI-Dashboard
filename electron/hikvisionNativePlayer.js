@@ -5,6 +5,9 @@ const WebSocket = require("ws");
 
 const SERVICE_URL = "ws://127.0.0.1:33686";
 const REQUEST_TIMEOUT_MS = 8000;
+const WINDOW_BIND_DELAY_MS = 350;
+const OWNER_VISIBLE_TIMEOUT_MS = 5000;
+const PLAY_READY_TIMEOUT_MS = 8000;
 
 let socket = null;
 let uuid = "";
@@ -64,6 +67,101 @@ function geometryOf(rect) {
     width: rect.width,
     height: rect.height,
   };
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function waitForOwnerVisible(owner, expectedGeneration) {
+  if (!owner || owner.isDestroyed()) {
+    return Promise.reject(new Error("Hikvision native viewer is unavailable"));
+  }
+  if (owner?.isVisible?.()) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => finish(new Error("Hikvision native viewer did not become visible")), OWNER_VISIBLE_TIMEOUT_MS);
+    const onShow = () => finish();
+    const onClosed = () => finish(new Error("Hikvision native viewer closed before playback started"));
+    const finish = (error) => {
+      clearTimeout(timer);
+      try { owner.removeListener("show", onShow); } catch (_) {}
+      try { owner.removeListener("closed", onClosed); } catch (_) {}
+      if (error) reject(error);
+      else {
+        try { assertGeneration(expectedGeneration); resolve(); } catch (err) { reject(err); }
+      }
+    };
+    owner.once("show", onShow);
+    owner.once("closed", onClosed);
+  });
+}
+
+async function setOwnerDocumentTitle(owner, title) {
+  if (!owner || owner.isDestroyed()) return;
+  const value = JSON.stringify(String(title || ""));
+  try {
+    await owner.webContents.executeJavaScript(`document.title = ${value}; document.title`, true);
+  } catch (_) {
+    owner.setTitle(String(title || ""));
+  }
+}
+
+async function withOwnerIdentity(owner, operation) {
+  const originalTitle = owner.getTitle();
+  try {
+    await setOwnerDocumentTitle(owner, uuid);
+    owner.setTitle(uuid);
+    // Hikvision's own LocalService client waits 300 ms for the Chromium HWND
+    // title to propagate before asking the service to locate its parent.
+    await delay(WINDOW_BIND_DELAY_MS);
+    return await operation();
+  } finally {
+    if (!owner.isDestroyed()) {
+      await setOwnerDocumentTitle(owner, originalTitle);
+      owner.setTitle(originalTitle);
+    }
+  }
+}
+
+function buildPlaybackAttempts(config) {
+  const channel = Math.max(1, Math.min(32, Number(config.channel) || 1));
+  const streamSuffix = config.stream === "sub" ? "02" : "01";
+  const channelId = `${channel}${streamSuffix}`;
+  const sourceId = Number(channelId) - 1;
+  const httpPort = Math.max(1, Math.min(65535, Number(config.httpPort) || 80));
+  const rtspPort = Math.max(1, Math.min(65535, Number(config.rtspPort) || 554));
+  return [
+    {
+      label: "SDK/HTTP",
+      url: `http://${config.host}:${httpPort}/SDK/play/${sourceId}/004`,
+      auth: Buffer.from(`:::2:${config.username}:${config.password}`, "utf8").toString("base64"),
+    },
+    {
+      label: "RTSP",
+      url: `rtsp://${config.host}:${rtspPort}/ISAPI/streaming/channels/${channelId}`,
+      auth: Buffer.from(`${config.username}:${config.password}`, "utf8").toString("base64"),
+    },
+  ];
+}
+
+function extractPlayInfo(response) {
+  const candidates = [response?.playInfo?.playInfo, response?.playInfo, response];
+  return candidates.find((value) => value?.pictureSize && typeof value.pictureSize === "object") || {};
+}
+
+async function waitForPlaybackInfo(expectedGeneration, timeoutMs = PLAY_READY_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  let latest = {};
+  while (Date.now() < deadline) {
+    assertGeneration(expectedGeneration);
+    const response = await request("video.getPlayInfo", { wndIndex: 0 }, 2500).catch(() => null);
+    latest = extractPlayInfo(response);
+    const width = Number(latest?.pictureSize?.width) || 0;
+    const height = Number(latest?.pictureSize?.height) || 0;
+    if (width > 0 && height > 0) return latest;
+    await delay(300);
+  }
+  return latest;
 }
 
 function settlePending(error) {
@@ -146,20 +244,20 @@ function connectService(expectedGeneration) {
   });
 }
 
-async function createNativeWindow(owner, rect) {
-  const originalTitle = owner.getTitle();
-  try {
-    owner.setTitle(uuid);
-    await new Promise((resolve) => setTimeout(resolve, 120));
+async function createNativeWindow(owner, rect, expectedGeneration) {
+  await waitForOwnerVisible(owner, expectedGeneration);
+  assertGeneration(expectedGeneration);
+  await withOwnerIdentity(owner, async () => {
     await request("window.destroyWnd").catch(() => {});
     await request("window.createWnd", {
       rect: geometryOf(rect),
       className: "Chrome",
       embed: true,
     });
-  } finally {
-    if (!owner.isDestroyed()) owner.setTitle(originalTitle);
-  }
+    // Re-resolve the parent while the dedicated viewer still carries the
+    // LocalService UUID. This prevents attachment to another Chromium window.
+    await request("window.updateParentWnd").catch(() => {});
+  });
   await request("video.arrangeWindow", { type: 1, custom: [] });
   await request("video.setWndRatioMode", { wndIndex: 0, mode: 0, allWnd: false }).catch(() => {});
 }
@@ -230,29 +328,40 @@ function start(owner, config, rect) {
     try {
       await connectService(runGeneration);
       assertGeneration(runGeneration);
-      await createNativeWindow(owner, currentRect);
+      await createNativeWindow(owner, currentRect, runGeneration);
       assertGeneration(runGeneration);
 
-      const channel = Math.max(1, Math.min(32, Number(config.channel) || 1));
-      const streamSuffix = config.stream === "sub" ? "02" : "01";
-      const sourceId = Number(`${channel}${streamSuffix}`) - 1;
-      const httpPort = Math.max(1, Math.min(65535, Number(config.httpPort) || 80));
-      const auth = Buffer.from(`:::2:${config.username}:${config.password}`, "utf8").toString("base64");
-      await request("video.startPlay", {
-        url: `http://${config.host}:${httpPort}/SDK/play/${sourceId}/004`,
-        token: "",
-        auth,
-        wndIndex: 0,
-        startTime: "",
-        stopTime: "",
-      }, 12000);
-      assertGeneration(runGeneration);
+      let playbackStarted = false;
+      for (const attempt of buildPlaybackAttempts(config)) {
+        assertGeneration(runGeneration);
+        await request("video.stop", { wndIndex: 0 }, 2500).catch(() => {});
+        try {
+          await request("video.startPlay", {
+            url: attempt.url,
+            token: "",
+            auth: attempt.auth,
+            wndIndex: 0,
+            startTime: "",
+            stopTime: "",
+          }, 12000);
+          assertGeneration(runGeneration);
+          const info = await waitForPlaybackInfo(runGeneration);
+          const width = Number(info?.pictureSize?.width) || 0;
+          const height = Number(info?.pictureSize?.height) || 0;
+          if (width > 0 && height > 0) {
+            playInfo = info;
+            playbackStarted = true;
+            break;
+          }
+        } catch (err) {
+          assertGeneration(runGeneration);
+        }
+      }
+      if (!playbackStarted) {
+        throw new Error("Hikvision native video did not start. Verify the DVR password and ports, then Retry.");
+      }
       running = true;
       visible = true;
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-      assertGeneration(runGeneration);
-      playInfo = await request("video.getPlayInfo", { wndIndex: 0 }).catch(() => ({}));
-      assertGeneration(runGeneration);
       return status();
     } catch (err) {
       await cleanupNative();
@@ -299,10 +408,13 @@ function hide(owner) {
 async function showCurrent() {
   if (!running) return status();
   if (ownerWindow?.isDestroyed()) return status();
-  if (currentRect) {
-    await request("window.setWndGeometry", { rect: geometryOf(currentRect) }).catch(() => {});
-  }
-  await request("window.showWnd").catch(() => {});
+  await withOwnerIdentity(ownerWindow, async () => {
+    await request("window.updateParentWnd").catch(() => {});
+    if (currentRect) {
+      await request("window.setWndGeometry", { rect: geometryOf(currentRect) }).catch(() => {});
+    }
+    await request("window.showWnd").catch(() => {});
+  });
   visible = true;
   return status();
 }
@@ -357,5 +469,5 @@ module.exports = {
   hide,
   show,
   status,
-  __test: { sanitizeRect },
+  __test: { sanitizeRect, buildPlaybackAttempts, extractPlayInfo },
 };

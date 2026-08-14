@@ -72,6 +72,75 @@ test.describe("Electron UI smoke", () => {
       await expect(mainWindow.locator("#totalPac")).not.toHaveText(/^\s*[—-]?\s*$/);
       await expect(mainWindow.locator("#totalKwh")).not.toHaveText(/^\s*[—-]?\s*$/);
 
+      const tapoCard = mainWindow.locator("#cameraCard");
+      await expect(tapoCard).toBeVisible({ timeout: 30000 });
+      await expect(mainWindow.locator("#btnCamPopout")).toHaveCount(0);
+      await expect(mainWindow.locator("#btnCamFullscreen")).toBeVisible();
+      await mainWindow.locator("#btnCamFullscreen").click();
+      const tapoViewer = await waitForWindow(
+        electronApp,
+        async (page, url) => {
+          if (!url.includes("popout=camera")) return false;
+          await page.waitForLoadState("domcontentloaded");
+          return true;
+        },
+        30000,
+      );
+      await expect(tapoViewer).toHaveTitle("ADSI – Tapo Camera Viewer");
+      const tapoWindowState = await electronApp.evaluate(({ BrowserWindow }) => {
+        const win = BrowserWindow.getAllWindows().find((candidate) =>
+          candidate.webContents.getURL().includes("popout=camera"),
+        );
+        if (!win) return null;
+        win.setSize(480, 300);
+        return {
+          fullscreen: win.isFullScreen(),
+          maximized: win.isMaximized(),
+          resizable: win.isResizable(),
+          minimizable: win.isMinimizable(),
+          maximizable: win.isMaximizable(),
+          minimumSize: win.getMinimumSize(),
+        };
+      });
+      expect(tapoWindowState).toEqual({
+        fullscreen: false,
+        maximized: false,
+        resizable: true,
+        minimizable: true,
+        maximizable: true,
+        minimumSize: [480, 300],
+      });
+      await expect(tapoViewer.locator("#page-camera")).toBeVisible({ timeout: 30000 });
+      await expect(tapoViewer.locator("#cameraCard")).toBeVisible();
+      await expect(tapoViewer.locator("#btnCamFullscreen")).toBeHidden();
+      await expect(tapoViewer.locator("#camLabel")).toBeHidden();
+      await expect(tapoViewer.locator("#camLiveDot")).toBeHidden();
+      await expect(tapoViewer.locator("#camControls")).toBeHidden();
+      await expect(tapoViewer.locator("#cameraOverlay")).toBeHidden();
+      await expect(tapoViewer.locator("#chatBubble")).toBeHidden();
+      await expect(tapoViewer.locator("#alarmToast")).toBeHidden();
+      await tapoViewer.waitForTimeout(500);
+      const tapoLayout = await tapoViewer.evaluate(() => {
+        const card = document.getElementById("cameraCard").getBoundingClientRect();
+        return {
+          top: card.top,
+          left: card.left,
+          width: card.width,
+          height: card.height,
+          viewportWidth: innerWidth,
+          viewportHeight: innerHeight,
+        };
+      });
+      expect(tapoLayout.top).toBeLessThanOrEqual(1);
+      expect(tapoLayout.left).toBeLessThanOrEqual(1);
+      expect(tapoLayout.width).toBeGreaterThanOrEqual(tapoLayout.viewportWidth - 1);
+      expect(tapoLayout.height).toBeGreaterThanOrEqual(tapoLayout.viewportHeight - 1);
+      await tapoViewer.close();
+      await expect.poll(
+        () => electronApp.windows().filter((page) => page.url().includes("popout=camera")).length,
+        { timeout: 15000 },
+      ).toBe(0);
+
       const hikvisionCard = mainWindow.locator("#hikvisionCard");
       await expect(hikvisionCard).toBeVisible({ timeout: 30000 });
       await expect(mainWindow.locator("#btnHikvisionSettings")).toBeVisible();
@@ -108,7 +177,7 @@ test.describe("Electron UI smoke", () => {
         resizable: true,
         minimizable: true,
         maximizable: true,
-        minimumSize: [900, 600],
+        minimumSize: [480, 300],
       });
       await expect(nativeViewer.locator("#nativeSurface")).toBeVisible();
       await expect(nativeViewer.locator("#nativeExit")).toHaveCount(0);
@@ -136,6 +205,22 @@ test.describe("Electron UI smoke", () => {
 
       await mainWindow.locator("#btnHikvisionSettings").click();
       await expect(mainWindow.locator("#hikSettingsModal")).toBeVisible();
+      const hikOperationMode = await mainWindow.locator("#hikOperationBadge").getAttribute("data-mode");
+      expect(["gateway", "remote"]).toContain(hikOperationMode);
+      await expect(mainWindow.locator("#hikOperationBadge")).toHaveText(
+        hikOperationMode === "remote" ? "Remote mode" : "Gateway mode",
+      );
+      await expect(mainWindow.locator("#hikOperationBanner")).toHaveAttribute("data-mode", hikOperationMode);
+      await expect(mainWindow.locator("#hikOperationTitle")).toHaveText(
+        hikOperationMode === "remote" ? "Remote camera viewer" : "Gateway camera host",
+      );
+      if (hikOperationMode === "remote") {
+        await expect(mainWindow.locator("#hikServiceTitle")).toHaveText(
+          /^(Gateway Relay Playback|Workstation Direct Playback|Remote Camera Route Unavailable)$/,
+        );
+      } else {
+        await expect(mainWindow.locator("#hikServiceTitle")).toHaveText("Gateway Hikvision Playback");
+      }
       await expect(mainWindow.locator("#hikRoutePanel")).toBeVisible();
       await expect(mainWindow.locator("#hikCompactPath")).not.toHaveText("Checking...", { timeout: 15000 });
       await expect(mainWindow.locator("#btnHikRouteCheck")).toBeVisible();

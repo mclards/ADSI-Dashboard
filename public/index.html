@@ -4015,11 +4015,16 @@ Hover any pill in the column for the row-specific explanation.">Anchor</th>
             </span>
           </div>
           <div class="hik-header-actions">
+            <span class="hik-operation-badge" id="hikOperationBadge" data-mode="gateway">Gateway mode</span>
             <span class="hik-status-pill" id="hikHeaderStatus" data-state="checking"><span></span> Checking</span>
           <button class="auth-modal-close" id="btnHikModalClose" type="button" aria-label="Close">&times;</button>
           </div>
         </div>
         <div class="cam-settings-body">
+          <div class="hik-operation-banner" id="hikOperationBanner" data-mode="gateway">
+            <span class="hik-operation-icon mdi mdi-server-network"></span>
+            <span><strong id="hikOperationTitle">Gateway camera host</strong><small id="hikOperationDescription">This computer hosts dashboard HLS and reaches the DVR directly over the plant LAN.</small></span>
+          </div>
           <div class="hik-config-note">
             <span class="mdi mdi-shield-lock-outline"></span>
             <span id="hikDeliveryNote">Uses the DVR's local account. Hik-Connect cloud credentials and camera access codes are not required.</span>
@@ -4069,7 +4074,7 @@ Hover any pill in the column for the row-specific explanation.">Anchor</th>
             <section class="hik-settings-panel">
               <div class="hik-panel-heading">
                 <span class="hik-panel-icon mdi mdi-lan-connect"></span>
-                <span><strong>DVR Connection</strong><small>Local network and login</small></span>
+                <span><strong>DVR Connection</strong><small id="hikConnectionSubtitle">Plant LAN and DVR login</small></span>
               </div>
               <div class="cam-field-row">
                 <div class="hik-grow-2">
@@ -4105,7 +4110,7 @@ Hover any pill in the column for the row-specific explanation.">Anchor</th>
             <section class="hik-settings-panel">
               <div class="hik-panel-heading">
                 <span class="hik-panel-icon mdi mdi-video-wireless-outline"></span>
-                <span><strong>Channel &amp; Playback</strong><small>Source and dashboard view</small></span>
+                <span><strong>Channel &amp; Playback</strong><small id="hikPlaybackSubtitle">Gateway source and dashboard view</small></span>
               </div>
               <div class="cam-field-row hik-channel-row">
                 <div>
@@ -4144,20 +4149,20 @@ Hover any pill in the column for the row-specific explanation.">Anchor</th>
             <div class="hik-profile-main">
               <span class="hik-profile-icon mdi mdi-tune-variant"></span>
               <span>
-                <span class="hik-profile-label">Channel <span id="hikSubstreamId">--02</span> browser profile</span>
+                <span class="hik-profile-label" id="hikProfileScope">Gateway channel <span id="hikSubstreamId">--02</span> browser profile</span>
                 <strong class="hik-substream-value" id="hikSubstreamProfile">Checking DVR...</strong>
               </span>
             </div>
             <div class="hik-profile-note">
               <span class="mdi mdi-information-outline"></span>
-              <span>Preparing H.264 changes only the selected substream. Main recording <strong>xx01</strong> stays unchanged.</span>
+              <span id="hikProfileNoteText">Preparing H.264 changes only the selected substream on the gateway DVR. Main recording <strong>xx01</strong> stays unchanged.</span>
             </div>
             <button class="btn btn-outline btn-sm hik-profile-action" id="btnHikOptimize" type="button"><span class="mdi mdi-video-check-outline"></span> Prepare H.264</button>
           </section>
 
           <section class="hik-service-panel">
             <div class="hik-service-title">
-              <span><span class="mdi mdi-cog-play-outline"></span> Hikvision Playback</span>
+              <span><span class="mdi mdi-cog-play-outline"></span> <span id="hikServiceTitle">Gateway Hikvision Playback</span></span>
               <label class="cam-auto-start-label">
                 <input type="checkbox" id="hikAutoStart" />
                 <span>Start with dashboard</span>
@@ -4170,8 +4175,8 @@ Hover any pill in the column for the row-specific explanation.">Anchor</th>
                 <div class="cam-service-item"><div class="cam-service-label">Connection</div><div class="cam-service-value" id="hikServiceHealth">-</div></div>
               </div>
               <div class="cam-service-btns hik-service-btns">
-                <button id="btnHikStart" class="btn btn-outline btn-sm" type="button"><span class="mdi mdi-play-circle-outline"></span> Start</button>
-                <button id="btnHikStop" class="btn btn-outline btn-sm" type="button"><span class="mdi mdi-stop-circle-outline"></span> Stop</button>
+                <button id="btnHikStart" class="btn btn-outline btn-sm" type="button"><span class="mdi mdi-play-circle-outline"></span> <span id="hikStartLabel">Start</span></button>
+                <button id="btnHikStop" class="btn btn-outline btn-sm" type="button"><span class="mdi mdi-stop-circle-outline"></span> <span id="hikStopLabel">Stop</span></button>
               </div>
             </div>
           </section>

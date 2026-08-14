@@ -5678,18 +5678,83 @@ function buildRemoteProxyHeaders(tokenOverride = "") {
   return headers;
 }
 
+function ipv4ToUint32(value) {
+  if (net.isIP(String(value || "").trim()) !== 4) return null;
+  return String(value).split(".").reduce((acc, part) => ((acc << 8) | Number(part)) >>> 0, 0);
+}
+
+function isHostOnLocalSubnet(host, interfaces = os.networkInterfaces()) {
+  const hostValue = ipv4ToUint32(host);
+  if (hostValue == null) return false;
+  return Object.values(interfaces || {}).flat().some((entry) => {
+    if (!entry || entry.internal || !["IPv4", "4"].includes(String(entry.family))) return false;
+    const address = ipv4ToUint32(entry.address);
+    const mask = ipv4ToUint32(entry.netmask);
+    return address != null && mask != null && (hostValue & mask) === (address & mask);
+  });
+}
+
+function classifyHikvisionDirectRoute(host, tailscaleConnected = false) {
+  if (isHostOnLocalSubnet(host)) return "lan-direct";
+  return tailscaleConnected ? "tailscale-direct" : "direct";
+}
+
+function isRemoteHikvisionRelayUsable() {
+  if (!["missing", "degraded"].includes(remoteHikvisionRelayCapability)) return true;
+  // A failed relay must not remain disabled forever after a gateway restart or
+  // rolling upgrade. Let the next camera request probe it again after a quiet
+  // minute; an invalid response immediately returns to direct fallback.
+  return Date.now() - remoteHikvisionRelayCapabilityAt >= 60000;
+}
+
+function shouldUseLocalHikvisionFallback() {
+  return isRemoteMode() && !isRemoteHikvisionRelayUsable();
+}
+
 function buildHikvisionDeliveryMetadata() {
   const remote = isRemoteMode();
+  const config = readHikvisionConfig();
+  const directRoute = classifyHikvisionDirectRoute(config.host);
+  const directState = getRemoteHikvisionDirectRouteState(config.host);
+  const relayAvailable = remote ? isRemoteHikvisionRelayUsable() : true;
+  const localFallback = remote && !relayAvailable && directState?.rtspReachable === true;
   return {
     operationMode: remote ? "remote" : "gateway",
-    compactPath: remote ? "gateway-relay" : "local-hls",
-    nativePath: remote ? "tailscale-direct" : "local-direct",
+    compactPath: remote
+      ? relayAvailable ? "gateway-relay" : localFallback ? `${directRoute}-hls` : "unavailable"
+      : "local-hls",
+    nativePath: remote ? directRoute : "local-direct",
     gatewayUrl: remote ? getRemoteGatewayBaseUrl() : "",
-    relayAvailable: remote ? remoteHikvisionRelayCapability !== "missing" : true,
+    relayAvailable,
+    localFallback,
+    directRouteChecked: Boolean(directState),
   };
 }
 
 let remoteHikvisionRelayCapability = "unknown";
+let remoteHikvisionRelayCapabilityAt = 0;
+let remoteHikvisionDirectRouteState = null;
+
+function getRemoteHikvisionDirectRouteState(host) {
+  if (!remoteHikvisionDirectRouteState) return null;
+  if (String(remoteHikvisionDirectRouteState.host || "") !== String(host || "")) return null;
+  if (Date.now() - Number(remoteHikvisionDirectRouteState.checkedAt || 0) > 60000) return null;
+  return remoteHikvisionDirectRouteState;
+}
+
+function setRemoteHikvisionDirectRouteState(host, values = {}) {
+  remoteHikvisionDirectRouteState = {
+    host: String(host || ""),
+    sdkReachable: values.sdkReachable === true,
+    rtspReachable: values.rtspReachable === true,
+    checkedAt: Date.now(),
+  };
+}
+
+function setRemoteHikvisionRelayCapability(value) {
+  remoteHikvisionRelayCapability = String(value || "unknown");
+  remoteHikvisionRelayCapabilityAt = Date.now();
+}
 
 function isMissingRemoteHikvisionRoute(result) {
   if (Number(result?.status || 0) !== 404) return false;
@@ -5697,7 +5762,7 @@ function isMissingRemoteHikvisionRoute(result) {
 }
 
 function markRemoteHikvisionRelayResult(result) {
-  remoteHikvisionRelayCapability = isMissingRemoteHikvisionRoute(result) ? "missing" : "available";
+  setRemoteHikvisionRelayCapability(isMissingRemoteHikvisionRoute(result) ? "missing" : "available");
 }
 
 async function requestRemoteGatewayJson(req, routePath = req.originalUrl, options = {}) {
@@ -5744,7 +5809,7 @@ function sendRemoteJsonResult(res, result) {
 }
 
 async function proxyRemoteHikvisionJson(req, res) {
-  if (remoteHikvisionRelayCapability === "missing") {
+  if (!isRemoteHikvisionRelayUsable()) {
     return res.status(503).json({
       ok: false,
       error: "Hikvision gateway relay is unavailable. Update or restart the gateway dashboard.",
@@ -5765,16 +5830,24 @@ async function proxyRemoteHikvisionJson(req, res) {
   }
 }
 
-function proxyHikvisionMediaToRemote(req, res) {
-  if (remoteHikvisionRelayCapability === "missing") {
-    return res.status(503).json({
-      ok: false,
-      error: "Hikvision gateway relay is unavailable. Update or restart the gateway dashboard.",
-    });
+function proxyHikvisionMediaToRemote(req, res, options = {}) {
+  if (!isRemoteHikvisionRelayUsable()) {
+    if (typeof options.fallback === "function") return options.fallback();
+    return res.status(503).json({ ok: false, error: "Hikvision gateway relay is unavailable." });
   }
   const base = getRemoteGatewayBaseUrl();
-  if (!base) return res.status(503).json({ ok: false, error: "Remote gateway URL is not configured." });
+  if (!base) {
+    if (typeof options.fallback === "function") {
+      setRemoteHikvisionRelayCapability("degraded");
+      return options.fallback();
+    }
+    return res.status(503).json({ ok: false, error: "Remote gateway URL is not configured." });
+  }
   if (isUnsafeRemoteLoop(base)) {
+    if (typeof options.fallback === "function") {
+      setRemoteHikvisionRelayCapability("degraded");
+      return options.fallback();
+    }
     return res.status(400).json({ ok: false, error: "Remote gateway URL cannot be localhost in remote mode." });
   }
 
@@ -5782,30 +5855,25 @@ function proxyHikvisionMediaToRemote(req, res) {
   try {
     target = new URL(`${base}${req.originalUrl}`);
   } catch (_) {
+    if (typeof options.fallback === "function") {
+      setRemoteHikvisionRelayCapability("degraded");
+      return options.fallback();
+    }
     return res.status(400).json({ ok: false, error: "Remote Hikvision media URL is invalid." });
   }
   const transport = target.protocol === "https:" ? https : http;
-  const upstream = transport.request(target, {
-    method: "GET",
-    headers: {
-      Accept: String(req.headers.accept || "*/*"),
-      ...buildRemoteProxyHeaders(),
-    },
-  }, (mediaRes) => {
-    if (Number(mediaRes.statusCode || 0) === 404) {
-      remoteHikvisionRelayCapability = "missing";
-      mediaRes.resume();
-      mediaRes.once("end", () => {
-        if (!res.headersSent) {
-          res.status(503).json({
-            ok: false,
-            error: "Hikvision gateway relay is unavailable. Update or restart the gateway dashboard.",
-          });
-        }
-      });
-      return;
-    }
-    remoteHikvisionRelayCapability = "available";
+  let fallbackStarted = false;
+  const startFallback = (reason = "") => {
+    if (fallbackStarted || res.headersSent || typeof options.fallback !== "function") return false;
+    fallbackStarted = true;
+    setRemoteHikvisionRelayCapability("degraded");
+    if (reason) console.warn(`[hikvision] Gateway media unavailable; using direct viewer route: ${reason}`);
+    Promise.resolve(options.fallback()).catch((err) => {
+      if (!res.headersSent) res.status(502).json({ ok: false, error: `Direct Hikvision fallback failed: ${err.message}` });
+    });
+    return true;
+  };
+  const copyMediaHeaders = (mediaRes) => {
     res.status(mediaRes.statusCode || 502);
     for (const name of [
       "content-type",
@@ -5818,12 +5886,63 @@ function proxyHikvisionMediaToRemote(req, res) {
     ]) {
       if (mediaRes.headers[name]) res.set(name, mediaRes.headers[name]);
     }
+  };
+  const upstream = transport.request(target, {
+    method: "GET",
+    headers: {
+      Accept: String(req.headers.accept || "*/*"),
+      ...buildRemoteProxyHeaders(),
+    },
+  }, (mediaRes) => {
+    const statusCode = Number(mediaRes.statusCode || 0);
+    if (statusCode === 404) setRemoteHikvisionRelayCapability("missing");
+    if (statusCode < 200 || statusCode >= 300) {
+      mediaRes.resume();
+      mediaRes.once("end", () => {
+        if (!startFallback(`gateway returned HTTP ${statusCode || 502}`) && !res.headersSent) {
+          res.status(503).json({
+            ok: false,
+            error: "Hikvision gateway relay is unavailable. Update or restart the gateway dashboard.",
+          });
+        }
+      });
+      return;
+    }
+
+    const isPlaylist = /\.m3u8(?:\?|$)/i.test(String(req.originalUrl || ""));
+    if (options.validateHlsManifest && isPlaylist) {
+      const chunks = [];
+      let size = 0;
+      mediaRes.on("data", (chunk) => {
+        size += chunk.length;
+        if (size <= 2 * 1024 * 1024) chunks.push(chunk);
+      });
+      mediaRes.once("end", () => {
+        const body = Buffer.concat(chunks);
+        const valid = size <= 2 * 1024 * 1024 && /^\uFEFF?\s*#EXTM3U(?:\r?\n|$)/i.test(body.toString("utf8"));
+        if (!valid) {
+          if (!startFallback("gateway returned an invalid HLS manifest") && !res.headersSent) {
+            res.status(502).json({ ok: false, error: "Hikvision gateway relay returned an invalid HLS manifest." });
+          }
+          return;
+        }
+        setRemoteHikvisionRelayCapability("available");
+        copyMediaHeaders(mediaRes);
+        res.send(body);
+      });
+      return;
+    }
+
+    setRemoteHikvisionRelayCapability("available");
+    copyMediaHeaders(mediaRes);
     mediaRes.pipe(res);
   });
   upstream.setTimeout(30000, () => upstream.destroy(new Error("Remote Hikvision media request timed out")));
   upstream.on("error", (err) => {
-    if (!res.headersSent) res.status(502).json({ ok: false, error: `Remote Hikvision media failed: ${err.message}` });
-    else res.end();
+    if (startFallback(err.message)) return;
+    if (!res.headersSent) {
+      res.status(502).json({ ok: false, error: `Remote Hikvision media failed: ${err.message}` });
+    } else res.end();
   });
   res.on("close", () => {
     if (!res.writableEnded) upstream.destroy();
@@ -13131,14 +13250,17 @@ app.get("/api/hikvision/config", (req, res) => {
       markRemoteHikvisionRelayResult(result);
       if (isMissingRemoteHikvisionRoute(result)) {
         const local = readHikvisionConfig();
+        const delivery = buildHikvisionDeliveryMetadata();
         return res.json({
           ok: true,
           config: {
             ...hikvisionManager.sanitizeConfig(local, { redact: true }),
             nativePasswordConfigured: Boolean(local.password),
           },
-          delivery: buildHikvisionDeliveryMetadata(),
-          warning: "Gateway Hikvision relay is unavailable. Update or restart the gateway before Remote-mode card playback.",
+          delivery,
+          warning: delivery.directRouteChecked && !delivery.localFallback
+            ? "Complete Remote mode has no reachable Hikvision camera path. Update the gateway relay or approve the DVR /32 Tailscale route."
+            : "Gateway Hikvision relay is unavailable. When this workstation can reach the DVR, camera playback will fall back to its direct LAN or Tailscale route.",
         });
       }
       if (result.status < 200 || result.status >= 300 || !result.data) return sendRemoteJsonResult(res, result);
@@ -13174,6 +13296,7 @@ app.post("/api/hikvision/config", async (req, res) => {
       if (isMissingRemoteHikvisionRoute(remote)) {
         setSetting("hikvisionConfig", JSON.stringify(config));
         if (hikvisionManager.getStatus().running) await hikvisionManager.stop();
+        const delivery = buildHikvisionDeliveryMetadata();
         return res.json({
           ok: true,
           config: {
@@ -13181,8 +13304,10 @@ app.post("/api/hikvision/config", async (req, res) => {
             nativePasswordConfigured: Boolean(config.password),
           },
           service: hikvisionManager.getStatus(),
-          delivery: buildHikvisionDeliveryMetadata(),
-          warning: "Gateway Hikvision relay is unavailable. Native settings were saved on this viewer, but Remote-mode card playback requires the gateway update.",
+          delivery,
+          warning: delivery.directRouteChecked && !delivery.localFallback
+            ? "Settings were saved, but Complete Remote mode has no reachable camera path. Update the gateway relay or approve the DVR /32 Tailscale route."
+            : "Gateway Hikvision relay is unavailable. Settings were saved on this viewer and direct camera playback will be used whenever the DVR is reachable.",
         });
       }
       if (remote.status < 200 || remote.status >= 300 || !remote.data) return sendRemoteJsonResult(res, remote);
@@ -13219,14 +13344,39 @@ app.post("/api/hikvision/config", async (req, res) => {
 });
 
 app.get("/api/hikvision/status", (req, res) => {
-  if (isRemoteMode()) return proxyRemoteHikvisionJson(req, res);
-  res.json({ ok: true, ...hikvisionManager.getStatus() });
+  if (isRemoteMode() && !shouldUseLocalHikvisionFallback()) return proxyRemoteHikvisionJson(req, res);
+  const localStatus = hikvisionManager.getStatus();
+  const delivery = buildHikvisionDeliveryMetadata();
+  const routeBlocked = isRemoteMode() && delivery.relayAvailable === false && !delivery.localFallback;
+  res.json({
+    ok: true,
+    ...localStatus,
+    running: routeBlocked ? false : localStatus.running,
+    source: routeBlocked ? "unavailable" : isRemoteMode() ? "viewer-direct" : "gateway-local",
+    error: routeBlocked ? "No reachable Hikvision HLS route in Complete Remote mode." : localStatus.error,
+    delivery,
+  });
 });
 
 app.post("/api/hikvision/start", async (req, res) => {
-  if (isRemoteMode()) return proxyRemoteHikvisionJson(req, res);
+  if (isRemoteMode() && !shouldUseLocalHikvisionFallback()) return proxyRemoteHikvisionJson(req, res);
   try {
-    const result = await hikvisionManager.start(readHikvisionConfig());
+    const config = readHikvisionConfig();
+    if (isRemoteMode()) {
+      const rtsp = await checkTcpReachability(config.host, Number(config.rtspPort || 554));
+      const previous = getRemoteHikvisionDirectRouteState(config.host);
+      setRemoteHikvisionDirectRouteState(config.host, {
+        sdkReachable: previous?.sdkReachable,
+        rtspReachable: rtsp.reachable,
+      });
+      if (!rtsp.reachable) {
+        return res.status(503).json({
+          ok: false,
+          error: `No Hikvision camera route is available. The gateway relay is unavailable and DVR ${config.host}:${Number(config.rtspPort || 554)} is not reachable from this workstation.`,
+        });
+      }
+    }
+    const result = await hikvisionManager.start(config);
     res.status(result.ok ? 200 : 400).json(result);
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -13234,7 +13384,7 @@ app.post("/api/hikvision/start", async (req, res) => {
 });
 
 app.post("/api/hikvision/stop", async (req, res) => {
-  if (isRemoteMode()) return proxyRemoteHikvisionJson(req, res);
+  if (isRemoteMode() && !shouldUseLocalHikvisionFallback()) return proxyRemoteHikvisionJson(req, res);
   try {
     await hikvisionManager.stop();
     res.json({ ok: true, ...hikvisionManager.getStatus() });
@@ -13244,9 +13394,15 @@ app.post("/api/hikvision/stop", async (req, res) => {
 });
 
 app.post("/api/hikvision/test", async (req, res) => {
-  if (isRemoteMode()) return proxyRemoteHikvisionJson(req, res);
+  if (isRemoteMode() && !shouldUseLocalHikvisionFallback()) return proxyRemoteHikvisionJson(req, res);
   try {
     const config = mergeHikvisionConfigInput(req.body);
+    if (isRemoteMode()) {
+      const rtsp = await checkTcpReachability(config.host, Number(config.rtspPort || 554));
+      if (!rtsp.reachable) {
+        return res.status(503).json({ ok: false, error: "Gateway relay unavailable and the DVR RTSP port is not reachable from this Remote workstation." });
+      }
+    }
     const result = await hikvisionManager.test(config);
     res.status(result.ok ? 200 : 400).json(result);
   } catch (err) {
@@ -13255,9 +13411,14 @@ app.post("/api/hikvision/test", async (req, res) => {
 });
 
 app.get("/api/hikvision/substream-profile", async (req, res) => {
-  if (isRemoteMode()) return proxyRemoteHikvisionJson(req, res);
+  if (isRemoteMode() && !shouldUseLocalHikvisionFallback()) return proxyRemoteHikvisionJson(req, res);
   try {
-    const profile = await hikvisionManager.getSubstreamProfile(readHikvisionConfig());
+    const config = readHikvisionConfig();
+    if (isRemoteMode()) {
+      const sdk = await checkTcpReachability(config.host, Number(config.httpPort || 80));
+      if (!sdk.reachable) return res.status(503).json({ ok: false, error: "Gateway relay unavailable and the DVR SDK port is not reachable from this Remote workstation." });
+    }
+    const profile = await hikvisionManager.getSubstreamProfile(config);
     delete profile.xml;
     res.json({ ok: true, ...profile });
   } catch (err) {
@@ -13266,11 +13427,14 @@ app.get("/api/hikvision/substream-profile", async (req, res) => {
 });
 
 app.post("/api/hikvision/substream-profile", async (req, res) => {
-  if (isRemoteMode()) return proxyRemoteHikvisionJson(req, res);
+  if (isRemoteMode() && !shouldUseLocalHikvisionFallback()) return proxyRemoteHikvisionJson(req, res);
   try {
-    const profile = await hikvisionManager.getSubstreamProfile(
-      mergeHikvisionConfigInput(req.body),
-    );
+    const config = mergeHikvisionConfigInput(req.body);
+    if (isRemoteMode()) {
+      const sdk = await checkTcpReachability(config.host, Number(config.httpPort || 80));
+      if (!sdk.reachable) return res.status(503).json({ ok: false, error: "Gateway relay unavailable and the DVR SDK port is not reachable from this Remote workstation." });
+    }
+    const profile = await hikvisionManager.getSubstreamProfile(config);
     delete profile.xml;
     res.json({ ok: true, ...profile });
   } catch (err) {
@@ -13279,9 +13443,13 @@ app.post("/api/hikvision/substream-profile", async (req, res) => {
 });
 
 app.post("/api/hikvision/optimize-substream", async (req, res) => {
-  if (isRemoteMode()) return proxyRemoteHikvisionJson(req, res);
+  if (isRemoteMode() && !shouldUseLocalHikvisionFallback()) return proxyRemoteHikvisionJson(req, res);
   try {
     const config = mergeHikvisionConfigInput(req.body);
+    if (isRemoteMode()) {
+      const sdk = await checkTcpReachability(config.host, Number(config.httpPort || 80));
+      if (!sdk.reachable) return res.status(503).json({ ok: false, error: "Gateway relay unavailable and the DVR SDK port is not reachable from this Remote workstation." });
+    }
     const result = await hikvisionManager.optimizeSubstream(config);
     // Preparing xx02 must not silently downgrade a native main-stream view.
     // Keep the operator's selected playback stream; only the DVR's xx02 codec
@@ -13312,8 +13480,27 @@ app.get("/api/hikvision/snapshot", async (req, res) => {
       res.status(502).json({ ok: false, error: err.message });
     }
   };
-  if (isRemoteMode()) return proxyHikvisionMediaToRemote(req, res);
-  return serveLocal();
+  const serveLocalIfReachable = async () => {
+    const config = readHikvisionConfig();
+    const sdk = await checkTcpReachability(config.host, Number(config.httpPort || 80));
+    const previous = getRemoteHikvisionDirectRouteState(config.host);
+    setRemoteHikvisionDirectRouteState(config.host, {
+      sdkReachable: sdk.reachable,
+      rtspReachable: previous?.rtspReachable,
+    });
+    if (!sdk.reachable) {
+      if (hikvisionManager.getStatus().running) await hikvisionManager.stop().catch(() => {});
+      return res.status(503).json({
+        ok: false,
+        error: `Gateway Hikvision relay is unavailable, and this remote workstation cannot reach DVR ${config.host}:${Number(config.httpPort || 80)}. Update the gateway camera relay or approve the DVR /32 Tailscale route.`,
+      });
+    }
+    return serveLocal();
+  };
+  if (isRemoteMode() && !shouldUseLocalHikvisionFallback()) {
+    return proxyHikvisionMediaToRemote(req, res, { fallback: serveLocalIfReachable });
+  }
+  return isRemoteMode() ? serveLocalIfReachable() : serveLocal();
 });
 
 app.get("/api/hikvision/hls/*", async (req, res) => {
@@ -13324,8 +13511,30 @@ app.get("/api/hikvision/hls/*", async (req, res) => {
     }
     return hikvisionManager.proxyMedia(req, res, readHikvisionConfig());
   };
-  if (isRemoteMode()) return proxyHikvisionMediaToRemote(req, res);
-  return serveLocal();
+  const serveLocalIfReachable = async () => {
+    const config = readHikvisionConfig();
+    const rtsp = await checkTcpReachability(config.host, Number(config.rtspPort || 554));
+    const previous = getRemoteHikvisionDirectRouteState(config.host);
+    setRemoteHikvisionDirectRouteState(config.host, {
+      sdkReachable: previous?.sdkReachable,
+      rtspReachable: rtsp.reachable,
+    });
+    if (!rtsp.reachable) {
+      if (hikvisionManager.getStatus().running) await hikvisionManager.stop().catch(() => {});
+      return res.status(503).json({
+        ok: false,
+        error: `Gateway Hikvision relay is unavailable, and this remote workstation cannot reach DVR ${config.host}:${Number(config.rtspPort || 554)}. Complete Remote mode requires the gateway camera relay or an approved DVR /32 Tailscale route.`,
+      });
+    }
+    return serveLocal();
+  };
+  if (isRemoteMode() && !shouldUseLocalHikvisionFallback()) {
+    return proxyHikvisionMediaToRemote(req, res, {
+      fallback: serveLocalIfReachable,
+      validateHlsManifest: true,
+    });
+  }
+  return isRemoteMode() ? serveLocalIfReachable() : serveLocal();
 });
 
 app.post("/api/hikvision/route-status", async (req, res) => {
@@ -13337,14 +13546,26 @@ app.post("/api/hikvision/route-status", async (req, res) => {
       checkTcpReachability(cfg.host, Number(cfg.rtspPort || 554)),
     ]);
     const remote = isRemoteMode();
+    const directRoute = remote
+      ? classifyHikvisionDirectRoute(cfg.host, Boolean(tailscale.connected))
+      : "local-direct";
+    if (remote) {
+      setRemoteHikvisionDirectRouteState(cfg.host, {
+        sdkReachable: sdk.reachable,
+        rtspReachable: rtsp.reachable,
+      });
+    }
+    const relayAvailable = buildHikvisionDeliveryMetadata().relayAvailable;
+    const directHlsFallback = Boolean(remote && !relayAvailable && rtsp.reachable);
     res.json({
       ok: true,
       host: cfg.host,
       recommendedRoute: net.isIP(cfg.host) === 4 ? `${cfg.host}/32` : cfg.host,
       operationMode: remote ? "remote" : "gateway",
-      compactPath: buildHikvisionDeliveryMetadata().compactPath,
-      relayAvailable: buildHikvisionDeliveryMetadata().relayAvailable,
-      nativePath: remote ? "tailscale-direct" : "local-direct",
+      compactPath: directHlsFallback ? `${directRoute}-hls` : buildHikvisionDeliveryMetadata().compactPath,
+      relayAvailable,
+      localFallback: directHlsFallback,
+      nativePath: directRoute,
       tailscale: {
         installed: Boolean(tailscale.installed),
         connected: Boolean(tailscale.connected),
@@ -13353,8 +13574,9 @@ app.post("/api/hikvision/route-status", async (req, res) => {
       },
       sdk: { port: Number(cfg.httpPort || 80), ...sdk },
       rtsp: { port: Number(cfg.rtspPort || 554), ...rtsp },
-      nativeReady: Boolean(sdk.reachable && (!remote || tailscale.connected)),
-      browserDirectReady: Boolean(rtsp.reachable && (!remote || tailscale.connected)),
+      sameLan: directRoute === "lan-direct",
+      nativeReady: Boolean(sdk.reachable),
+      browserDirectReady: Boolean(rtsp.reachable),
     });
   } catch (err) {
     res.status(400).json({ ok: false, error: err.message });

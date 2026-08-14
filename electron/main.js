@@ -4717,7 +4717,7 @@ const POPOUT_TITLES = {
   alarms:        "ADSI \u2013 Alarms",
   forecast:      "ADSI \u2013 Forecast",
   "igbt-health": "ADSI \u2013 Asset Health",
-  camera:        "ADSI \u2013 Camera Viewer",
+  camera:        "ADSI \u2013 Tapo Camera Viewer",
 };
 
 function openPopoutWindow(page, theme) {
@@ -4733,8 +4733,8 @@ function openPopoutWindow(page, theme) {
   const win = new BrowserWindow({
     width: 1280,
     height: 820,
-    minWidth: 900,
-    minHeight: 600,
+    minWidth: page === "camera" ? 480 : 900,
+    minHeight: page === "camera" ? 300 : 600,
     icon: APP_ICON,
     title: POPOUT_TITLES[page] || "ADSI Inverter Dashboard",
     frame: true,
@@ -4759,7 +4759,6 @@ function openPopoutWindow(page, theme) {
   );
   win.once("ready-to-show", () => {
     focusWindow(win);
-    if (page === "camera") win.maximize();
   });
   win.on("closed", () => {
     popoutWindows.delete(page);
@@ -5779,8 +5778,8 @@ function openHikvisionNativeViewer(requester, theme = "dark") {
   const win = new BrowserWindow({
     width: 1280,
     height: 820,
-    minWidth: 900,
-    minHeight: 600,
+    minWidth: 480,
+    minHeight: 300,
     icon: APP_ICON,
     title: "ADSI \u2013 Hikvision Native Viewer",
     frame: true,
