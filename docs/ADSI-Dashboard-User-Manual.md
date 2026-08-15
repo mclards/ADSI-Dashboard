@@ -1,6 +1,6 @@
-# ADSI Inverter Dashboard User Manual
+﻿# ADSI Inverter Dashboard User Manual
 
-**Applies to:** ADSI Inverter Dashboard `v2.12.7`
+**Applies to:** ADSI Inverter Dashboard `v2.12.8`
 **Document type:** Operator and administrator reference
 **Scope:** Main dashboard, forecast workspace, settings center, cloud backup, standby database workflow, alarm handling, exports, IP Configuration, and Topology
 
@@ -15,7 +15,7 @@ also hosted on GitHub for in-app auto-download from the alarm drilldown:
 |---|---|---|
 | `Inverter-Schematic-Diagram.pdf` | AQM0027 | 22-page wiring schematic (4-module EQUIPO X variant) |
 | `Inverter-Incident-Workflow.pdf` | AAV2011IMC01_ | Level 1 incident workflow (16 alarm codes) |
-| `Inverter-Incident-Workflow-Level2.pdf` | AAV2011IFA01_ | Level 2 — SCOPE tool, DebugDesc sub-codes, calibration |
+| `Inverter-Incident-Workflow-Level2.pdf` | AAV2011IFA01_ | Level 2 â€” SCOPE tool, DebugDesc sub-codes, calibration |
 | `INGECON-SUN-Manager-User-Manual.pdf` | PTD138 | Windows SCADA tool user manual |
 
 **Alarm drilldown:** click any alarm hex code (e.g. `0x0020H`) in the Alarms
@@ -23,27 +23,27 @@ page or Inverter Detail panel to open the service-reference drilldown. Each
 active bit shows a full novice-friendly walkthrough sourced directly from the
 Ingeteam Level 1 / Level 2 PDFs and the AQM0027 schematic:
 
-- **Safety preparation** (amber border) — PPE, what stays energized after stop,
+- **Safety preparation** (amber border) â€” PPE, what stays energized after stop,
   what tools and records to have on hand BEFORE you touch anything.
-- **Action** — one-line summary plus a numbered procedural walkthrough with
-  branching criteria; ⚠ steps render in red.
-- **Physical location** — every device with a "where on the cabinet" descriptor.
-- **Schematic reference** — one precise sentence about what the linked schematic
+- **Action** â€” one-line summary plus a numbered procedural walkthrough with
+  branching criteria; âš  steps render in red.
+- **Physical location** â€” every device with a "where on the cabinet" descriptor.
+- **Schematic reference** â€” one precise sentence about what the linked schematic
   page actually shows, so you know whether to open p.4 (DC input), p.5 (K1 +
   harmonic filter), p.6 (AC supply / RVAC / FAC fuses), p.12 (+15 Vdc rails),
   p.15 (door limit switches), p.21 (sync card / RS-485) or p.22 (CAN bus).
-- **Expected normal readings** — what GOOD looks like (Vac ranges, continuity
+- **Expected normal readings** â€” what GOOD looks like (Vac ranges, continuity
   pairs, +15 Vdc check points, insulation thresholds, fuse continuity).
-- **Training modules** — TrinPM chips link directly to the matching YouTube
+- **Training modules** â€” TrinPM chips link directly to the matching YouTube
   video on `ingeconsuntraining.info` (each chip resolves to its specific video,
   not the index page).
-- **DebugDesc (Level 2 / SCOPE)** — sub-code → action mapping (e.g. 0x0004 →
-  40/92/107-109; 0x0040 → 55,56/119).
-- **Stop-reason sub-codes** — surfaced under 0x1000 Manual Shutdown
+- **DebugDesc (Level 2 / SCOPE)** â€” sub-code â†’ action mapping (e.g. 0x0004 â†’
+  40/92/107-109; 0x0040 â†’ 55,56/119).
+- **Stop-reason sub-codes** â€” surfaced under 0x1000 Manual Shutdown
   (1320 / 1360 / 1363).
-- **Escalate to Ingeteam SAT when** (red border) — explicit stop-criteria so
+- **Escalate to Ingeteam SAT when** (red border) â€” explicit stop-criteria so
   you know when to stop poking and call SAT.
-- **Note** — short safety / context callout at the bottom.
+- **Note** â€” short safety / context callout at the bottom.
 
 The footer carries one-click PDF download buttons for the schematic, Level 1,
 Level 2, and SUN Manager manual. Downloads come from the GitHub raw URL first
@@ -52,7 +52,7 @@ Level 2, and SUN Manager manual. Downloads come from the GitHub raw URL first
 **7FFF fatal-error handling:** when an inverter reports `0x7FFF` fatal
 error, a red banner on the drilldown explains that the inverter can only be
 unlocked by entering a code through the physical display. The auto-reset
-engine will not retry fatal errors — it logs once and waits for the
+engine will not retry fatal errors â€” it logs once and waits for the
 operator to act.
 
 ---
@@ -155,7 +155,7 @@ Implementation guidance for this repository:
 
 ### 2.4 Important Standby DB Rule
 
-The `Refresh Standby DB` action stages archive DB files first (when included) for historical consistency, then downloads the gateway main database for local use. The staged database is **not** applied immediately — a restart is needed to activate the new data.
+The `Refresh Standby DB` action stages archive DB files first (when included) for historical consistency, then downloads the gateway main database for local use. The staged database is **not** applied immediately â€” a restart is needed to activate the new data.
 
 The staged standby refresh also preserves the gateway's current-day energy baseline so that, after restart and switch back to `Gateway` mode, `TODAY MWh` can bridge cleanly while the local poller catches up.
 
@@ -235,7 +235,7 @@ For multi-monitor setups or complex monitoring needs, the dashboard supports iso
 
 To open a pop-out window:
 1. Navigate to a supported page (**Analytics**, **Forecast**, **Alarms**, or **Asset Health**).
-2. Click the small "pop-out" icon (`↗`) located in the top-right toolbar of the page.
+2. Click the small "pop-out" icon (`â†—`) located in the top-right toolbar of the page.
 3. The selected tool will open in a new window with a simplified interface (no side navigation or global header). Both windows will continue to receive live real-time updates independently.
 
 *Note: You can only have one pop-out window active per tool at any given time. Clicking the button again will focus the existing window rather than opening a duplicate.*
@@ -339,7 +339,7 @@ Use the theme toggle to switch the dashboard visual theme. Theme choice persists
 Alarm notifications are consolidated into a single bottom-right hub so they stay readable without blocking the page. There is exactly one indicator per side:
 
 - **Left (navigation only):** the sidebar `ALARMS` item shows a count badge of unacknowledged active alarms. Clicking it opens the full Alarms page.
-- **Bottom-right (live alerts):** a compact **summary pill** appears whenever unacknowledged active alarms exist. It shows a per-severity tally and the active-alarm count. Clicking the pill opens the alarm notification panel directly above it — no page navigation. Click it again (or the panel's close button) to dismiss the panel.
+- **Bottom-right (live alerts):** a compact **summary pill** appears whenever unacknowledged active alarms exist. It shows a per-severity tally and the active-alarm count. Clicking the pill opens the alarm notification panel directly above it â€” no page navigation. Click it again (or the panel's close button) to dismiss the panel.
 
 The earlier bottom-left floating bell has been removed; the pill replaces it, eliminating the previous duplicate left/right notification icons.
 
@@ -348,9 +348,9 @@ The notification panel shows up to 50 recent active alarms. Each unacknowledged 
 - inverter label and alarm code with severity
 - alarm description
 - timestamp
-- **`✔ ACK` button** — acknowledges the alarm directly from the panel without navigating to the Alarms page
+- **`âœ” ACK` button** â€” acknowledges the alarm directly from the panel without navigating to the Alarms page
 
-Already-acknowledged alarms show a muted **`✔ Acked`** label instead of the button. When there are no active alarms the panel shows a simple "No active alarms." message and the pill is hidden.
+Already-acknowledged alarms show a muted **`âœ” Acked`** label instead of the button. When there are no active alarms the panel shows a simple "No active alarms." message and the pill is hidden.
 
 Acknowledgement is gateway-authoritative in both operating modes. An ACK made on the gateway dashboard or any Remote-mode viewer is saved on the gateway and synchronized immediately to every connected dashboard. The Alarms table, sidebar badge, notification panel, alarm sound, and inverter-card alarm state reconcile together; reconnecting or replicated standby databases retain the same ACK state.
 
@@ -402,7 +402,7 @@ The `Inverters` page is the primary live operations page.
 | --- | --- |
 | `All Inverters` filter | Show the full fleet or focus on one inverter |
 | `Layout` | Change the grid column layout |
-| _(Plant Cap has moved to its own dedicated page — see Section 5.2)_ | |
+| _(Plant Cap has moved to its own dedicated page â€” see Section 5.2)_ | |
 | Status legend | Shows output-band colors and alarm state meaning |
 | Fleet stat chips | Summarize inverter count, node count, online, alarmed, and offline totals |
 
@@ -476,7 +476,7 @@ The toolbar at the top displays live summary indicators:
 | --- | --- |
 | `Status` badge | Current controller mode: **Enabled**, **Paused**, or **Idle** |
 | `Plant MW` | Current total plant AC output from live PAC data |
-| `Band` | Configured lower–upper MW cap band |
+| `Band` | Configured lowerâ€“upper MW cap band |
 | `+ Add Schedule` button | Opens the schedule creation modal |
 
 #### Cap Inputs
@@ -551,33 +551,33 @@ The preview table shows each candidate inverter in sequence order with its node 
 - the controller may restart any eligible fresh stopped non-exempt inverter; controller-owned stops are still tracked separately for release order and history
 - manual control for non-exempted inverters is blocked while plant cap is active; the operator is warned that the cap session is still ongoing and must disable or exempt first
 
-#### Grid Code Tab — Grid Monitor (v2.11.x)
+#### Grid Code Tab â€” Grid Monitor (v2.11.x)
 
 Inside the Plant Controller page, the **Grid Code** tab adds a read-only **Grid Monitor** panel that visualises live grid behaviour over a rolling 5-minute window at 5-second resolution:
 
 | Chart | Shows |
 | --- | --- |
-| `P vs f` | Active power against grid frequency, with NGCP envelope overlay (continuous 59.7–60.3 Hz; withstand 58.2–61.8 Hz) |
-| `Q vs V` | Reactive power against AC voltage, with ±5 % nominal band shaded |
+| `P vs f` | Active power against grid frequency, with NGCP envelope overlay (continuous 59.7â€“60.3 Hz; withstand 58.2â€“61.8 Hz) |
+| `Q vs V` | Reactive power against AC voltage, with Â±5 % nominal band shaded |
 | `dP/dt` | Per-node ramp rate over time. Comparable to the configured APC ramp limit when enabled |
-| `Observed PF` | Power factor (|cos φ|) over time, with NGCP 0.95 lag/lead boundaries |
+| `Observed PF` | Power factor (|cos Ï†|) over time, with NGCP 0.95 lag/lead boundaries |
 
 The top-strip chips show live plant aggregate: fresh-node count, mean frequency, mean voltage, total P and Q. The panel polls only while the Grid Code tab is visible and pauses when the operator switches to another tab or page.
 
 #### APC Ramp-Rate Limiter (v2.11.x)
 
-A new optional pacing layer wraps every `set` opcode issued by the **%P Setpoint** tab and the T5 sweep compliance test. The controls live inline at the bottom of the **%P Setpoint** tab — a checkbox + a `Max ramp (%/min)` input that auto-saves on change. Status chip on the right reports `Disabled` (default) or `Pacing @ N%/min`.
+A new optional pacing layer wraps every `set` opcode issued by the **%P Setpoint** tab and the T5 sweep compliance test. The controls live inline at the bottom of the **%P Setpoint** tab â€” a checkbox + a `Max ramp (%/min)` input that auto-saves on change. Status chip on the right reports `Disabled` (default) or `Pacing @ N%/min`.
 
 | Control | Default | Notes |
 | --- | --- | --- |
 | `Ramp-rate limiter` | OFF | Master switch. When OFF, setpoints write through unchanged |
-| `Max ramp (%/min)` | 10 | Maximum absolute %P change per minute. Industry typical 10 %/min; range 1–100 |
+| `Max ramp (%/min)` | 10 | Maximum absolute %P change per minute. Industry typical 10 %/min; range 1â€“100 |
 
-When enabled and the requested setpoint exceeds the per-minute step, the dashboard issues an immediate paced step, schedules the remaining steps as background timers (15 s apart), broadcasts an `apc:throttled` notification, and writes one `apc.ramp_paced` row plus one `apc.ramp_step` row per intermediate setpoint to the audit log. The Slice δ closed-loop verifier defers its read-back until the ramp finishes to avoid false-mismatch records.
+When enabled and the requested setpoint exceeds the per-minute step, the dashboard issues an immediate paced step, schedules the remaining steps as background timers (15 s apart), broadcasts an `apc:throttled` notification, and writes one `apc.ramp_paced` row plus one `apc.ramp_step` row per intermediate setpoint to the audit log. The Slice Î´ closed-loop verifier defers its read-back until the ramp finishes to avoid false-mismatch records.
 
 #### Grid Code Write Verification (v2.11.x)
 
-Every successful Slice ζ write (`Set PF`, `Set kVAr`, `Disable reactive`) schedules a delayed read-back of holding registers 41006–41010 and records the result in `grid_control_verify_log`. The Read-back panel surfaces the most recent `OK`, `MISMATCH`, `NO_RESPONSE`, `TIMEOUT`, or `PENDING` status for the selected node, with the requested vs observed raw values and the result age in seconds. The same flow refuses writes against an inverter that is auto-blocked by a recurring critical alarm pattern (HTTP 423 with the pattern hex code). `Disable reactive` is intentionally exempt from the block — releasing reactive control is always permitted as the safe direction.
+Every successful Slice Î¶ write (`Set PF`, `Set kVAr`, `Disable reactive`) schedules a delayed read-back of holding registers 41006â€“41010 and records the result in `grid_control_verify_log`. The Read-back panel surfaces the most recent `OK`, `MISMATCH`, `NO_RESPONSE`, `TIMEOUT`, or `PENDING` status for the selected node, with the requested vs observed raw values and the result age in seconds. The same flow refuses writes against an inverter that is auto-blocked by a recurring critical alarm pattern (HTTP 423 with the pattern hex code). `Disable reactive` is intentionally exempt from the block â€” releasing reactive control is always permitted as the safe direction.
 - a very small gap between `Upper Limit` and `Lower Limit` produces warnings because the controller may overshoot or fail to settle cleanly
 - hover descriptions are available on plant-cap controls, metrics, warnings, and preview fields
 - in `Remote` mode, the panel remains viewable and the requests are proxied to the gateway workstation
@@ -662,7 +662,7 @@ The page builds:
 
 Operational note:
 
-- when **today's date** is selected, the summary card and interval charts update automatically on each server push, at the same cadence as `TODAY MWh` in the header — no manual reload is needed
+- when **today's date** is selected, the summary card and interval charts update automatically on each server push, at the same cadence as `TODAY MWh` in the header â€” no manual reload is needed
 - for past dates, data is loaded on demand by pressing `Load View`
 
 ### Day-ahead Generator
@@ -684,9 +684,9 @@ The system automatically generates tomorrow's day-ahead forecast on a fixed cron
 
 | Time | Role |
 | --- | --- |
-| 04:30 | Early morning — first pass with overnight Solcast data |
-| 09:30 | Pre-cutoff — catches weather data refreshes before the 10:00 AM control room submission deadline |
-| 18:30 | Post-solar-day — refreshes with full day of actual generation data |
+| 04:30 | Early morning â€” first pass with overnight Solcast data |
+| 09:30 | Pre-cutoff â€” catches weather data refreshes before the 10:00 AM control room submission deadline |
+| 18:30 | Post-solar-day â€” refreshes with full day of actual generation data |
 | 20:00 | Evening re-check |
 | 22:00 | Final nightly pass |
 
@@ -696,7 +696,7 @@ Before each cron run, the system classifies the existing forecast into one of th
 
 | Quality | Meaning | Action |
 | --- | --- | --- |
-| **healthy** | Complete forecast, correct provider, fresh Solcast input | Skip — no regeneration |
+| **healthy** | Complete forecast, correct provider, fresh Solcast input | Skip â€” no regeneration |
 | missing | No forecast rows exist | Generate |
 | incomplete | Fewer slots than the solar window requires | Regenerate |
 | wrong_provider | Generated with a different provider than currently configured | Regenerate |
@@ -718,14 +718,14 @@ The `7-Day Weather Outlook` provides context for expected production behavior us
 
 Use this view to support planning, performance interpretation, and forecast review.
 
-### Day-Ahead vs Reality — Locked @ Previous 10 AM
+### Day-Ahead vs Reality â€” Locked @ Previous 10 AM
 
 The `Day-Ahead vs Reality` chart displays a multi-series comparison of the frozen 10 AM day-ahead forecast snapshot against actual output as the day unfolds. It shows:
 
-- **P10/P50/P90 confidence band** — locked forecast envelope from previous 10 AM
-- **Solcast intraday** — updated satellite forecast as weather refines
-- **Plant actual** — ground truth measured output
-- **ML final** — final ML model prediction
+- **P10/P50/P90 confidence band** â€” locked forecast envelope from previous 10 AM
+- **Solcast intraday** â€” updated satellite forecast as weather refines
+- **Plant actual** â€” ground truth measured output
+- **ML final** â€” final ML model prediction
 
 Header metrics include spread % (cap-weighted), variance vs P50, and % of actual output within the band. Useful for validating forecast accuracy, detecting late-day weather shifts, and reviewing confidence band tightness.
 
@@ -775,8 +775,8 @@ Manual overrides for ML engine training parameters. Leave blank to use the engin
 
 | Field | Purpose | Range | Default |
 | --- | --- | --- | --- |
-| `Est-actual Weight` | Override the satellite est-actual training weight (how much weight the engine gives to Solcast estimated-actual values when training the model). Validate new values with a backtest before relying. | 0.50–1.00 | Auto (engine-tuned) |
-| `Intraday Blend Max` | Cap how strongly intraday observed vs. day-ahead corrections are blended (0 = no intraday blending, 1 = maximum). Validate with a backtest. | 0.00–1.00 | 0.72 |
+| `Est-actual Weight` | Override the satellite est-actual training weight (how much weight the engine gives to Solcast estimated-actual values when training the model). Validate new values with a backtest before relying. | 0.50â€“1.00 | Auto (engine-tuned) |
+| `Intraday Blend Max` | Cap how strongly intraday observed vs. day-ahead corrections are blended (0 = no intraday blending, 1 = maximum). Validate with a backtest. | 0.00â€“1.00 | 0.72 |
 
 ### Toolkit Preview
 
@@ -843,9 +843,9 @@ The Forecast Performance Monitor provides a visual audit of the ML forecast engi
 | Day-range selector | Sets the look-back window: 7, 14, 30, 60, 90, or 180 days |
 | Refresh | Reloads all panel data from the server |
 
-### ML Backend — LightGBM
+### ML Backend â€” LightGBM
 
-The forecast engine uses **LightGBM** as its primary ML backend when installed (enabled by default from v2.4.40). If LightGBM is not installed the engine falls back automatically to sklearn's Gradient Boosting Regressor — no configuration change is required.
+The forecast engine uses **LightGBM** as its primary ML backend when installed (enabled by default from v2.4.40). If LightGBM is not installed the engine falls back automatically to sklearn's Gradient Boosting Regressor â€” no configuration change is required.
 
 #### Installation
 
@@ -861,7 +861,7 @@ Install into the Python environment used by the Forecast Service. On Windows the
 | --- | --- |
 | Python | 3.8 or later |
 | LightGBM package | 3.x or later (`pip install lightgbm`) |
-| Visual C++ Redistributable | Windows only — usually already present |
+| Visual C++ Redistributable | Windows only â€” usually already present |
 | CPU / RAM | Standard workstation hardware; no GPU required |
 | Disk | ~50 MB for package and DLLs |
 
@@ -874,9 +874,9 @@ Install into the Python environment used by the Forecast Service. On Windows the
 
 ### Solcast Tri-Band Integration
 
-When Solcast Toolkit data is available, the forecast engine automatically uses all three confidence levels — the standard forecast value plus Solcast's P10 (low confidence) and P90 (high confidence) intervals — as additional ML features. This provides the model with explicit weather uncertainty information, which is especially valuable on partly cloudy or changeable-weather days.
+When Solcast Toolkit data is available, the forecast engine automatically uses all three confidence levels â€” the standard forecast value plus Solcast's P10 (low confidence) and P90 (high confidence) intervals â€” as additional ML features. This provides the model with explicit weather uncertainty information, which is especially valuable on partly cloudy or changeable-weather days.
 
-The tri-band integration is fully transparent to the operator. No configuration or action is required — the model automatically detects and incorporates tri-band data when it is available from your Solcast Toolkit feed. Historical forecasts generated without tri-band data continue to work normally, and the model gracefully switches to using all three bands as new data arrives.
+The tri-band integration is fully transparent to the operator. No configuration or action is required â€” the model automatically detects and incorporates tri-band data when it is available from your Solcast Toolkit feed. Historical forecasts generated without tri-band data continue to work normally, and the model gracefully switches to using all three bands as new data arrives.
 
 This enhancement improves forecast accuracy across uncertain weather regimes by helping the model learn how weather unpredictability affects generation variance and timing.
 
@@ -928,8 +928,8 @@ on the picked inverter; rows are 5-minute snapshots of every electrical and
 operational reading the dashboard captures.
 
 This page replaces the legacy single-list Energy table. The underlying
-`energy_5min` and `inverter_5min` tables are untouched — Forecast, Analytics,
-Reports, and cloud replication continue to consume them as before — and a
+`energy_5min` and `inverter_5min` tables are untouched â€” Forecast, Analytics,
+Reports, and cloud replication continue to consume them as before â€” and a
 new `inverter_5min_param` table feeds this view via `dailyAggregator.js`.
 
 ### Controls
@@ -939,17 +939,17 @@ new `inverter_5min_param` table feeds this view via `dailyAggregator.js`.
 | `Inverter` | Pick which inverter (1..N) to view. The page is blank until an inverter is selected. |
 | `Date` | Day to load. **Today** streams live 5-minute samples; **past dates** load from history. |
 | Mode badge | Appears next to the date picker: shows `LIVE` while today's slots are still streaming, and `HISTORY` once a past date is loaded. |
-| Solar-window indicator | Right-side badge — `Solar window: HH:MM–HH:MM` — confirms which slots are clipped by the configured solar window. |
+| Solar-window indicator | Right-side badge â€” `Solar window: HH:MMâ€“HH:MM` â€” confirms which slots are clipped by the configured solar window. |
 | `Refresh` | Re-fetch the selected day's data without changing the date. |
-| Row count | Right-side counter — total slots loaded across all node tabs. |
+| Row count | Right-side counter â€” total slots loaded across all node tabs. |
 
 ### Tab Layout
 
-- One tab per configured node on the picked inverter — tabs are built from
+- One tab per configured node on the picked inverter â€” tabs are built from
   the IP Configuration `units[invId]` map, so disabled or de-configured
   nodes never appear.
 - Each tab has its own scrolling table of 5-minute slots. Switching tabs
-  does not re-fetch — all data for the inverter is loaded once per refresh.
+  does not re-fetch â€” all data for the inverter is loaded once per refresh.
 
 ### Per-Node Parameter Columns
 
@@ -962,30 +962,30 @@ Each tab shows ISM-compatible columns at 5-minute granularity:
 | `Vac1 / Vac2 / Vac3` | AC line-to-neutral voltages, three phases |
 | `Iac1 / Iac2 / Iac3` | AC line currents, three phases |
 | `Pac` | AC active power output |
-| `CosΦ` | Power factor at the AC terminals |
+| `CosÎ¦` | Power factor at the AC terminals |
 | `Freq` | AC line frequency |
 | `parcE` | Partial-energy hardware counter snapshot at slot end |
 | `Alarm` | Decoded alarm hex active during the slot (blank if none) |
-| `Temp` | Internal heatsink temperature. **Blank by design in v2.10.x** — see §6.8.2 for the road-to-resolution. The column is reserved so a future firmware register decode will populate it without a schema change. |
+| `Temp` | Internal heatsink temperature. **Blank by design in v2.10.x** â€” see Â§6.8.2 for the road-to-resolution. The column is reserved so a future firmware register decode will populate it without a schema change. |
 
 ### Operational Notes
 
-- **Live behavior** — when **today's date** is selected, the active node's
+- **Live behavior** â€” when **today's date** is selected, the active node's
   table appends a new row at every 5-minute boundary; no manual reload is
   needed. The mode badge shows `LIVE` and the row count ticks up.
-- **Past-date behavior** — past dates load on the first selection and stay
+- **Past-date behavior** â€” past dates load on the first selection and stay
   cached until you change the inverter, change the date, or press
   `Refresh`. The mode badge shows `HISTORY`.
-- **Solar-window clipping** — slots outside the configured window are
+- **Solar-window clipping** â€” slots outside the configured window are
   automatically suppressed. To inspect overnight diagnostic rows, change
-  the solar window in `Settings → Plant Configuration`.
-- **Day rollover** — at local midnight the page resets the date to the new
+  the solar window in `Settings â†’ Plant Configuration`.
+- **Day rollover** â€” at local midnight the page resets the date to the new
   day and clears the live buffer; an in-flight fetch from the previous day
   is dropped via a request-id race guard.
 
 Use this page for per-node electrical verification, alarm correlation
 against parameter trends, and interval-level validation. For a workbook-
-style export of the same data see **§6.8.2 Daily Data Export**.
+style export of the same data see **Â§6.8.2 Daily Data Export**.
 
 ---
 
@@ -1097,61 +1097,61 @@ The `Export` page provides dedicated export packages for common operational reco
 | `Operator Audit Export` | inverter, date, format | Command accountability records |
 | `Daily Performance Report` | from date, to date, format | Shift, management, or archival reporting |
 
-#### 6.8.1 Energy Summary — Hardware Counter Columns
+#### 6.8.1 Energy Summary â€” Hardware Counter Columns
 
 The `Energy Summary Export` adds two reconciliation columns when the operator
 enables them:
 
 | Column | Source | Notes |
 | --- | --- | --- |
-| `Etotal_kWh` | Lifetime hardware kWh counter (Modbus regs 0–1) at slot end | Daily delta = current snapshot − today's baseline |
-| `parcE_kWh` | Partial-energy hardware counter (Modbus regs 58–59) | Same delta rule |
+| `Etotal_kWh` | Lifetime hardware kWh counter (Modbus regs 0â€“1) at slot end | Daily delta = current snapshot âˆ’ today's baseline |
+| `parcE_kWh` | Partial-energy hardware counter (Modbus regs 58â€“59) | Same delta rule |
 | `Counter_Source` | `eod_clean`, `poll`, `pac_seed`, or blank | Which baseline anchor was used |
 | `Etotal_Quarantined` / `Quarantine_Reason` | Set when the snapshot fell outside the sanity gate | Clamps protect against parser hiccups |
 
 Hardening rules (v2.10.x):
 
-- **Today** — delta is taken against today's baseline regardless of source
+- **Today** â€” delta is taken against today's baseline regardless of source
   (`eod_clean`, `poll`, or `pac_seed`); for partial-day starts the delta
   represents "energy since polling began", which lines up with the
   PAC-integrated `Total_MWh` on the same row.
-- **Today — fallback** — if today's baseline row is missing, yesterday's
+- **Today â€” fallback** â€” if today's baseline row is missing, yesterday's
   `eod_clean` snapshot is used as the anchor instead of leaving the column
   blank.
-- **Past day** — same-day `eod_clean` − baseline is preferred; if missing,
+- **Past day** â€” same-day `eod_clean` âˆ’ baseline is preferred; if missing,
   the next day's open is used as the close-out anchor.
-- **Sanity ceiling** — every accepted delta must be `≥ 0` and bounded by
+- **Sanity ceiling** â€” every accepted delta must be `â‰¥ 0` and bounded by
   9 000 kWh per unit per day. Anything outside that range is dropped to a
   blank cell and the day total NaN-propagates so the operator notices.
 - **PAC remains authoritative.** Hardware counters are reconciliation
-  aids only — they never overwrite the running PAC integration.
+  aids only â€” they never overwrite the running PAC integration.
 
 #### 6.8.2 Daily Data Export
 
 The `Daily Data Export` produces a per-inverter Excel workbook with one
-sheet per configured node — the same layout the ISM vendor software uses
+sheet per configured node â€” the same layout the ISM vendor software uses
 so historical data can be cross-referenced.
 
 | Field | Function |
 | --- | --- |
 | `Inverter` | Pick the inverter to export. |
-| `Date` | Date to export. **Today is locked** until the dashboard reaches the End-of-Day snapshot hour (`Settings → Plant Configuration → Solar Window`). Until then only past dates may be exported (HTTP 423 returned otherwise). |
+| `Date` | Date to export. **Today is locked** until the dashboard reaches the End-of-Day snapshot hour (`Settings â†’ Plant Configuration â†’ Solar Window`). Until then only past dates may be exported (HTTP 423 returned otherwise). |
 | `Export` | Streams the workbook directly to disk via `ExcelJS.WorkbookWriter`. (All export-card primary buttons are now labelled simply **Export**; the card title identifies what is exported.) |
 | `Cancel` | Cancels an in-flight build. |
 
 Workbook structure:
 
 - One workbook per inverter, filename in plant-standard format.
-- One sheet per configured node (sheets named `Node 1`, `Node 2`, …).
+- One sheet per configured node (sheets named `Node 1`, `Node 2`, â€¦).
 - Each sheet uses the ISM-compatible column order (`Pdc`, `Vdc`, `Idc`,
-  `Vac1..3`, `Iac1..3`, `Pac`, `CosΦ`, `Freq`, `parcE`, `Alarm`, `Temp`).
+  `Vac1..3`, `Iac1..3`, `Pac`, `CosÎ¦`, `Freq`, `parcE`, `Alarm`, `Temp`).
 - Slots are clipped to the configured solar window so dawn/dusk noise is
   excluded.
 
 Operational notes:
 
 - The export reads from the new `inverter_5min_param` table populated by
-  `dailyAggregator.js` — it does **not** disturb live polling.
+  `dailyAggregator.js` â€” it does **not** disturb live polling.
 - The today-lock prevents partially-collected days from being exported as
   if they were finalized; the unlock fires alongside the same EOD-clean
   snapshot that anchors the next day's baseline.
@@ -1163,13 +1163,13 @@ Operational notes:
 
 Column-level notes:
 
-- The `Temp (°C)` column is **blank by design in v2.10.x**. The schema
+- The `Temp (Â°C)` column is **blank by design in v2.10.x**. The schema
   reserves the column so that a future firmware register decode will
   populate it without a migration; today no Modbus FC04 register on
   INGECON SUN exposes inverter heatsink temperature. See the FIXME v2.11
   block in `services/inverter_engine.py` for the road-to-resolution.
 - The `Inv Alarms` column is rendered as the bitwise-OR of every alarm
-  bitmask seen during the slot, not the alarm at slot end — so a transient
+  bitmask seen during the slot, not the alarm at slot end â€” so a transient
   fault that flickered for 30 seconds inside a 5-minute slot still appears
   on the row. Use the Alarms page for episode-level resolution.
 
@@ -1209,36 +1209,36 @@ Response shape:
 ```
 
 `status` is one of `complete` (all expected slots present), `partial`
-(some present, some missing), or `empty` (zero slots — gateway was down
+(some present, some missing), or `empty` (zero slots â€” gateway was down
 or the day is outside the configured solar window). Missing-slot ranges
 are rendered as plant-local `HH:MM` so operators can correlate against
 incident logs without converting slot indices by hand.
 
 The aggregator's drop-sample reasons are also surfaced on
 `GET /api/system/heartbeat` under `aggregator.samplesDropped*` and
-`aggregator.fieldClampCount` — useful to confirm whether missing slots
+`aggregator.fieldClampCount` â€” useful to confirm whether missing slots
 were caused by inverter downtime, clock skew, or out-of-order frames.
 
-#### 6.8.3 Anchor source — HW counter trust ladder (v2.10.x)
+#### 6.8.3 Anchor source â€” HW counter trust ladder (v2.10.x)
 
 The `Counter_Source` column on the Energy Summary export and the `Anchor`
-pill on the Inverter Clocks → Per-Unit Counter Health table report which
+pill on the Inverter Clocks â†’ Per-Unit Counter Health table report which
 data source today's `etotal_baseline` and `parce_baseline` came from.
-This drives how trustworthy `Etotal Δ` / `parcE Δ` are for that day.
+This drives how trustworthy `Etotal Î”` / `parcE Î”` are for that day.
 
 | Pill | DB source | Meaning | Trust |
 | --- | --- | --- | --- |
-| `CLEAN` | `eod_clean` (and today's snapshot captured) | Yesterday's clean close anchored today **and** today's EOD snapshot has been captured (post-EOD hour). | ★★★★ Best — Δ is fleet-comparable |
-| `EOD` | `eod_clean` | Yesterday's clean close anchored today; today's EOD snapshot pending (will fire after the configured EOD hour). | ★★★ Δ is fleet-comparable |
-| `EOD-ONLY` | `eod_clean_only` | Late-created row from a dark-window capture: the day's morning baseline was never recorded (gateway started post-midnight, fresh install, etc.). The day's own Δ is unknown — the export blanks the HW columns for that day — but the row anchors **tomorrow's** baseline. Self-heals to EOD/CLEAN tomorrow. | ★ Same-day Δ unknown |
-| `POLL` | `poll` | Today's baseline came from the first poll of the day, **not** yesterday's clean close. Etotal Δ undercounts today's energy by whatever the inverter produced before the gateway's first poll. PAC-integrated `Total_MWh` stays authoritative. | ★★ Δ undercounts |
+| `CLEAN` | `eod_clean` (and today's snapshot captured) | Yesterday's clean close anchored today **and** today's EOD snapshot has been captured (post-EOD hour). | â˜…â˜…â˜…â˜… Best â€” Î” is fleet-comparable |
+| `EOD` | `eod_clean` | Yesterday's clean close anchored today; today's EOD snapshot pending (will fire after the configured EOD hour). | â˜…â˜…â˜… Î” is fleet-comparable |
+| `EOD-ONLY` | `eod_clean_only` | Late-created row from a dark-window capture: the day's morning baseline was never recorded (gateway started post-midnight, fresh install, etc.). The day's own Î” is unknown â€” the export blanks the HW columns for that day â€” but the row anchors **tomorrow's** baseline. Self-heals to EOD/CLEAN tomorrow. | â˜… Same-day Î” unknown |
+| `POLL` | `poll` | Today's baseline came from the first poll of the day, **not** yesterday's clean close. Etotal Î” undercounts today's energy by whatever the inverter produced before the gateway's first poll. PAC-integrated `Total_MWh` stays authoritative. | â˜…â˜… Î” undercounts |
 | `SEED` | `pac_seed` | Reserved slot from the v2.9.0 design. No code path currently writes `pac_seed`; the renderer keeps the branch for forward compatibility. | n/a (unused) |
-| `—` | (empty) | No baseline row recorded for today yet — will populate on the next poll inside the solar window. | n/a |
+| `â€”` | (empty) | No baseline row recorded for today yet â€” will populate on the next poll inside the solar window. | n/a |
 
 **Self-healing rules** (v2.10.x):
 
 - The dark-window snapshot capture now uses `INSERT-or-UPDATE` (was
-  `UPDATE-only`), so it can create yesterday's row when missing — fixes
+  `UPDATE-only`), so it can create yesterday's row when missing â€” fixes
   the silent failure mode where a fresh-boot gateway lost yesterday's
   close forever even though it had the data.
 - After every successful eod_clean capture, the system re-evaluates
@@ -1248,7 +1248,7 @@ This drives how trustworthy `Etotal Δ` / `parcE Δ` are for that day.
   from `POLL` to `EOD` within seconds.
 - Day-total `Etotal_MWh` / `parcE_MWh` columns NaN-propagate (blank)
   for `EOD-ONLY` days so partial-coverage exports don't silently report
-  0 kWh for a day that was unmeasured — the operator sees the gap.
+  0 kWh for a day that was unmeasured â€” the operator sees the gap.
 
 ### Common Export Behavior
 
@@ -1265,10 +1265,10 @@ that reports when the last reload happened and the result per data
 source. Clicking Refresh drives every data pipeline that feeds the
 Export tab:
 
-1. **Settings reload** — inverter count and display labels.
-2. **Dropdowns rebuilt** — every inverter select, every Alarm / Energy /
+1. **Settings reload** â€” inverter count and display labels.
+2. **Dropdowns rebuilt** â€” every inverter select, every Alarm / Energy /
    Forecast / Operational Data / Audit / Daily Report selector.
-3. **Forecast date list** reloaded — the Day-Ahead Comparison card's
+3. **Forecast date list** reloaded â€” the Day-Ahead Comparison card's
    snapshot/forecast date dropdown.
 4. **Server pipeline refresh** (`POST /api/export/refresh-pipelines`)
    in gateway mode:
@@ -1277,11 +1277,11 @@ Export tab:
    - Returns current row counts for forecast days, snapshot dates,
      audit log, alarms, daily report, energy, and readings.
    - Returns `skipped (remote-mode)` when running from a remote
-     workstation — Solcast only runs on the gateway.
-5. **Forecast date list reloaded again** — newly-arrived snapshot dates
+     workstation â€” Solcast only runs on the gateway.
+5. **Forecast date list reloaded again** â€” newly-arrived snapshot dates
    appear in the dropdown without leaving the page.
 6. **Status line updated** with an inline summary. Example:
-   `Last refreshed 14:32:07 — Solcast 288 slots, 2 snap dates, 28 forecast days, 107 audit rows`.
+   `Last refreshed 14:32:07 â€” Solcast 288 slots, 2 snap dates, 28 forecast days, 107 audit rows`.
    Hover the status line for the full per-source diagnostic JSON.
 
 Use Refresh whenever:
@@ -1296,7 +1296,7 @@ Use Refresh whenever:
 
 The Refresh button is safe to click at any time. In-flight exports
 continue to run to completion because they hold their own cancel tokens
-— refreshing only touches dropdowns, defaults, cached UI state, and the
+â€” refreshing only touches dropdowns, defaults, cached UI state, and the
 Solcast snapshot cache. If the Solcast fetch times out or any other
 pipeline fails, the button shows `Partial` and the status line lists
 the number of errors; hover it to see which source failed.
@@ -1551,13 +1551,13 @@ The card has three tabs:
 | `Read` | Issues FC11 `Report Slave ID` and shows the current serial, model, and firmware version. The successful read **mints a 5-minute session token** required by `Send`. |
 | `New serial` | Candidate serial. Length is enforced per format and only ASCII printable characters are accepted. |
 | `Verify Serial Number to send` | Default-on. Before writing, scans every reachable `(inverter, slave)` pair via FC11 in parallel and rejects the candidate if it is already in use elsewhere on the fleet. The fleet scan honors a 5-minute cache so repeated reads do not stress the bus. |
-| `Send` | Two-frame write: UNLOCK (`0xFFFA = 0x0065, 0x07A7`) → WRITE (`0x9C74`) → readback verify. Bulk-auth is required, plus the active session token from a prior `Read`. |
-| Recent serial-number changes | Audit table of the last `serial_change_log` entries — operator, target, candidate, outcome, reason on failure. |
+| `Send` | Two-frame write: UNLOCK (`0xFFFA = 0x0065, 0x07A7`) â†’ WRITE (`0x9C74`) â†’ readback verify. Bulk-auth is required, plus the active session token from a prior `Read`. |
+| Recent serial-number changes | Audit table of the last `serial_change_log` entries â€” operator, target, candidate, outcome, reason on failure. |
 
 Operational rules:
 
 - The unlock magic and the FC16 write target were decoded byte-for-byte
-  from the vendor IL bytecode and are **identical to ISM's writer** — the
+  from the vendor IL bytecode and are **identical to ISM's writer** â€” the
   dashboard write is indistinguishable on the wire.
 - A duplicate serial blocks the write before the unlock frame is sent;
   the operator can either pick a different candidate or send with
@@ -1572,11 +1572,11 @@ Operational rules:
   write ACK was lost (flagged `write_ack_lost`). Only a read-back that
   still shows the old serial is a true failure. If neither the write ACK
   nor a read-back can be obtained, the result is `write_unconfirmed`
-  (never reported as success) — rescan to confirm.
-- **One credential, end to end.** The entire Serial Number feature —
+  (never reported as success) â€” rescan to confirm.
+- **One credential, end to end.** The entire Serial Number feature â€”
   single Read / Send, Read-all, Plant Serial Map scan, Bulk Fix
-  plan/apply, and the duplicate override — is gated by **one** key:
-  the authorization key (`adsiMM`) — the same rolling key used for every
+  plan/apply, and the duplicate override â€” is gated by **one** key:
+  the authorization key (`adsiMM`) â€” the same rolling key used for every
   privileged action across the dashboard. Pure read surfaces (audit log,
   migration history, cached map, target map) need no key at all.
 
@@ -1597,29 +1597,29 @@ editing 100+ nodes one at a time.
 
 | Control | Function |
 | --- | --- |
-| `Show target map` | Displays the locked factory map for all 27 inverters, generated 1:1 from the authoritative `docs/Fixed_Inverter_SerialNumbers.xlsx` (the permanent field guide). `T` is the inverter nameplate (reference only — never written); slaves 1–4 are the writable nodes. Read-only — works in remote mode. |
-| `Scan & diff` | Reads every node from the wire and compares it to the locked map. Bulk-auth required. **No writes.** Each node is classified `match`, `mismatch`, `unreachable`, or `no live unit`, and each mismatch gets an **Origin**: `factory / unknown` (serial not in the map) or **relocated** (`⇄ Inv X / Node Y` — the live serial belongs to a different slot, i.e. a physically moved power module). Only `mismatch` rows are selectable. |
+| `Show target map` | Displays the locked factory map for all 27 inverters, generated 1:1 from the authoritative `docs/Fixed_Inverter_SerialNumbers.xlsx` (the permanent field guide). `T` is the inverter nameplate (reference only â€” never written); slaves 1â€“4 are the writable nodes. Read-only â€” works in remote mode. |
+| `Scan & diff` | Reads every node from the wire and compares it to the locked map. Bulk-auth required. **No writes.** Each node is classified `match`, `mismatch`, `unreachable`, or `no live unit`, and each mismatch gets an **Origin**: `factory / unknown` (serial not in the map) or **relocated** (`â‡„ Inv X / Node Y` â€” the live serial belongs to a different slot, i.e. a physically moved power module). Only `mismatch` rows are selectable. |
 | `Acknowledge relocated module(s)` | **Auto-detected.** This control appears only when the current selection includes one or more relocated modules. It must be ticked to re-serialize moved boards; otherwise those rows are skipped (their origin is logged either way). It does not appear when nothing relocated is selected. |
-| `Apply selected` | UNLOCK + WRITE + readback-verify the locked serial to every selected mismatched node, **one at a time**. Every write is recorded in `serial_change_log` (scope `bulk`) with the action timestamp, operator, old→new serial, and — for a moved module — a structured origin (`origin_inverter`/`origin_node`) plus an `origin_note` such as `module from Inv 4 / Node 1 (serial 400152915R41)`. Cannot be undone in one click. |
-| `Load migration history` | Opens the **Measurement Board (Power Module) Migration History** — the chronological trail of every physically relocated board: origin slot → where it was found → re-serialized, with timestamp, operator, and result. It captures relocations re-serialized via **either** Bulk Fix **or** the one-by-one Read / Edit / Send tab, so the trail is complete regardless of method. Read-only; works in remote mode (reads the replicated `serial_change_log`). A relocation that was only detected but not yet acknowledged is listed as *detected (pending ack)* so nothing is lost. |
-| `Export` (format selector) | Saves the full Measurement Board migration trail through the **standard export pipeline** — a styled Excel workbook (`.xlsx`) or CSV, written to the same Logs tree as every other export (`<csvSavePath>\All Inverters\Audits\`) with the same date-aware filename convention (`DD-MMYYYY All Inverters Measurement Board Migration.xlsx`). Columns: Date, Time, Plant, Operator, Board Serial (Old), Origin Inverter, Origin Node, Found At Inverter, Found At Node, New Serial, Outcome, Verified, Origin Note, Error. The folder opens automatically when done. Endpoint `POST /api/export/measurement-board-migration` (gateway export job; proxied + downloaded locally in remote mode, exactly like the Alarms/Audit exports). |
+| `Apply selected` | UNLOCK + WRITE + readback-verify the locked serial to every selected mismatched node, **one at a time**. Every write is recorded in `serial_change_log` (scope `bulk`) with the action timestamp, operator, oldâ†’new serial, and â€” for a moved module â€” a structured origin (`origin_inverter`/`origin_node`) plus an `origin_note` such as `module from Inv 4 / Node 1 (serial 400152915R41)`. Cannot be undone in one click. |
+| `Load migration history` | Opens the **Measurement Board (Power Module) Migration History** â€” the chronological trail of every physically relocated board: origin slot â†’ where it was found â†’ re-serialized, with timestamp, operator, and result. It captures relocations re-serialized via **either** Bulk Fix **or** the one-by-one Read / Edit / Send tab, so the trail is complete regardless of method. Read-only; works in remote mode (reads the replicated `serial_change_log`). A relocation that was only detected but not yet acknowledged is listed as *detected (pending ack)* so nothing is lost. |
+| `Export` (format selector) | Saves the full Measurement Board migration trail through the **standard export pipeline** â€” a styled Excel workbook (`.xlsx`) or CSV, written to the same Logs tree as every other export (`<csvSavePath>\All Inverters\Audits\`) with the same date-aware filename convention (`DD-MMYYYY All Inverters Measurement Board Migration.xlsx`). Columns: Date, Time, Plant, Operator, Board Serial (Old), Origin Inverter, Origin Node, Found At Inverter, Found At Node, New Serial, Outcome, Verified, Origin Note, Error. The folder opens automatically when done. Endpoint `POST /api/export/measurement-board-migration` (gateway export job; proxied + downloaded locally in remote mode, exactly like the Alarms/Audit exports). |
 
 Operational rules:
 
 - The source file is the **single source of truth**. If a field serial is
   wrong, fix `docs/Fixed_Inverter_SerialNumbers.xlsx` and regenerate the
-  map — the dashboard cross-checks every live node against it.
+  map â€” the dashboard cross-checks every live node against it.
 - The serial numbering is **locked**: every node's serial is fixed even
-  when a physical node is absent — its serial stays reserved and is never
+  when a physical node is absent â€” its serial stays reserved and is never
   reused. That is what lets the dashboard recognise a relocated module by
   its serial. `Scan & diff` reports absent units as `no live unit` and
   never writes to them.
 - **Module relocation tracking:** when you physically move a power module
-  (e.g. Inverter 4 / Node 1 → Inverter 27 / Node 2), the moved board still
+  (e.g. Inverter 4 / Node 1 â†’ Inverter 27 / Node 2), the moved board still
   reports its old serial. Bulk Fix recognises that serial as belonging to
   Inv 4 / Node 1, flags it relocated, requires the auto acknowledgement,
   and records where the board came from in the change log with correct
-  timestamps — so the move is traceable for historical data.
+  timestamps â€” so the move is traceable for historical data.
 - The fleet uniqueness scan is **skipped** during Bulk Fix because the
   factory map is pre-validated globally unique; transient mid-sweep
   collisions would otherwise produce false blocks. Every write is still
@@ -1639,20 +1639,20 @@ Remote-mode behavior:
 #### Firmware Map
 
 The nodes **within one inverter** should all run the **same firmware**.
-The Firmware Map tab audits that invariant **per inverter** — each
+The Firmware Map tab audits that invariant **per inverter** â€” each
 inverter is judged only against *its own* nodes, never against other
 inverters or a plant-wide version. Firmware rides the same FC11 payload
 the serial scan already reads, so this is a **projection of the serial
-scan — it adds no extra bus traffic**.
+scan â€” it adds no extra bus traffic**.
 
 **What "firmware" means here (verified 2026-05-19):** the comparison uses
-the **inverter firmware code** — the `AAV1003xx` string in the
+the **inverter firmware code** â€” the `AAV1003xx` string in the
 **Firmware** column. This was confirmed by decompiling ISM's own FC11
 parser (`IngeconModbusSlaveID_Freescale`): for this hardware family ISM
 extracts exactly the serial plus *one* firmware code, and never a
 separate display-firmware field. The two extra strings in the **Aux ID 1
-/ Aux ID 2** columns (the `AAS…` values) are *unverified auxiliary
-identifiers* the vendor tool does not treat as a firmware version — they
+/ Aux ID 2** columns (the `AASâ€¦` values) are *unverified auxiliary
+identifiers* the vendor tool does not treat as a firmware version â€” they
 are shown for diagnostics only and are **not** part of the comparison
 (so a blank or varying Aux value never raises a false alarm).
 
@@ -1666,28 +1666,28 @@ are shown for diagnostics only and are **not** part of the comparison
 
 Per-inverter verdict pill:
 
-- **all same** (green) — every readable node on the inverter runs the
+- **all same** (green) â€” every readable node on the inverter runs the
   same firmware code.
-- **mixed nodes** (red) — nodes *on the same inverter* run different
+- **mixed nodes** (red) â€” nodes *on the same inverter* run different
   firmware. This is the post-board-swap signature (a replaced power
-  module brought a different firmware) — the firmware-side dual of the
+  module brought a different firmware) â€” the firmware-side dual of the
   serial relocation guard.
-- **partial read** (amber) — at least one node on the inverter could not
+- **partial read** (amber) â€” at least one node on the inverter could not
   be read this scan; the ones that answered agree.
-- **no read** (red) — no node on the inverter answered.
+- **no read** (red) â€” no node on the inverter answered.
 
 Per-node Status is **same** or **different** *relative to the other nodes
 on the same inverter* (the minority node in a mixed inverter is the one
 shown **different**, with its Firmware cell highlighted).
 
 A drift event is logged **only** when a previously-seen node's
-**inverter-firmware code** actually changes between scans — first
+**inverter-firmware code** actually changes between scans â€” first
 sightings, unreadable nodes, and Aux-ID-only changes never create noise.
 The snapshot of an unreadable node is never overwritten by a failed read.
 
 **Field check (Utility / Calibration Tool):** the calibration tool exposes
-a single-inverter `Firmware Check` for the connected inverter — it reads
-slaves 1–4 and reports whether that one inverter's nodes match, so a
+a single-inverter `Firmware Check` for the connected inverter â€” it reads
+slaves 1â€“4 and reports whether that one inverter's nodes match, so a
 technician can confirm a freshly swapped board matches its siblings
 without a full plant scan.
 
@@ -1769,14 +1769,14 @@ The camera card is a draggable card that participates in the inverter grid layou
 - **Top-left overlay**: Camera name label (e.g., `Tapo C110 - Live`)
 - **Top-right overlay**: Blinking red dot indicator when the stream is active
 - **Bottom controls bar**:
-  - ⚙️ Settings — opens the Camera Settings modal
-  - 🔇/🔊 Mute/unmute toggle
-  - **Viewer window** — opens the Tapo stream in a standard framed Electron window
+  - âš™ï¸ Settings â€” opens the Camera Settings modal
+  - ðŸ”‡/ðŸ”Š Mute/unmute toggle
+  - **Viewer window** â€” opens the Tapo stream in a standard framed Electron window
 - **Loading spinner** while buffering
 - **Error overlay** with `Retry` button when the stream fails
 - **Auto-reconnect** every 5 seconds on stream drop
 
-The viewer-window control replaces browser DOM fullscreen. It pauses the dashboard card and opens **ADSI – Tapo Camera Viewer** with normal Windows move, resize, minimize, maximize/restore, and close controls. Inside that operating-system frame, only the video surface is rendered—card labels, settings controls, messages, alarms, footers, and other dashboard HTML are excluded. The viewer opens at 1280×820, can be reduced to **480×300**, and keeps the video full-bleed with its aspect ratio preserved. Closing it releases the viewer stream and resumes the dashboard card only when its owning page is visible. Double-clicking Tapo video opens the same viewer.
+The viewer-window control replaces browser DOM fullscreen. It pauses the dashboard card and opens **ADSI â€“ Tapo Camera Viewer** with normal Windows move, resize, minimize, maximize/restore, and close controls. Inside that operating-system frame, only the video surface is renderedâ€”card labels, settings controls, messages, alarms, footers, and other dashboard HTML are excluded. The viewer opens at 1280Ã—820, can be reduced to **480Ã—300**, and keeps the video full-bleed with its aspect ratio preserved. Closing it releases the viewer stream and resumes the dashboard card only when its owning page is visible. Double-clicking Tapo video opens the same viewer.
 
 ### Stream Modes
 
@@ -1788,7 +1788,7 @@ The viewer-window control replaces browser DOM fullscreen. It pauses the dashboa
 
 ### Camera Settings Modal
 
-Click the **⚙️ Settings** icon on the Tapo camera card to open the modal. The modal is a page-level dialog centered on the screen (not card-scoped). Its header includes **Hikvision DVR**, which opens the separate DVR configuration modal without requiring controls on the native Hikvision card.
+Click the **âš™ï¸ Settings** icon on the Tapo camera card to open the modal. The modal is a page-level dialog centered on the screen (not card-scoped). Its header includes **Hikvision DVR**, which opens the separate DVR configuration modal without requiring controls on the native Hikvision card.
 
 #### Stream Mode Selection
 
@@ -1859,11 +1859,11 @@ The service status grid polls `GET /api/streaming/go2rtc-status` every 5 seconds
 
 The Hikvision DVR uses its own draggable dashboard card, settings modal, browser stream, native decoder bridge, and API routes. Its DVR-specific connection stays separate from the Tapo configuration. The polished modal groups secure stream paths, device identity, DVR connection, channel/playback, stream profile, and playback status into separate panels. Enter the DVR's local username and password; Hik-Connect cloud credentials and camera access codes are not used. The SDK/HTTP port defaults to `80`, while RTSP defaults to `554`.
 
-Use **Hybrid HLS + native viewer window** for normal operation. On the Inverters-page card, FFmpeg supplies browser-safe H.264 HLS. Expect roughly 2–3 seconds of latency and modest transcoding loss. The native-viewer control pauses card HLS and opens a standard Electron window like the Analytics popout. Hikvision LocalService fills its content area at the DVR's original quality and frame rate. The installed dashboard normally runs without elevation so Windows permits LocalService to embed this native surface; do not force **Run as administrator**. Use the normal Windows title-bar controls to move, resize, minimize, maximize, restore, or close it. The viewer can be reduced to **480×300** for flexible side-by-side and multi-monitor layouts. Closing the window stops the native decoder and resumes HLS automatically when Inverters is visible.
+Use **Hybrid HLS + native viewer window** for normal operation. On the Inverters-page card, FFmpeg supplies browser-safe H.264 HLS. Expect roughly 2â€“3 seconds of latency and modest transcoding loss. The native-viewer control pauses card HLS and opens a standard Electron window like the Analytics popout. Hikvision LocalService fills its content area at the DVR's original quality and frame rate. The installed dashboard normally runs without elevation so Windows permits LocalService to embed this native surface; do not force **Run as administrator**. Use the normal Windows title-bar controls to move, resize, minimize, maximize, restore, or close it. The viewer can be reduced to **480Ã—300** for flexible side-by-side and multi-monitor layouts. Closing the window stops the native decoder and resumes HLS automatically when Inverters is visible.
 
 When the operator navigates away from Inverters, the Hikvision card disappears with that page and its HLS playback stops. Returning to Inverters restores the card in its saved grid position and reconnects playback. The card provides **Settings** and **Open native viewer window** controls. Closing the native viewer resumes the card only when Inverters is visible. Native playback is restricted to its owning viewer window, and rapid window transitions cancel stale starts. If LocalService cannot start, the viewer shows a **Retry** button; otherwise the native video fills the content area.
 
-**Compatible snapshots** remains a low-frame-rate fallback, while **Direct HLS** remains a raw-codec diagnostic mode; these explicit modes use ordinary HTML fullscreen instead of opening the native viewer. **Prepare H.264 Substream** is an optional isolated change to channel **xx02** and never modifies **xx01**. A blank password means “keep the existing password.”
+**Compatible snapshots** remains a low-frame-rate fallback, while **Direct HLS** remains a raw-codec diagnostic mode; these explicit modes use ordinary HTML fullscreen instead of opening the native viewer. **Prepare H.264 Substream** is an optional isolated change to channel **xx02** and never modifies **xx01**. A blank password means â€œkeep the existing password.â€
 
 #### Hikvision routing in Gateway and Remote modes
 
@@ -1876,7 +1876,7 @@ The settings modal has an explicit **Gateway mode** or **Remote mode** context b
 
 In Remote mode the gateway relay remains preferred. A workstation-side go2rtc/FFmpeg pipeline starts only as a camera fallback when the relay cannot provide a valid HLS stream and the configured DVR RTSP port is directly reachable. This does not switch operation mode: inverter telemetry, history, writes, replication, and forecasts remain gateway-authoritative. Native LocalService and direct HLS use the DVR password saved locally on that viewer; the gateway password is never returned through the API. Gateway host, port, channel, stream, and username changes synchronize to the viewer when the gateway supports the Hikvision routes.
 
-In **Complete Remote mode**—where the workstation is outside the plant LAN and has no approved DVR subnet route—the workstation cannot create camera HLS itself. A compatible gateway Hikvision relay is therefore required. If both the gateway relay and direct DVR route are unavailable, the modal reports **No reachable HLS path**, disables route-dependent actions, and tells the operator to update/restart the gateway camera relay or approve the least-privilege DVR `/32` route. It does not start an idle local transcoder or misreport an HTML response as HLS.
+In **Complete Remote mode**â€”where the workstation is outside the plant LAN and has no approved DVR subnet routeâ€”the workstation cannot create camera HLS itself. A compatible gateway Hikvision relay is therefore required. If both the gateway relay and direct DVR route are unavailable, the modal reports **No reachable HLS path**, disables route-dependent actions, and tells the operator to update/restart the gateway camera relay or approve the least-privilege DVR `/32` route. It does not start an idle local transcoder or misreport an HTML response as HLS.
 
 During a rolling deployment, an older gateway may not expose `/api/hikvision/*`, may return HTML with HTTP 200, or may have an unhealthy camera service. The viewer validates the playlist before Hls.js sees it, contains invalid markup, marks the relay degraded, and selects the direct workstation path when available.
 
@@ -1913,7 +1913,7 @@ The route check is read-only. It opens bounded TCP connectivity probes and never
 | FFmpeg mode shows no video | FFmpeg not installed | Install FFmpeg and add to system PATH |
 | Service controls hidden | Remote operation mode | Switch to Gateway mode in Settings > Connectivity |
 | Status shows `error` | 3+ consecutive crashes | Check RTSP source and `go2rtc.yaml` config, then manually restart |
-| Hikvision card stays on “Starting” | The Hikvision media service is unavailable, the DVR is unreachable, or the local DVR login failed | Verify the DVR/LAN connection, then use `Verify Connection` |
+| Hikvision card stays on â€œStartingâ€ | The Hikvision media service is unavailable, the DVR is unreachable, or the local DVR login failed | Verify the DVR/LAN connection, then use `Verify Connection` |
 | Remote gateway relay is unavailable | The gateway is older, its camera service is unhealthy, or it returned a non-HLS response | Use **Check Routes**. If RTSP is reachable, the viewer selects direct HLS automatically; otherwise restore the gateway relay or the DVR subnet route |
 | HLS works but the native viewer is blank | Hikvision LocalService is unavailable, or the dashboard was manually forced to run as administrator | Start LocalService, relaunch the dashboard normally (not **Run as administrator**), then select **Retry** |
 | Remote card works but native viewer is blocked | The gateway relay is healthy, but the viewer has no approved route to the DVR or no viewer-local DVR password | Advertise and approve the DVR `/32` route, allow the SDK/RTSP ports in the tailnet grant, enter the password on the viewer, then use **Check Routes** |
@@ -1925,11 +1925,11 @@ The route check is read-only. It opens bounded TCP connectivity probes and never
 ## 6.11 Field Calibration Page (v2.11.x)
 
 The **Field Calibration** page is a dedicated top-nav workspace
-(navigation bar → `FIELD CALIB`) that surfaces each inverter electronic
+(navigation bar â†’ `FIELD CALIB`) that surfaces each inverter electronic
 block's INGECON-firmware scale-factor / reactive-curve calibration over
 Modbus TCP, so an operator can read and adjust the same values that the
-local LCD display exposes under **Ajustes → Other Adjustments → Scale
-Factor Adjustments** — **without** walking the inverter cabinet and
+local LCD display exposes under **Ajustes â†’ Other Adjustments â†’ Scale
+Factor Adjustments** â€” **without** walking the inverter cabinet and
 stepping through arrow-key menus.
 
 Read-only access is concurrent with normal dashboard operation; the
@@ -1949,7 +1949,7 @@ Pick an `Inverter` and `Node` (1..4), enter the topology auth key
 | `ValidCfgCode` (offset 80) | Must read `0x1F1F`. If anything else, the inverter's config block is in an unexpected state and **writes will refuse**. |
 | **AC Voltage** group: `F_E_Vac1/2/3` (offsets 81-83) | Per-phase AC voltage full-scale calibration constants (display labels match LCD). |
 | **AC Current** group: `F_E_Iac1/2/3` (offsets 84-86) | Per-phase AC current full-scale (low-gain). |
-| **DC** group: `F_E_Ipv` (87), `F_E_Vpvp` (88), `F_E_Vpvn` (89) | DC input current + DC voltage (+/−) full-scale. |
+| **DC** group: `F_E_Ipv` (87), `F_E_Vpvp` (88), `F_E_Vpvn` (89) | DC input current + DC voltage (+/âˆ’) full-scale. |
 | **Active P** group: `Per. Vacio` (90) | Self-consumption / standby compensation. |
 | **Reactive 1** group: `Pot. Reactiv_X1`, `Comp. Reacti_Y1` (91-92) | First point of the digital reactive-power curve (Pn = 20 % per display calibration procedure). |
 | **Reactive 2** group: `Pot. Reactiv_X2`, `Comp. Reacti_Y2` (93-94) | Second point (Pn = 70 %). `Y2` is the only field that decodes as signed Int16. |
@@ -1957,11 +1957,11 @@ Pick an `Inverter` and `Node` (1..4), enter the topology auth key
 The **Full Config Dump** button issues a slow FC03 read of all 177
 registers (offsets `0x00..0xB0`) and additionally surfaces:
 
-- Inverter RTC mirror (offset 0-5) — useful for cross-checking the clock-sync log
+- Inverter RTC mirror (offset 0-5) â€” useful for cross-checking the clock-sync log
 - Grid envelope (Vacmin/Vacmax, Facmin/Facmax)
 - Nominal and limit active power (decoded as Watts)
 - Country / grid-standard code
-- Raw register dump (collapsible) — 14 rows × 13 cols of hex words
+- Raw register dump (collapsible) â€” 14 rows Ã— 13 cols of hex words
 
 ### Fleet Anomalies tab
 
@@ -1970,11 +1970,11 @@ every configured `(inverter, slave)` pair, reads each calibration block,
 computes the per-field median across the fleet, and displays each node's
 delta versus median. Color thresholds:
 
-| Δ vs median | Color | Meaning |
+| Î” vs median | Color | Meaning |
 |---|---|---|
-| ≤ 2 % | green | within normal sensor manufacturing tolerance |
-| 2–5 % | orange | drift worth investigating on next maintenance visit |
-| > 5 % | red | outlier — likely a recently-replaced module with stale factory calibration, or a sensor that needs recalibration |
+| â‰¤ 2 % | green | within normal sensor manufacturing tolerance |
+| 2â€“5 % | orange | drift worth investigating on next maintenance visit |
+| > 5 % | red | outlier â€” likely a recently-replaced module with stale factory calibration, or a sensor that needs recalibration |
 
 A full 108-node fleet scan takes ~10 s and is throttled to one
 concurrent call (the second operator click receives HTTP 429 until the
@@ -1989,17 +1989,17 @@ mode**, and a persistent banner pins to the top of every page.
 
 While a session is active:
 
-- **All other top-nav pages are hidden** — only the Field Calibration page is reachable.
+- **All other top-nav pages are hidden** â€” only the Field Calibration page is reachable.
 - **APC writes are refused** for the session's inverter (operator must
   drive `%Pn` via the consign tiles instead).
 - **Critical-pattern auto-block enforcer is suspended** for the session's
   inverter (alarms still record, but no auto-STOP fires).
 - **Auto-reset is suspended** for the session's node.
 - **Per-register write inputs appear** on the per-node readout table.
-- **Heartbeat pings the server every 10 s** — if your laptop closes or
+- **Heartbeat pings the server every 10 s** â€” if your laptop closes or
   the network drops for 30 s, the session auto-ends and the dashboard
   restores normal operation.
-- **Hard ceiling of 30 minutes** — sessions auto-end at the absolute
+- **Hard ceiling of 30 minutes** â€” sessions auto-end at the absolute
   limit regardless of heartbeat.
 
 Click **`[End Session]`** to release consign, write a post-session
@@ -2014,11 +2014,11 @@ column with editable inputs and a `Write` button per row. To write:
 2. Enter your `adsiMM` key in the bulk-auth field (`adsi` + current
    minute, e.g. `adsi37`)
 3. Click `Write`
-4. Confirm the modal showing old → new
+4. Confirm the modal showing old â†’ new
 
-The pipeline runs: **UNLOCK → WRITE → 1 s settle → VERIFY**. A
+The pipeline runs: **UNLOCK â†’ WRITE â†’ 1 s settle â†’ VERIFY**. A
 read-back confirms the new value landed. The `ValidCfgCode = 0x1F1F`
-sentinel is checked before AND after the write — if it changes, the
+sentinel is checked before AND after the write â€” if it changes, the
 write reports `sentinel_clobbered` and the operator must investigate
 before continuing.
 
@@ -2039,11 +2039,11 @@ When a session is active, a panel appears with tile buttons:
 Clicking a tile drives `cmd-3` (APC) to that percentage of nominal
 power. The 5 presets correspond to the training PDF's consign steps:
 
-- **10 %** — initial DC current calibration ladder
-- **20 %** — reactive curve X₁Y₁ calibration point
-- **60 %** — DC current calibration target
-- **70 %** — reactive curve X₂Y₂ calibration point
-- **Release** — restore to 100 % Pn
+- **10 %** â€” initial DC current calibration ladder
+- **20 %** â€” reactive curve Xâ‚Yâ‚ calibration point
+- **60 %** â€” DC current calibration target
+- **70 %** â€” reactive curve Xâ‚‚Yâ‚‚ calibration point
+- **Release** â€” restore to 100 % Pn
 
 Between distinct setpoints, a 30-second dwell timer enforces PAC
 settling time before another consign command will be accepted. The
@@ -2060,7 +2060,7 @@ the new electronic block's factory calibration differs from a known-good
 sibling.
 
 Both source and destination must have `ValidCfgCode = 0x1F1F`. Only
-fields where source ≠ destination are written — no-op fields are
+fields where source â‰  destination are written â€” no-op fields are
 skipped. Every write goes into the audit log with
 `auth_method = adsiMM+session+copy` and a `notes` column citing the
 source.
@@ -2068,7 +2068,7 @@ source.
 ### Feature flag
 
 Calibration writes are gated by the `calibrationWritesEnabled` setting,
-default `0`. Set to `1` (Settings → Plant Configuration) after operator
+default `0`. Set to `1` (Settings â†’ Plant Configuration) after operator
 sign-off. The `Start Calibration Session` button stays disabled when
 the flag is off, with a tooltip explaining how to enable. The page
 toolbar shows a `Writes: ENABLED / OFF` badge so the current state is
@@ -2085,14 +2085,14 @@ visible at a glance.
 
 A **FW Upgrade** button at the top-right of the per-node controls row
 (standalone calibrator only) opens the **Firmware Upgrade** dialog,
-presented as a guided **4-step wizard** — *File → Target → Dry-run →
+presented as a guided **4-step wizard** â€” *File â†’ Target â†’ Dry-run â†’
 Flash*. A progress rail shows each step's status (done / current /
 locked); a later step stays locked until its prerequisite is met, so the
 irreversible step cannot be reached by accident:
 
-1. **Connect a transport** to the target inverter — either **Ethernet**
+1. **Connect a transport** to the target inverter â€” either **Ethernet**
    (Modbus-TCP via the transparent gateway) or **RS485-USB** (Modbus-RTU,
-   the most-direct link to the node DSP — no comm board / gateway in the
+   the most-direct link to the node DSP â€” no comm board / gateway in the
    loop). The flash uses whichever is connected. For a serial flash the
    tool takes **exclusive ownership of the COM port** for the duration
    (the serial analogue of the RS-485 bus lock); reconnect the transport
@@ -2108,32 +2108,32 @@ irreversible step cannot be reached by accident:
    The claim self-expires (~2 min) if the calibrator crashes, so polling
    can never be permanently silenced.
    *Transport status:* the dialog shows a **transport-status line** near the
-   top — **green** when a link is open, **amber** with an inline **Connect…**
+   top â€” **green** when a link is open, **amber** with an inline **Connectâ€¦**
    shortcut when none is. So you know *before* clicking whether **Read
    Identity** and **FLASH (live)** can actually reach the unit; both guide you
    to connect a transport instead of failing with a cryptic error. (Dry-Run is
    hardware-free and needs no transport.)
-2. **Browse… to the firmware file.** The native OS file picker opens;
+2. **Browseâ€¦ to the firmware file.** The native OS file picker opens;
    choose the `.S` Motorola S-record image (you may also paste an
-   absolute path). The filename must follow the ISM `LLLnnnn…` rule
+   absolute path). The filename must follow the ISM `LLLnnnnâ€¦` rule
    (e.g. `AAV1003IJK01BC_InverterFirmware.S`); the server still verifies
    it is a real `.S` file, size-capped, and SHA-256-pinned to the
    dry-run.
-3. **Set the target node** (1–247; broadcast/0 is forbidden) and
-   optionally **Read Identity** — an FC11 Report-Slave-ID showing the
+3. **Set the target node** (1â€“247; broadcast/0 is forbidden) and
+   optionally **Read Identity** â€” an FC11 Report-Slave-ID showing the
    exact serial / model / running firmware of the unit you would flash.
    When a file is already selected, the readout also states whether the
-   flash is an **upgrade**, **downgrade**, or **no change** (unit version →
+   flash is an **upgrade**, **downgrade**, or **no change** (unit version â†’
    file version), mirroring ISM's pre-flash advisory so you confirm the
    direction *before* arming.
 4. **Dry-Run (safe).** This simulates the *entire* flash against an
    in-memory DSP with **zero hardware contact**. It also computes and
    displays the file's **SHA-256**, and verifies that the firmware **code
    embedded in the image matches the filename** (ISM's
-   `VerificaFicheroFirmware` *"Invalid firmware"* guard) — so a renamed or
+   `VerificaFicheroFirmware` *"Invalid firmware"* guard) â€” so a renamed or
    corrupt file is rejected here, before you can arm. A successful dry-run
    of the *exact* selected file/node/parameters is a hard precondition for
-   arming the live flash — changing any of them re-disables the live button.
+   arming the live flash â€” changing any of them re-disables the live button.
 5. **Arm.** The live block reveals only after a passing dry-run. You
    must (a) tick the irreversible-acknowledgement box and (b) supply the
    authorization key (`adsiMM`). The **FLASH (live)** button stays
@@ -2144,18 +2144,18 @@ irreversible step cannot be reached by accident:
 **Server-side gates (enforced regardless of the UI).** The live flash is
 refused unless *all* hold: explicit irreversible confirmation; a prior
 successful dry-run of the same SHA-256; exactly one link (a TCP host or
-a serial COM port — never both, never neither); a
+a serial COM port â€” never both, never neither); a
 single non-broadcast node; a verified file (real regular file, `.S`,
 size capped, ISM filename rule, SHA-256 match); the **embedded
 firmware-code match** (the code stored in the image must match the
-filename — ISM `VerificaFicheroFirmware`); an FC11 model/version
+filename â€” ISM `VerificaFicheroFirmware`); an FC11 model/version
 compatibility check (apparent downgrades blocked unless **Allow
 downgrade** is ticked); an exclusive RS-485 bus lock; an audit sink; and
 a watchdog deadline.
 
 **Bootloader preservation.** The loader never transmits the bootloader
 or reset-vector banks. An interrupted or aborted application flash
-therefore leaves the unit **re-flashable** — Abort is fail-safe and is
+therefore leaves the unit **re-flashable** â€” Abort is fail-safe and is
 intentionally *not* behind an auth prompt so it is always immediately
 available. While a flash is running the dialog **cannot be closed** (the
 X, the backdrop, and Escape are all blocked); wait for completion or use
@@ -2165,11 +2165,11 @@ X, the backdrop, and Escape are all blocked); wait for completion or use
 the unit's FC11 identity (ISM `Identifica`) and reports the firmware it
 now runs, so you can confirm the new image booted. This is read-only and
 best-effort: if the unit is still rebooting and cannot be re-read, the
-log says so and asks you to verify manually — it never marks a
+log says so and asks you to verify manually â€” it never marks a
 successful flash as failed.
 
 **Downgrade is possible.** The DSP bootloader and the on-wire protocol
-enforce no version monotonicity — the loader erases and writes whatever
+enforce no version monotonicity â€” the loader erases and writes whatever
 compatible image you send, older or newer. In ISM the
 upgrade-vs-downgrade decision is purely an application-layer policy
 (`QueHableAhoraOCalleParaSiempre(newCode, forceDowngrade)` /
@@ -2178,10 +2178,10 @@ tool mirrors that: the downgrade block compares the unit's **authoritative
 `model_code` version** (the `AAV1003xx` firmware FC11 actually reports)
 against the file's version trailer, and is lifted by ticking **Allow
 downgrade** under Advanced. (It deliberately does *not* use the FC11
-`AAS…` auxiliary IDs, which are not the running firmware.) This guard is
-conservative and does not change what the hardware accepts — the
-bootloader takes any compatible image. The file↔model prefix check
-(`AAV1003…`), the embedded firmware-code match, and the SHA-pinned
+`AASâ€¦` auxiliary IDs, which are not the running firmware.) This guard is
+conservative and does not change what the hardware accepts â€” the
+bootloader takes any compatible image. The fileâ†”model prefix check
+(`AAV1003â€¦`), the embedded firmware-code match, and the SHA-pinned
 dry-run still apply, and bootloader-bank preservation keeps even a
 mistaken-direction flash recoverable.
 
@@ -2190,18 +2190,18 @@ mistaken-direction flash recoverable.
 (`firmware.pre_flash.direction` with the upgrade/downgrade decision;
 `firmware.live.start` / `.ok` / `.fail` with host, node, file, SHA-256,
 and frame counters; and `firmware.live.verify_ok` / `.verify_warn` with
-the old → new firmware codes from the post-flash re-read).
+the old â†’ new firmware codes from the post-flash re-read).
 
 ### What this does NOT replace
 
 - The multimeter and 3-phase wattmeter still go on-site with the
   technician. Calibration is iterative: read the live measurement,
   compute the new scale factor, write, verify against the meter, repeat.
-- Configuration regions outside offsets 81–94 (alarm thresholds, Q-V/Q-P
+- Configuration regions outside offsets 81â€“94 (alarm thresholds, Q-V/Q-P
   thresholds, derating curves) are intentionally out of scope. Those
   remain ISM-only commissioning-tier settings.
 - The serial-number write path (`0x9C74` + 0xFFFA unlock magic) is a
-  separate feature under Settings → Serial Number Setting.
+  separate feature under Settings â†’ Serial Number Setting.
 
 ---
 
@@ -2327,7 +2327,7 @@ Operational note:
 2. Click **+ Add Schedule** in the toolbar.
 3. Fill in Name, Start Time, Stop Time, and optional MW/Sequence/Cooldown overrides.
 4. Enter the Auth Key and click **Save**.
-5. Monitor schedule chips for state transitions (Waiting → Active → Completed).
+5. Monitor schedule chips for state transitions (Waiting â†’ Active â†’ Completed).
 6. Edit or delete schedules via the pencil icon on each chip.
 
 Important:
@@ -2394,7 +2394,7 @@ Important:
 
 ## 8.11 Recovering from Sudden Power Loss
 
-*Introduced in v2.8.10 — 2026-04-17.*
+*Introduced in v2.8.10 â€” 2026-04-17.*
 
 Sudden Windows shutdowns (power cuts, forced hard resets, brownouts) can leave
 NTFS files under `C:\Program Files\ADSI Inverter Dashboard\` in a torn state,
@@ -2418,7 +2418,7 @@ The BIOS fell through every local boot option and is trying to network-boot.
    ```
 
    `chkdsk` will schedule a scan at next reboot. Reboot and let it finish
-   (can take 30–60 minutes on large drives).
+   (can take 30â€“60 minutes on large drives).
 4. Once Windows is back up normally, launch the dashboard.
 
 ### 8.11.2 If the dashboard shows "Dashboard files are damaged"
@@ -2429,7 +2429,7 @@ another packaged file is torn and the app cannot safely continue.
 1. Click **Reinstall Now**. The dashboard will silently run the local copy
    of the installer at
    `C:\ProgramData\InverterDashboard\updates\last-good-installer.exe` and
-   relaunch automatically when install completes (typically 30–60 seconds).
+   relaunch automatically when install completes (typically 30â€“60 seconds).
 2. If **Reinstall Now** is unavailable (first-ever install on this PC, or
    the local installer was deleted), click **Open Updates Folder** and
    place the latest signed installer there, or reinstall from the original
@@ -2457,9 +2457,9 @@ is safe.
 - **Install a UPS** on the dashboard PC. This is the single most effective
   mitigation. A small consumer UPS (500-1000 VA) is enough for the few
   seconds required for NTFS to flush and Windows to power down gracefully.
-- **Disable Windows Fast Startup**: Control Panel → Power Options →
-  *Choose what the power button does* → *Change settings currently
-  unavailable* → uncheck *Turn on fast startup*. This ensures a reboot
+- **Disable Windows Fast Startup**: Control Panel â†’ Power Options â†’
+  *Choose what the power button does* â†’ *Change settings currently
+  unavailable* â†’ uncheck *Turn on fast startup*. This ensures a reboot
   always fully flushes NTFS.
 - **Keep the local installer fresh**: after each successful auto-update
   the dashboard stashes a signed copy at
@@ -2473,7 +2473,7 @@ is safe.
 ## 8.10 Camera Setup Workflow
 
 1. Ensure the workstation is in `Gateway` mode (camera streaming is gateway-only).
-2. Click the **⚙️ gear icon** on the camera card to open Camera Settings.
+2. Click the **âš™ï¸ gear icon** on the camera card to open Camera Settings.
 3. Select the desired stream mode (HLS, WebRTC, or FFmpeg).
 4. For HLS or WebRTC:
    a. Enter the go2rtc server IP (localhost or Tailscale IP) and API port.
@@ -2535,14 +2535,14 @@ For the separate Hikvision DVR card:
 | Export fails | Path, date, format, or dataset issue | Verify export folder, input filters, and current mode |
 | Dashboard shows **"Dashboard files are damaged"** (v2.8.10+) | Packaged files torn by sudden shutdown (power loss, forced reboot) | Click **Reinstall Now** to run the locally stashed installer. See section 8.11 for full recovery procedure |
 | Red **"Database auto-restored"** banner at top of dashboard (v2.8.10+) | `adsi.db` was corrupt at startup; app swapped in a 2-hour backup | Normal. Up to ~2 h of readings re-fill automatically from live polling. Dismiss when ready |
-| PC boots to **"Intel UNDI PXE"** network-boot screen | BIOS could not find a local OS (boot sector / bootloader damage after hard shutdown) | Power off, wait 10 s, power on, F12 → **Windows Boot Manager**. Run `chkdsk C: /f /r` and `sfc /scannow` after Windows recovers. See section 8.11 |
+| PC boots to **"Intel UNDI PXE"** network-boot screen | BIOS could not find a local OS (boot sector / bootloader damage after hard shutdown) | Power off, wait 10 s, power on, F12 â†’ **Windows Boot Manager**. Run `chkdsk C: /f /r` and `sfc /scannow` after Windows recovers. See section 8.11 |
 | An inverter's nodes stop polling but its IP still pings | The gateway's Modbus session to that inverter has wedged (stale socket or comm-board TCP queue). A `ping` only proves the comm board's network chip is alive, not that the Modbus session is healthy | The gateway auto-rebuilds the connection after ~30 s of failed reads. To force it now, open **IP Configuration** and click the **Reconnect** button on that inverter's row (no IP change). See section 10.1 |
-| "Open device web page" does nothing from a remote viewer | The comm board is on the gateway LAN, not reachable from the remote PC | Use the gear icon in **IP Configuration** — it routes the device page through the gateway automatically. See section 10.1 |
+| "Open device web page" does nothing from a remote viewer | The comm board is on the gateway LAN, not reachable from the remote PC | Use the gear icon in **IP Configuration** â€” it routes the device page through the gateway automatically. See section 10.1 |
 
 ### 10.1 Inverter polling stalls while the IP still pings (v2.11.x)
 
-An Ingeteam **AAX0041** Ethernet→RS-485 comm board keeps answering `ping` and even
-accepts the TCP connection while its Modbus polling has stalled — so a reachable
+An Ingeteam **AAX0041** Ethernetâ†’RS-485 comm board keeps answering `ping` and even
+accepts the TCP connection while its Modbus polling has stalled â€” so a reachable
 IP does not prove the inverter is being read. When the gateway's per-inverter
 Modbus session wedges, polling for that inverter can stay dead even though the IP
 responds. The old field workaround was to change the inverter's IP, which forced
@@ -2554,11 +2554,11 @@ the gateway to build a fresh connection.
   action and no IP change are required.
 - **Manual Reconnect:** open **IP Configuration** and click the circular
   **Reconnect** button on that inverter's row (next to Save). This rebuilds only
-  that inverter's gateway socket — it changes no inverter setting and no IP. It
+  that inverter's gateway socket â€” it changes no inverter setting and no IP. It
   works from a remote viewer too: the request is routed to the gateway.
 - **If only a manual reconnect ever helps** (auto-recovery does not), the fault is
-  most likely upstream of the gateway — a duplicate IP, or a stale ARP /
-  connection-tracking entry on the network switch/router — rather than the comm
+  most likely upstream of the gateway â€” a duplicate IP, or a stale ARP /
+  connection-tracking entry on the network switch/router â€” rather than the comm
   board itself.
 
 #### Open device web page (gateway and remote)

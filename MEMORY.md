@@ -1,29 +1,29 @@
-# Inverter Dashboard Project Memory
+﻿# Inverter Dashboard Project Memory
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Repo/package version baseline:** 2.12.7
+- **Repo/package version baseline:** 2.12.8
 - **Operator-noted deployed server-side app version:** 2.2.32
-- **Author:** Engr. Clariden Montaño REE (Engr. M.)
+- **Author:** Engr. Clariden MontaÃ±o REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
 - **Version source-of-truth rule:** `package.json` is the repo version source of truth; hardcoded footer/about strings may lag and must not be trusted blindly.
 
-## v2.12.6 Changes — Installed Hikvision native-viewer compatibility (2026-08-14)
+## v2.12.6 Changes â€” Installed Hikvision native-viewer compatibility (2026-08-14)
 - **Runtime elevation corrected:** the installed Electron dashboard now uses `asInvoker`, matching Hikvision LocalService's normal desktop integrity level so Windows UIPI does not block the native video child window from embedding.
 - **Installer elevation preserved:** the per-machine NSIS installer still requests UAC and grants the language-neutral built-in Users group modify access to `ProgramData\InverterDashboard` before launching the normal-integrity runtime.
 - **Stale elevation overrides removed:** upgrades delete only the ADSI current/legacy `AppCompatFlags\Layers` values so an old `RUNASADMIN` compatibility setting cannot override the new manifest and recreate a black native window.
 - **Regression coverage:** the Hikvision hybrid-mode contract locks the runtime manifest, installer elevation, and ProgramData ACL split so development and installed playback cannot silently diverge again.
 
-## v2.12.5 Changes — Adaptive Hikvision remote routing and flexible camera windows (2026-08-14)
+## v2.12.5 Changes â€” Adaptive Hikvision remote routing and flexible camera windows (2026-08-14)
 - **Complete Remote Hikvision delivery:** Gateway HLS remains preferred, manifests are validated before playback, and a directly reachable LAN/Tailscale DVR route is used only when available. Complete Remote mode now reports a blocked route instead of launching an unusable viewer-side transcoder.
 - **Hikvision native viewer reliability:** LocalService waits for and rebinds to its dedicated Electron window, uses corrected SDK authentication, and falls back between SDK and RTSP playback attempts when necessary.
 - **Gateway Hikvision HLS hardening:** Dedicated internal RTSP binding, serialized media-service startup, fragmented-MP4 HLS, authenticated child-path rewriting, and invalid-manifest containment address black video and manifest parsing failures.
 - **Mode-specific camera settings:** Gateway-host and Remote-viewer behavior now have separate context banners, route labels, service scopes, status guidance, and action availability.
-- **Flexible camera windows:** Hikvision and Tapo viewers use standard resizable Electron frames with 480×300 minimums. The Tapo viewer contains only its video surface inside the operating-system frame.
+- **Flexible camera windows:** Hikvision and Tapo viewers use standard resizable Electron frames with 480Ã—300 minimums. The Tapo viewer contains only its video surface inside the operating-system frame.
 - **Lifecycle coverage and documentation:** Added route/fallback, compact-window, page-ownership, and full-bleed smoke coverage; synchronized the HTML, Markdown, and PDF user guides.
 
-## v2.12.4 Changes — Camera resilience, unified configuration, and alarm acknowledgement sync (2026-08-14)
+## v2.12.4 Changes â€” Camera resilience, unified configuration, and alarm acknowledgement sync (2026-08-14)
 - **Hikvision hybrid/native viewer hardening:** Added a dedicated native-viewer surface and lifecycle controls, with browser/native readiness diagnostics and safer password handling that never returns or logs the stored camera password.
 - **Unified Global Configuration:** Consolidated the former IP configuration surface into `global-config.html`, retained remote-to-gateway source-of-truth behavior, and covered the complete settings window with Electron UI tests.
 - **Alarm acknowledgement persistence and replication:** Acknowledgement state now survives restart and synchronizes through gateway/remote flows, backed by new persistence and source-contract tests.
@@ -32,14 +32,14 @@ Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
 - **Regression corrections found during release review:** Restored the UTF-8 BOM required by compliance CSV exports and updated stale `ip-config.html` fallback/test references to `global-config.html`.
 - **Validation and release build:** 104/104 Node test files, 559/559 Python tests, and 2/2 Electron UI suites passed. All three Python service EXEs were rebuilt, Electron native dependencies were restored, and the signed installer passed certificate-pin, payload-size, and updater-hash gates.
 
-## v2.11.7 Changes — IGBT Asset Health card-grid redesign + snapshot writer + fixes (2026-07-18)
+## v2.11.7 Changes â€” IGBT Asset Health card-grid redesign + snapshot writer + fixes (2026-07-18)
 - **IGBT fleet view overhauled from table to card grid:** Retired the dense `<table id="igbtFleetTable">` and replaced it with a modern responsive CSS Grid layout (`#igbtFleetGrid`). Cards use `backdrop-filter`, tier-coloured borders, hover-lift micro-animations, and pill-shaped health-tier badges (Healthy/Watch/Aging/EOL).
-- **Contactor fleet similarly converted to card grid:** `<table id="contactorFleetTable">` → `#contactorFleetGrid`; matching `.igbt-card` styling; `attachContactorGridClickListeners` wiring.
+- **Contactor fleet similarly converted to card grid:** `<table id="contactorFleetTable">` â†’ `#contactorFleetGrid`; matching `.igbt-card` styling; `attachContactorGridClickListeners` wiring.
 - **`igbt_health_snapshot` cron writer added (critical gap fix):** Table was defined and the `/api/igbt/node/:inverter/:slave/history` history endpoint existed, but no writer was ever registered. Added `_captureIgbtHealthSnapshots()` (every 5 min, 3-min boot offset) and `_pruneIgbtHealthSnapshots()` (90-day TTL, every 6 h). History trend chart in the drilldown panel now receives live data.
 - **Historical trend chart in drilldown:** `renderIgbtHistoryChart()` plots health score (area fill) and temperature over a Chart.js canvas injected per-click inside the detail panel.
 - **Critical pattern visual indicator on IGBT cards (gap fix):** `renderIgbtFleetGrid` was missing `pe-row-critical-pattern` / `pe-row-watch-pattern` `classList.add()` calls. CSS rules for those states also needed card-targeted selectors (old rules scoped only to `.pe-fleet-table tbody tr`).
 - **Availability rule hardened (db.js):** `applyReadingToSummaryState` now marks a node online only when `online=1 AND (pac > 0 OR non-manual-stop fault alarm active)`. Manual-stop (0x1000) with PAC=0 closes the uptime interval. Inverter-level penalty only materialises when ALL nodes are simultaneously offline. Single point of change.
-- **`ipConfig` write-through in `/api/settings` POST:** Posting `ipConfig` field now runs `sanitizeIpConfig → mirrorIpConfigToLegacyFiles → backfillAuditIpsFromConfig → applyRuntimeMode` inline, exactly as the dedicated IP-config PUT path. Triggers mode re-apply correctly.
+- **`ipConfig` write-through in `/api/settings` POST:** Posting `ipConfig` field now runs `sanitizeIpConfig â†’ mirrorIpConfigToLegacyFiles â†’ backfillAuditIpsFromConfig â†’ applyRuntimeMode` inline, exactly as the dedicated IP-config PUT path. Triggers mode re-apply correctly.
 - **CloudBackup scope: lifecycle + root_json replace license:** Backup/restore now includes `lifecycle/` state directory and root `.json`/`.jsonl` files (excluding `ipconfig.json`, `settings.json`, `manifest.json`). Removed the hardware-bound `license` scope. `archiveDir` injected as `this.archiveDir` instead of hardcoded path. `mkdirSync` guard added before archive creation.
 - **`computeIgbtFleetSummary` extracted as reusable helper:** Fleet endpoint and the new snapshot cron both call this function, eliminating code duplication.
 - **No Python service changes:** EXEs not rebuilt; existing `dist/*.exe` remain valid.
@@ -47,7 +47,7 @@ Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
 
 ## v2.8.4 Changes - Control Logic State Tracking (2026-04-13)
 - **Status dot reflects Modbus `on_off` register alone:** Node button cmd class now strictly follows `Number(d?.on_off) === 1` (ON) vs 0 (OFF); no reachability/staleness masking.
-- **Idempotent control writes:** All three write paths filter out nodes whose fresh Modbus register already matches requested state — prevents re-issuing START to already-running nodes or STOP to already-stopped. Stale/offline/unknown readings fall through so operators aren't locked out.
+- **Idempotent control writes:** All three write paths filter out nodes whose fresh Modbus register already matches requested state â€” prevents re-issuing START to already-running nodes or STOP to already-stopped. Stale/offline/unknown readings fall through so operators aren't locked out.
 - **Applied to:** `toggleNode` (single node click), `sendAllNodesInv` (per-inverter START/STOP), `sendSelectedNodes` (bulk range START/STOP).
 - **Optimistic UI removed:** Button color flips removed from all write paths; dot now only changes when fresh Modbus poll confirms the register value.
 - **Performance improvements:** Cached `State.liveData` local refs in filter loops; added throttled `scheduleInverterCardsUpdate()` nudges after successful writes (220 ms non-forced slots, no new network calls or timers).
@@ -57,11 +57,11 @@ Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
 ## v2.8.3 Changes - Silent Overnight Auto-Updates + NSIS oneClick (2026-04-13)
 - **Auto-updates now install silently at 02:00 local time:** No wizard prompts, no operator clicks needed; updates check, download, and install overnight.
 - **NSIS oneClick enabled:** Removed installation location and progress wizards from auto-update installations (oneClick:true, perMachine:true in package.json).
-- **Silent quitAndInstall mode:** Changed electron-updater quitAndInstall(false, true) → quitAndInstall(true, true) to match oneClick NSIS configuration.
+- **Silent quitAndInstall mode:** Changed electron-updater quitAndInstall(false, true) â†’ quitAndInstall(true, true) to match oneClick NSIS configuration.
 - **New autoInstallOvernight preference:** Default ON in update-prefs.json; when enabled, schedules silent installation for 02:00 local.
-- **Solar-window protection:** Gateway never restarts during active solar hours (05:00–18:00 UTC+8); installer only runs overnight.
+- **Solar-window protection:** Gateway never restarts during active solar hours (05:00â€“18:00 UTC+8); installer only runs overnight.
 - **IPC and preload bindings:** New IPC `app-update-set-auto-install-overnight` with preload binding `setAutoInstallOvernight(false)` to let operators disable silent auto-install if manual-only upgrades are preferred.
-- **First upgrade UX:** 2.8.2 → 2.8.3 still shows the old NSIS wizard (baked into 2.8.2's oneClick:false); all subsequent 2.8.3+ updates are fully silent.
+- **First upgrade UX:** 2.8.2 â†’ 2.8.3 still shows the old NSIS wizard (baked into 2.8.2's oneClick:false); all subsequent 2.8.3+ updates are fully silent.
 - **Files changed:** electron/main.js, electron/preload.js, package.json (build.nsis config).
 - **Full release:** Python services rebuilt (InverterCoreService, ForecastCoreService); Electron native deps rebuilt; signed installer verified (509 MB).
 
@@ -69,7 +69,7 @@ Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
 - **Forecast engine regime-aware lookback:** Clear regime uses 7-day lookback, mixed 10 days, overcast 14 days, rainy 21 days for error memory aggregation.
 - **Removed rainy/overcast slot support weight penalties:** Storm slots now receive full weight in rainy regimes instead of being penalized.
 - **Regime-aware Solcast fresh-damping:** Rainy regimes apply 10% cut instead of aggressive 70% reduction to Solcast confidence.
-- **Graduated regime mismatch penalty matrix:** Overcast↔rainy transitions now use 0.70 penalty instead of flat 0.25 across all mismatches.
+- **Graduated regime mismatch penalty matrix:** Overcastâ†”rainy transitions now use 0.70 penalty instead of flat 0.25 across all mismatches.
 - **Lowered rainy/overcast reliability sample thresholds:** Reduced from 10 days to 5 days minimum for regime-specific reliability lookups.
 - **Backfill day_regime fallback:** forecast_qa() now reconstructs missing day_regime from audit_trail with full-day regime inference.
 - **Legacy error memory regime awareness:** Historical error memory functions now respect active regime for bias correction.
@@ -93,12 +93,12 @@ Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
 
 ## v2.5.7 Changes - Analytics and Settings UI Refinements (2026-03-30)
 - **Analytics card row heights:** Reduced to 0.75x in the analytics section CSS. All card heights, canvas sizes, and label minimums scaled proportionally:
-  - `chart-total-card` min-height: 420px → 315px
-  - `chart-total-side-card` min-height/max-height: 380px/420px → 285px/315px
-  - `chart-card` min-height: 330px → 248px
-  - Chart canvas heights: 255px → 191px (cards), 360px → 270px (total card)
-  - Label min-height: 54px → 41px
-  - Category list max-height: 260px → 195px
+  - `chart-total-card` min-height: 420px â†’ 315px
+  - `chart-total-side-card` min-height/max-height: 380px/420px â†’ 285px/315px
+  - `chart-card` min-height: 330px â†’ 248px
+  - Chart canvas heights: 255px â†’ 191px (cards), 360px â†’ 270px (total card)
+  - Label min-height: 54px â†’ 41px
+  - Category list max-height: 260px â†’ 195px
 - **Settings page sidebar redesign:** COMMON ACTIONS panel now sticky/fixed at bottom of sidebar; menu/options panel above made scrollable with flex layout. `overflow: hidden` applied to sidebar container, first card uses `flex: 1 1 0; min-height: 0; overflow-y: auto`.
 - **Electron UI smoke test:** Updated artifacts to match new layout.
 - **Files changed:** `public/css/style.css`, `server/tests/artifacts/electron-ui-smoke.png`.
@@ -201,7 +201,7 @@ Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
 ## v2.4.28 Changes - Real-Time Metric Alignment and Alarm Quick-ACK (2026-03-20)
 - **All MWh metrics now update live when today is selected:** `extractCurrentDaySummary` in `public/js/app.js` was fixed to correctly parse the flat `todaySummary` object pushed over WebSocket instead of expecting a nested shape. The downstream `applyCurrentDaySummaryClient` now calls `renderAnalyticsFromState()` directly on every WS push when the Analytics or Energy page is active and the selected date is today, so Analytics summary cards, Energy KPI tiles, and related charts all update in real-time on the same cadence as `TODAY MWh` in the header.
 - **Alarm quick-ACK added to toast notifications:** Alarm toasts are now generated by a new `showAlarmToast()` function instead of the generic `showToast()`. Each alarm toast shows an inline **ACK** button in the header row next to the dismiss button. Clicking ACK immediately disables the button, sends the acknowledgement request (`POST /api/alarms/:id/ack`), then auto-dismisses the toast after 1.2 s. Toast TTL extended from 8 s to 12 s to give operators time to react.
-- **Alarm quick-ACK added to notification panel:** Each entry in the notification bell panel (`#notifPanel`) now shows a **✔ ACK** button for unacknowledged alarms, and a muted **✔ Acked** label for already-acknowledged ones. The panel item also gets a `.notif-item--active` modifier class while the alarm is unacknowledged. ACK from the panel calls the same `ackAlarm()` function used by the Alarms page, so badge count, sound sync, and alarm-table state all update consistently.
+- **Alarm quick-ACK added to notification panel:** Each entry in the notification bell panel (`#notifPanel`) now shows a **âœ” ACK** button for unacknowledged alarms, and a muted **âœ” Acked** label for already-acknowledged ones. The panel item also gets a `.notif-item--active` modifier class while the alarm is unacknowledged. ACK from the panel calls the same `ackAlarm()` function used by the Alarms page, so badge count, sound sync, and alarm-table state all update consistently.
 - **Event delegation extended:** The existing `alarmToast` click delegate now handles `.toast-ack-btn` in addition to `.toast-close`. A new delegate on `#notifList` handles `.notif-ack-btn` clicks.
 - **CSS additions:** New rules for `.toast-hdr-actions`, `.toast-ack-btn`, `.notif-footer`, `.notif-ack-btn`, `.notif-acked`, and `.notif-item--active`.
 - **Validation:** `node --check public/js/app.js` passed. `node server/tests/mwhHandoff.test.js` passed (24/24).
@@ -268,7 +268,7 @@ Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
 
 ## v2.4.0 Changes - Plant Cap, Remote Proxying, and Forecast/UI Refinements (2026-03-14)
 - **Plant output cap controller added:** the Inverters page now has a gateway-side plant-wide MW cap workflow with upper/lower MW banding, whole-inverter sequential stop/start decisions, exemption lists, preview/status reporting, authorization, and controller-owned release handling.
-- **Plant cap planning is node-aware:** inverter step size uses current live `Pac` as the primary estimate and scales rated Pmax (`997.64 kW`) plus dependable/nominal Pnom (`906.92 kW`) capacity by enabled node count for fallback and deadband warnings. Values from official Ingeteam `Plantilla Parámetros_DIGOS` template (`docs/Inverter-Parameters.pdf`).
+- **Plant cap planning is node-aware:** inverter step size uses current live `Pac` as the primary estimate and scales rated Pmax (`997.64 kW`) plus dependable/nominal Pnom (`906.92 kW`) capacity by enabled node count for fallback and deadband warnings. Values from official Ingeteam `Plantilla ParÃ¡metros_DIGOS` template (`docs/Inverter-Parameters.pdf`).
 - **Remote plant-cap actions are gateway-proxied:** a remote workstation can open the panel and call plant-cap routes through the configured gateway, but a `404` / `Cannot POST /api/plant-cap/...` response means the gateway build is older than the client feature or the remote target is wrong.
 - **Plant-cap UI behavior tightened:** the panel is default-collapsed behind the inverter-toolbar toggle, uses theme-token styling in all themes, and exposes hover descriptions on controls, metrics, warnings, and preview headers.
 - **Solcast preview export button was rethemed:** the forecast export action now uses a theme-aware export treatment so light-theme forecasting UI stays readable.
@@ -299,35 +299,35 @@ Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
 - **Secret-storage rule:** live passwords and toolkit credentials must not go into tracked markdown; if the user asks to keep them in markdown, store them only under a git-ignored local path such as `private/*.md`
 
 ## Architecture
-- **Electron main process:** electron/main.js — windows, IPC, license, process management
-- **Express server:** server/index.js — REST API + WebSocket on port 3500
-- **Frontend:** public/js/app.js — vanilla JS, Chart.js, multi-theme UI
+- **Electron main process:** electron/main.js â€” windows, IPC, license, process management
+- **Express server:** server/index.js â€” REST API + WebSocket on port 3500
+- **Frontend:** public/js/app.js â€” vanilla JS, Chart.js, multi-theme UI
 - **Python services:** ADSI_InverterService.py (FastAPI port 9000, Modbus TCP), ADSI_ForecastService.py (ML forecasting)
 - **DB:** SQLite at %APPDATA%\Inverter-Dashboard\adsi.db (migrates from ADSI-Dashboard)
 
 ## Key File Paths
-- electron/main.js — Electron main
-- electron/preload.js — Context bridge
-- server/index.js — Express server
-- server/db.js — SQLite wrapper
-- server/poller.js — Inverter polling (500ms interval)
-- server/alarms.js — Alarm decoding (Ingeteam INGECON, 16-bit bitfield)
-- server/exporter.js — CSV/Excel export (31 KB)
-- public/index.html — Main dashboard UI
-- public/js/app.js — Frontend logic
-- public/css/style.css — Themes (dark/light/classic)
-- ADSI_InverterService.py — FastAPI inverter backend
-- ADSI_ForecastService.py — Solar forecast engine (physics + ML)
-- drivers/modbus_tcp.py — Modbus TCP wrapper
-- ipconfig.json — 27 inverters, IPs, polling intervals
+- electron/main.js â€” Electron main
+- electron/preload.js â€” Context bridge
+- server/index.js â€” Express server
+- server/db.js â€” SQLite wrapper
+- server/poller.js â€” Inverter polling (500ms interval)
+- server/alarms.js â€” Alarm decoding (Ingeteam INGECON, 16-bit bitfield)
+- server/exporter.js â€” CSV/Excel export (31 KB)
+- public/index.html â€” Main dashboard UI
+- public/js/app.js â€” Frontend logic
+- public/css/style.css â€” Themes (dark/light/classic)
+- ADSI_InverterService.py â€” FastAPI inverter backend
+- ADSI_ForecastService.py â€” Solar forecast engine (physics + ML)
+- drivers/modbus_tcp.py â€” Modbus TCP wrapper
+- ipconfig.json â€” 27 inverters, IPs, polling intervals
 
 ## Data Flow
-Modbus TCP → FastAPI (9000) → Express (3500) → SQLite → WebSocket → Browser
-Weather APIs → Python forecast → /ProgramData JSON → Express → Browser
+Modbus TCP â†’ FastAPI (9000) â†’ Express (3500) â†’ SQLite â†’ WebSocket â†’ Browser
+Weather APIs â†’ Python forecast â†’ /ProgramData JSON â†’ Express â†’ Browser
 
 ## Current-Day Energy Rule
 - `TODAY MWh`, analytics `ACTUAL MWh`, and per-inverter `TODAY ENERGY` are PAC-integrated metrics only.
-- Authority path: raw PAC telemetry from Python → Node poller integration (`PAC x elapsed time`) → `energy_5min` / current-day snapshot → HTTP/WS/UI/export.
+- Authority path: raw PAC telemetry from Python â†’ Node poller integration (`PAC x elapsed time`) â†’ `energy_5min` / current-day snapshot â†’ HTTP/WS/UI/export.
 - Python/modbus register kWh and Python `/metrics` energy fields are not authoritative for current-day energy and should not be used to drive display, analytics, or export totals.
 - If there is a disagreement between inverter register energy and PAC-integrated day energy, Node PAC integration wins for current-day totals.
 
@@ -423,7 +423,7 @@ Full 4-phase in-place overhaul completed. Key changes:
 - **Context bridge:** Consolidated to single `window.electronAPI` object; all `window.electron.*` references removed
 - **server/ws.js:** Dead connection cleanup on send failure
 - **server/db.js:** Configurable audit retention (`auditRetainDays` setting)
-- **server/poller.js:** Fixed KWH 32-bit overflow (multiplication vs left-shift), MAX_PAC_DT_S raised 5→30
+- **server/poller.js:** Fixed KWH 32-bit overflow (multiplication vs left-shift), MAX_PAC_DT_S raised 5â†’30
 - **server/alarms.js:** Module-level prepared statement for audit inserts, input validation in logControlAction
 - **server/exporter.js:** Path traversal guard in resolveExportDir, date bounds checking, filename truncation to 200 chars
 - **server/index.js:** Fixed uptime calc, atomic settings update, forecast race lock, timezone regex allows dots
@@ -432,37 +432,37 @@ Full 4-phase in-place overhaul completed. Key changes:
 
 ## Cloud Backup Feature (2026-03-04)
 Full cloud backup/restore feature implemented. Key files:
-- server/tokenStore.js — AES-256-GCM encrypted OAuth token storage (machine-derived key)
-- server/cloudProviders/onedrive.js — Microsoft Graph API, OAuth PKCE (no client secret needed)
-- server/cloudProviders/gdrive.js — Google Drive API v3, installed app OAuth flow
-- server/cloudBackup.js — Core backup service (local-first, retry queue, schedule, restore)
-- server/index.js — API routes: /api/backup/* (settings, auth, now, history, pull, restore, delete)
-- public/index.html — Cloud Backup card in Settings page
-- public/js/app.js — cbLoadSettings, cbSaveSettings, cbBackupNow, cbConnectProvider, etc.
-- public/css/style.css — Cloud Backup panel styles
-- electron/main.js — oauth-start IPC handler (BrowserWindow + webRequest intercept)
-- electron/preload.js — openOAuthWindow bridge
+- server/tokenStore.js â€” AES-256-GCM encrypted OAuth token storage (machine-derived key)
+- server/cloudProviders/onedrive.js â€” Microsoft Graph API, OAuth PKCE (no client secret needed)
+- server/cloudProviders/gdrive.js â€” Google Drive API v3, installed app OAuth flow
+- server/cloudBackup.js â€” Core backup service (local-first, retry queue, schedule, restore)
+- server/index.js â€” API routes: /api/backup/* (settings, auth, now, history, pull, restore, delete)
+- public/index.html â€” Cloud Backup card in Settings page
+- public/js/app.js â€” cbLoadSettings, cbSaveSettings, cbBackupNow, cbConnectProvider, etc.
+- public/css/style.css â€” Cloud Backup panel styles
+- electron/main.js â€” oauth-start IPC handler (BrowserWindow + webRequest intercept)
+- electron/preload.js â€” openOAuthWindow bridge
 
-OAuth flow: frontend → /api/backup/auth/:provider/start → Electron opens BrowserWindow → intercepts localhost:3500/oauth/callback/:provider → returns callbackUrl → frontend POSTs code to /api/backup/auth/:provider/callback → server exchanges for tokens.
+OAuth flow: frontend â†’ /api/backup/auth/:provider/start â†’ Electron opens BrowserWindow â†’ intercepts localhost:3500/oauth/callback/:provider â†’ returns callbackUrl â†’ frontend POSTs code to /api/backup/auth/:provider/callback â†’ server exchanges for tokens.
 
 User must register their own OAuth app:
 - OneDrive: Azure AD app registration, redirect URI http://localhost:3500/oauth/callback/onedrive, PKCE public client
 - Google Drive: GCP project, Desktop app type, redirect URI http://localhost:3500/oauth/callback/gdrive
 
 ## MWh Handoff (2026-03-05)
-Remote→Gateway mode switch continuity hardened:
-- `gatewayHandoffMeta` — in-memory handoff lifecycle: active, startedAt, day, baselines (per-inverter shadow kWh at switch time)
-- `MAX_SHADOW_AGE_MS = 4h` — stale same-day shadow discarded unless handoff active
-- `getRemoteTodayEnergyShadowRows()` — age check; clears+persists when stale
-- `_checkHandoffCompletion(pollerMap, day)` — auto-completes handoff when all baselines met; logs elapsed time
-- `getTodayEnergySupplementRows()` — logs carry_applied/caught_up per inverter, calls completion check
-- `applyRuntimeMode()` — captures per-inverter baselines on Remote→Gateway switch; logs handoff start
+Remoteâ†’Gateway mode switch continuity hardened:
+- `gatewayHandoffMeta` â€” in-memory handoff lifecycle: active, startedAt, day, baselines (per-inverter shadow kWh at switch time)
+- `MAX_SHADOW_AGE_MS = 4h` â€” stale same-day shadow discarded unless handoff active
+- `getRemoteTodayEnergyShadowRows()` â€” age check; clears+persists when stale
+- `_checkHandoffCompletion(pollerMap, day)` â€” auto-completes handoff when all baselines met; logs elapsed time
+- `getTodayEnergySupplementRows()` â€” logs carry_applied/caught_up per inverter, calls completion check
+- `applyRuntimeMode()` â€” captures per-inverter baselines on Remoteâ†’Gateway switch; logs handoff start
 - Test harness: `server/tests/mwhHandoff.test.js` (24 passing: Scenarios A-E, including timeout)
-- `server/mwhHandoffCore.js` — shared pure logic imported by tests (created by user)
+- `server/mwhHandoffCore.js` â€” shared pure logic imported by tests (created by user)
 
 ## v2.3.15 Changes - Gateway Today-MWh Release Guardrails (2026-03-13)
 - **Gateway live TODAY MWh regression guard was added:** `server/tests/smokeGatewayLink.js` now asserts that gateway-mode live WS payloads are enriched with `todayEnergy`, that the server merges cached DB totals with live supplement rows, and that the client keeps WS `todayEnergy` authoritative once live updates start.
-- **Empty WS todayEnergy payloads stay valid:** the release guard also checks that the renderer accepts an empty `todayEnergy` array instead of treating it as “missing”, which prevents stale non-WS fallback logic from reclaiming TODAY MWh authority.
+- **Empty WS todayEnergy payloads stay valid:** the release guard also checks that the renderer accepts an empty `todayEnergy` array instead of treating it as â€œmissingâ€, which prevents stale non-WS fallback logic from reclaiming TODAY MWh authority.
 
 - **Gateway metric fallback smoke procedure is now fixed:** the release workflow now explicitly runs `rebuild:native:node` -> `smokeGatewayLink.js` -> `rebuild:native:electron` -> Playwright Electron smoke from `server/tests`, because running Playwright from the repo root can pick up duplicate `.tmp` specs and produce a false failure.
 - **Smoke run confirmed on 2026-03-13:** `node server/tests/smokeGatewayLink.js` passed (`32` checks), then `server/tests> npx playwright test electronUiSmoke.spec.js --reporter=line` passed (`1` test).
@@ -546,62 +546,62 @@ Remote→Gateway mode switch continuity hardened:
 ## Performance Optimization (2026-03-05)
 Tab-switch "Not Responding" eliminated. Key changes:
 - **server/db.js:** Added `idx_e5_ts ON energy_5min(ts)` for range-scan queries
-- **server/index.js (N+1 fix):** `buildDailyReportRowsForDate` now uses 3 batch SQL queries instead of 81 per-inverter queries (27×readings + 27×alarm_count + 27×audit_count → 3 queries): ~15× faster report generation
+- **server/index.js (N+1 fix):** `buildDailyReportRowsForDate` now uses 3 batch SQL queries instead of 81 per-inverter queries (27Ã—readings + 27Ã—alarm_count + 27Ã—audit_count â†’ 3 queries): ~15Ã— faster report generation
 - **server/index.js (row cap):** `/api/energy/5min` unpaged path and `/api/analytics/energy` capped at 50,000 rows via `ENERGY_5MIN_UNPAGED_ROW_CAP`; returns 400 if exceeded
 - **server/index.js (perf headers):** `X-Perf-Ms` header on /api/alarms, /api/audit, /api/energy/5min, /api/report/daily
 - **public/js/app.js (stale tab cache):** `State.tabFetchTs{}` + `TAB_STALE_MS=60000`; initAlarmsPage/initEnergyPage/initAuditPage/initReportPage skip re-fetch and re-render from State if data is <60s old; `State.tabFetching{}` in-flight guard
-- **public/js/app.js (loading state):** `showTableLoading(tbodyId, colspan)` helper shows "Loading…" row before fetch; called in fetchAlarms/fetchAudit/fetchReport
+- **public/js/app.js (loading state):** `showTableLoading(tbodyId, colspan)` helper shows "Loadingâ€¦" row before fetch; called in fetchAlarms/fetchAudit/fetchReport
 - **public/js/app.js (DocumentFragment):** renderAlarmTable, renderAuditTable, renderReportTable, renderEnergyTable all now use DocumentFragment + single `tbody.textContent=""` + `appendChild(frag)` instead of per-row `appendChild`
 
-## v2.2.23 Changes — Gateway Main-DB Pull + Hot Transfer Monitor Hardening (2026-03-09)
+## v2.2.23 Changes â€” Gateway Main-DB Pull + Hot Transfer Monitor Hardening (2026-03-09)
 - **Manual pull now stages the gateway main DB:** `runManualPullSync` reconciles local-newer hot data first, then downloads a fresh gateway `adsi.db` snapshot, stages it locally, and applies it on restart instead of mutating the live remote DB table by table.
 - **Gateway DB snapshot stays consistent while the server is running:** the gateway flushes pending poller telemetry and exports the main DB through SQLite's online backup API before streaming it, so the pulled file is a transactionally consistent snapshot rather than a direct copy of the live `adsi.db`.
 - **Remote-only settings are restored after DB takeover:** after restart, the staged gateway DB becomes the local DB, then the client's local-only remote settings (`operationMode`, `remoteAutoSync`, gateway URL/token, tailnet hint/interface, `csvSavePath`) are restored.
 - **Transfer Monitor now covers hot-data DB transfer clearly:** main-DB pull/send emits byte-based `xfer_progress`, and inbound hot-data push RX now includes total bytes so the monitor can show proper percentage instead of only indeterminate progress.
 - **Manual push final consistency now uses the gateway main DB too:** after sending local hot data to the gateway, the client stages the final gateway `adsi.db` back locally for restart-safe consistency.
 
-## v2.2.31 Changes — Energy Summary Export Cleanup (2026-03-10)
+## v2.2.31 Changes â€” Energy Summary Export Cleanup (2026-03-10)
 - **Header icon-only controls were diagnosed as CDN-font dependent:** the top-right alarm/menu controls are icon-only MDI buttons, so when the icon stylesheet is unavailable they render as empty squares instead of showing a visible fallback.
 - **Energy Summary export dropped per-inverter subtotal rows:** the export now keeps node detail rows and the bottom `DAY TOTAL` row while removing the extra per-inverter `TOTAL` lines.
 - **Energy Summary export now uses a single date selector:** the export card and persisted export UI state were migrated from `From`/`To` to one `Date` field, with legacy saved values collapsing safely into the new single-day control.
 - **Energy Summary filenames now match single-day exports:** same-day exports now write `DDMMYY <target> Energy Summary` instead of the generic date-range `Recorded Energy` naming.
 
-## v2.2.30 Changes — Solcast Toolkit Preview Date-Range Fix (2026-03-10)
+## v2.2.30 Changes â€” Solcast Toolkit Preview Date-Range Fix (2026-03-10)
 - **Start Day and Days to Display now follow actual toolkit feed dates:** the Solcast preview/export server path now sizes the toolkit `recent` fetch horizon from the selected start day plus the requested display span, instead of only from the display count.
 - **Later preview start dates no longer get clipped to the first returned day:** preview and XLSX export now fetch enough hours to enumerate the feed's available days before slicing the selected range.
 - **Existing client-side day-count limits now work against real returned availability:** once the server returns the full day list, the `Start Day` and `Days to Display` selectors correctly clamp to the dates actually exposed by the Solcast URL.
 
-## v2.2.29 Changes — Remote Gateway Link Hotfix (2026-03-10)
+## v2.2.29 Changes â€” Remote Gateway Link Hotfix (2026-03-10)
 - **Remote live bridge no longer self-fails after a successful gateway fetch:** `server/index.js` now imports `checkAlarms` before the remote live-ingest path calls it, which fixes the runtime `checkAlarms is not defined` fault.
 - **Gateway Link now reports the real live state again:** because the post-fetch ingest no longer throws, `/api/runtime/perf`, `/api/runtime/network/reconnect`, and the Settings health panel can stay `connected` instead of falling back to `disconnected`.
 - **Inverter cards receive live remote rows again:** the remote bridge now finishes the live broadcast path, so retained/live remote node data reaches `/api/live` and the renderer repopulates the inverter cards instead of staying blank/offline.
 
-## v2.2.28 Changes — Remote Operation Mode Health Hardening (2026-03-10)
+## v2.2.28 Changes â€” Remote Operation Mode Health Hardening (2026-03-10)
 - **Remote health model is now explicit:** `server/index.js` now classifies remote live-bridge runtime as `connected`, `degraded`, `stale`, `disconnected`, `auth-error`, or `config-error` instead of only exposing a binary connected flag.
 - **Short outages no longer blank the plant view immediately:** the remote bridge retains the last-good live snapshot for a bounded stale window, keeps `/api/live` populated from that retained snapshot, and marks the UI as degraded or stale instead of dropping straight to empty cards.
 - **Failure reasons are operator-safe and specific:** live-bridge failures are classified into URL/config issues, auth failures, timeouts, connection refusal, DNS/route failures, socket resets, and bad payloads so `Gateway Link` and `Last Errors` can show the real cause.
 - **Manual reconnect is no longer falsely green:** `/api/runtime/network/reconnect` now reports degraded/stale reconnects honestly, and the frontend surfaces that instead of treating every retained-snapshot refresh as a full recovery.
 - **Inverter cards now distinguish stale from offline:** `public/js/app.js` and `public/css/style.css` add bounded stale rendering with a dedicated `STALE` badge and stale card styling, while preserving offline as the hard-disconnect state.
 
-## v2.2.27 Changes — Remote Live Bridge Reconnect Hardening (2026-03-10)
+## v2.2.27 Changes â€” Remote Live Bridge Reconnect Hardening (2026-03-10)
 - `Test Remote Gateway` and remote settings save now refresh the live remote bridge immediately instead of waiting for the next backoff tick.
 - Added a dedicated runtime reconnect path so `Gateway Link` health and the inverter live cards reattach as soon as saved remote connectivity is valid.
 - The UI now warns when a gateway test succeeded only with unsaved URL/token form values, which prevents the green test / disconnected runtime mismatch.
 
-## v2.2.26 Changes — Forecast Integrity and Solcast-Aware ML Local Forecasting (2026-03-10)
+## v2.2.26 Changes â€” Forecast Integrity and Solcast-Aware ML Local Forecasting (2026-03-10)
 - `ml_local` now consumes `solcast_snapshots` as a prior when available, builds a hybrid baseline, and preserves native Solcast PT5M shape instead of treating Solcast as a separate disconnected provider only.
 - Forecast analytics reads are now DB-only. `/api/analytics/dayahead` and intraday-adjusted reads no longer mutate the DB by pulling from the Python context file during GET requests.
 - Startup legacy context import is now guarded: it only runs when `forecast_dayahead` is empty, which prevents stored DB forecasts from being overwritten on restart.
 - Solcast snapshot failures are now surfaced back to the operator as non-fatal warnings in test / preview / generate paths instead of being silently swallowed.
 
-## v2.2.25 Changes — Replication Separation, Transfer Integrity, and Solcast Snapshot Persistence (2026-03-10)
+## v2.2.25 Changes â€” Replication Separation, Transfer Integrity, and Solcast Snapshot Persistence (2026-03-10)
 - **Pull and Push are now strictly separated:** manual `Pull` is download-only, manual `Push` is upload-only, and startup auto-sync uses the same read-only local-newer check instead of auto-pushing gateway changes as a side effect. The leftover `/api/replication/reconcile-now` path was also hardened so it no longer modifies gateway data before a catch-up pull.
 - **Transfer integrity is validated before apply:** main-DB and archive transfers now carry SHA-256 headers, downloaded/staged files are verified against size and hash, and staged SQLite replacements must pass header validation plus `PRAGMA quick_check(1)` before they can replace the live DB on restart.
 - **Remote shutdown and health state were hardened:** embedded shutdown now stops the remote bridge before DB close, and reconcile health fields are updated by the new read-only pre-pull checks so status panels do not keep stale push-era state.
 - **Solcast snapshots are now persisted:** toolkit/API fetches now normalize `PT5M` forecast and estimated-actual values into the new `solcast_snapshots` table, storing both raw `MW` and slot `kWh` for preview, export, reproducible day-ahead traces, and future ML hybrid work.
 - **Release verification was expanded:** isolated server smoke confirmed pull stays read-only, push stays upload-only, reconcile-now no longer pushes, and live Electron startup smoke reached `/api/settings` before packaging.
 
-## v2.2.24 Changes — Solcast Toolkit, Export Rehab, Remote Hardening, and Faster Replication (2026-03-09)
+## v2.2.24 Changes â€” Solcast Toolkit, Export Rehab, Remote Hardening, and Faster Replication (2026-03-09)
 - **Solcast toolkit workflow added and hardened:** the Forecast settings now support `Toolkit Login` as a first-class Solcast access mode with chart URL, email, and password. Toolkit test, preview, and XLSX export stay local even in Remote mode, and the preview charts/export support `PT5M`, `05:00-18:00`, `1-7` selected days, and both `MWh` and raw `MW` values.
 - **Solcast preview UI improved:** the settings layout and preview chart styling were cleaned up, the preview is no longer hidden just because runtime forecast provider stays on `Local ML`, and the export path now writes the currently displayed toolkit range.
 - **Energy Summary export rehabilitated:** the export now follows the stricter output format, writes numeric XLSX values, uses PAC-based energy logic, and in Remote workflows relies on the local DB working copy after pull/live mirror instead of direct gateway fetch at export time.
@@ -609,14 +609,14 @@ Tab-switch "Not Responding" eliminated. Key changes:
 - **Replication transport speed-up:** `server/index.js` now uses keep-alive HTTP/HTTPS agents for gateway transfer requests, larger incremental/push chunk sizes, gzip on large replication JSON payloads, gzip on large main-DB and archive downloads, gzip request bodies for large JSON push batches, and small bounded archive transfer concurrency.
 - **Transfer path validation:** isolated smoke tests confirmed gzipped incremental pull, gzipped main-DB transfer, gzipped archive download, gzipped push request handling, and live Electron startup smoke reached `/api/settings`.
 
-## v2.2.22 Changes — Restart-Safe Archive Apply (2026-03-09)
+## v2.2.22 Changes â€” Restart-Safe Archive Apply (2026-03-09)
 - **Archive staging instead of live swap:** manual archive pull/upload now keeps the current monthly `.db` live while the app is running, stages the downloaded/uploaded replacement in `archive/*.tmp`, and applies it only on the next restart.
 - **Restart apply path:** startup now applies pending staged archive replacements before the server begins serving requests, so the newer archive file becomes active immediately after restart without the Windows `EPERM` rename race.
 - **Manifest/transfer consistency:** archive manifest and archive download now surface the staged replacement immediately, so follow-up sync decisions and archive transfers see the newest content even before restart.
 
-## v2.2.21 Changes — Authoritative Pull/Push Hardening + Transfer Monitor Polish (2026-03-09)
+## v2.2.21 Changes â€” Authoritative Pull/Push Hardening + Transfer Monitor Polish (2026-03-09)
 - **Authoritative merge:** `mergeAppendReplicationRow` and `mergeUpdatedReplicationRow` now accept `authoritative` flag; in auth mode, LWW `WHERE COALESCE(excluded.updated_ts,0) >= ...` guards are removed for all tables (`readings`, `energy_5min`, `settings`, `forecast_dayahead`, `forecast_intraday_adjusted`, `daily_report`, `daily_readings_summary`, `alarms`). Separate `stmtCached` keys used (e.g. `"merge:daily_report:auth"`) to avoid poisoning LWW cache entries. `audit_log` stays append-only. `REMOTE_REPLICATION_PRESERVE_SETTING_KEYS` always wins even in auth mode.
-- **Reconcile-before-pull:** `runManualPullSync` now runs a reconcile step (Step 0) before the authoritative pull — pushes local-newer data to gateway first; if reconcile push fails and local is newer, throws `LOCAL_NEWER_PUSH_FAILED` (code) with `canForcePull: true`; accepts `forcePull` param to skip reconcile gate.
+- **Reconcile-before-pull:** `runManualPullSync` now runs a reconcile step (Step 0) before the authoritative pull â€” pushes local-newer data to gateway first; if reconcile push fails and local is newer, throws `LOCAL_NEWER_PUSH_FAILED` (code) with `canForcePull: true`; accepts `forcePull` param to skip reconcile gate.
 - **`LOCAL_NEWER_PUSH_FAILED` background gap fix:** `startManualReplicationJob` catch block now stores `errorCode: String(err?.code || "")` in failed job. `handleReplicationJobUpdate` detects `job.errorCode === "LOCAL_NEWER_PUSH_FAILED" && job.action === "pull"` and shows "Force Pull?" confirm dialog instead of plain error.
 - **xfer_progress labels:** `pushDeltaInChunks`, `runRemoteIncrementalReplication`, `runRemoteCatchUpReplication` accept `opts.label`; all manual pull/push/reconcile/archive call sites pass descriptive labels ("Reconciling with gateway", "Applying gateway data", "Pushing local data", "Pulling final gateway state", "Downloading/Uploading archive files").
 - **Transfer Monitor phase badge:** `#xferPhaseBadge` span added to `.xfer-panel-row` in `index.html`. `getXferPhaseBadge(x)` helper maps label+phase to badge text/class. Seven CSS classes: `xfer-phase-pull/push/reconcile/applying/archive/done/error`.
@@ -627,16 +627,16 @@ Tab-switch "Not Responding" eliminated. Key changes:
 - **Gateway main DB export is snapshot-based:** the server flushes pending poller telemetry, creates a consistent SQLite snapshot with `db.backup(...)`, and streams that snapshot file. It does not stream the live `adsi.db` file directly while the gateway is running.
 
 ## v2.2.16 Changes (2026-03-08)
-- **Operator messaging panel:** `chat_messages` table on gateway (500-row retention); 3 API routes `/api/chat/send|messages|read`; remote proxy + 5 s poll loop; floating `#chatBubble` + slide-in `#chatPanel`; `appConfirm`-style UX; `playChatSound()` via shared `getOrCreateAlarmAudioCtx()`; `markChatRead` in-flight guard + pending queue; alarm bell left / chat bubble right — no overlap
+- **Operator messaging panel:** `chat_messages` table on gateway (500-row retention); 3 API routes `/api/chat/send|messages|read`; remote proxy + 5 s poll loop; floating `#chatBubble` + slide-in `#chatPanel`; `appConfirm`-style UX; `playChatSound()` via shared `getOrCreateAlarmAudioCtx()`; `markChatRead` in-flight guard + pending queue; alarm bell left / chat bubble right â€” no overlap
 - **`renderChatThread` DocumentFragment:** converted to match `renderAlarmTable` / `renderReportTable` pattern
 
 ## v2.2.15 Changes (2026-03-08)
-- **Availability fix:** `/api/report/daily` range handler now splices live `getDailyReportRowsForDay(today, { includeTodayPartial: true })` when today is in range — fixes stale persisted value
+- **Availability fix:** `/api/report/daily` range handler now splices live `getDailyReportRowsForDay(today, { includeTodayPartial: true })` when today is in range â€” fixes stale persisted value
 - **Detail panel refresh:** 60 s timer fetches both `/api/energy/today` (kWh) and `/api/report/daily?date=today` (availability); merges fresh today rows into `State.invDetailReportRows`
-- **PAC thresholds:** ≥90% High, >70% Moderate, >40% Mild, ≤40% Low; `NODE_RATED_W = 249,250 W`; `.row-pac-high/mid/low/off` CSS classes
+- **PAC thresholds:** â‰¥90% High, >70% Moderate, >40% Mild, â‰¤40% Low; `NODE_RATED_W = 249,250 W`; `.row-pac-high/mid/low/off` CSS classes
 - **PAC legend:** Static `.pac-legend-wrap` in inverter toolbar; `|` separators via CSS `::before`; High/Moderate/Mild/Low/Alarm hierarchy
 - **Startup tab prefetch:** `prefetchAllTabs()` fires 2 s after `init()`, pre-warms all 4 tabs; `TAB_STALE_MS` = 60 s
-- **App confirm modal:** `appConfirm(title, body, {ok, cancel})` → Promise<bool>; `#appConfirmModal` in HTML, `.confirm-dialog` in CSS, `initConfirmModal()` called from `init()`; all 9 `confirm()` + 5 `alert()` calls in app.js replaced
+- **App confirm modal:** `appConfirm(title, body, {ok, cancel})` â†’ Promise<bool>; `#appConfirmModal` in HTML, `.confirm-dialog` in CSS, `initConfirmModal()` called from `init()`; all 9 `confirm()` + 5 `alert()` calls in app.js replaced
 
 ## Notes
 - See detailed-review.md for first project review findings

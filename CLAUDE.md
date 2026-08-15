@@ -1,7 +1,7 @@
-# CLAUDE.md
+﻿# CLAUDE.md
 
 This file exists as a fallback in case `SKILL.md` is not consumed automatically.
-**Read `SKILL.md` first** — it is the canonical codebase reference for this project.
+**Read `SKILL.md` first** â€” it is the canonical codebase reference for this project.
 
 Skill locations:
 - `d:\ADSI-Dashboard\SKILL.md` (repo root)
@@ -18,26 +18,26 @@ Detailed history and working notes live in `MEMORY.md`.
 | Field | Value |
 |---|---|
 | Product | ADSI Inverter Dashboard |
-| Author | Engr. Clariden Montaño REE (Engr. M.) |
+| Author | Engr. Clariden MontaÃ±o REE (Engr. M.) |
 | Package | `inverter-dashboard` |
-| Updater app ID | `com.engr-m.inverter-dashboard` — do not rename |
-| Repo version baseline | `2.12.7` in `package.json` (source of truth) |
+| Updater app ID | `com.engr-m.inverter-dashboard` â€” do not rename |
+| Repo version baseline | `2.12.8` in `package.json` (source of truth) |
 | Deployed server version | `2.2.32` (may legitimately lag) |
-| Latest published release | `v2.12.7` |
+| Latest published release | `v2.12.8` |
 | GitHub release channel | `mclards/ADSI-Dashboard` |
 
 ---
 
 ## Default Credentials and Access Keys
 
-*(Internal only — do not mirror into public docs.)*
+*(Internal only â€” do not mirror into public docs.)*
 
 | Key | Value / Pattern |
 |---|---|
 | Login username | `admin` |
 | Login password | `1234` |
 | Admin auth key | `ADSI-2026` (resets to `admin` / `1234`) |
-| Bulk inverter control | `adsiMM` (MM = current minute ±1; unified with topology key as of 2026-05-31) |
+| Bulk inverter control | `adsiMM` (MM = current minute Â±1; unified with topology key as of 2026-05-31) |
 | Topology / IP Config auth | `adsiM` or `adsiMM` (same rolling key as bulk control) |
 | IP Config session | 1 hour |
 | Topology session | 10 minutes |
@@ -54,12 +54,12 @@ All four generation paths route through the same Node orchestrator (`runDayAhead
 | Path | Trigger | Audit |
 |---|---|---|
 | Manual UI | `POST /api/forecast/generate` | Node |
-| Auto scheduler | Python loop → `_delegate_run_dayahead()` | Node |
-| Python CLI | `--generate-date` → `_delegate_run_dayahead()` | Node |
+| Auto scheduler | Python loop â†’ `_delegate_run_dayahead()` | Node |
+| Python CLI | `--generate-date` â†’ `_delegate_run_dayahead()` | Node |
 | Python CLI fallback | Node unreachable, direct `run_dayahead(write_audit=True)` | Python |
 | Node cron | 04:30/09:30/18:30/20:00/22:00, quality-aware | Node |
 
-`_delegate_run_dayahead()` uses `ADSI_SERVER_PORT` (default 3500). Node cron classifies tomorrow quality (`missing`/`incomplete`/`wrong_provider`/`stale_input`/`weak_quality`/`healthy`) — only `healthy` suppresses regeneration.
+`_delegate_run_dayahead()` uses `ADSI_SERVER_PORT` (default 3500). Node cron classifies tomorrow quality (`missing`/`incomplete`/`wrong_provider`/`stale_input`/`weak_quality`/`healthy`) â€” only `healthy` suppresses regeneration.
 
 ---
 
@@ -72,9 +72,9 @@ All four generation paths route through the same Node orchestrator (`runDayAhead
 | Weather regime | `regimes` (clear/mixed/overcast/rainy) | Per-regime bias_ratio + reliability |
 | Season | `seasons` (dry/wet), `season_regimes` (dry:clear, etc.) | Season-aware lookup in `lookup_solcast_reliability()` |
 | Time-of-day | `time_of_day` (morning/midday/afternoon), `time_of_day_by_regime` | Per-slot blend and floor modulation |
-| Trend | `trend` (improving/stable/degrading) | Blend ±6-8%, residual damping adjustment |
+| Trend | `trend` (improving/stable/degrading) | Blend Â±6-8%, residual damping adjustment |
 
-All lookups have backward-compatible fallbacks — old artifacts without new keys load safely.
+All lookups have backward-compatible fallbacks â€” old artifacts without new keys load safely.
 
 ---
 
@@ -84,8 +84,8 @@ All lookups have backward-compatible fallbacks — old artifacts without new key
 and `dataQualityFlags`. The Forecast Performance Monitor panel defaults to collapsed on first load.
 
 New Python helpers:
-- `_detect_ml_backend()` — identifies active LightGBM vs sklearn
-- `_collect_data_quality_warnings()` — audits stale features, low sample count, regime imbalance
+- `_detect_ml_backend()` â€” identifies active LightGBM vs sklearn
+- `_collect_data_quality_warnings()` â€” audits stale features, low sample count, regime imbalance
 
 `ml_train_state.json` extended fields: `ml_backend_type`, `model_file_path`, `model_file_mtime_ms`,
 `training_samples_count`, `training_features_count`, `training_regimes_count`, `training_result`,
@@ -98,7 +98,7 @@ New Python helpers:
 `solcast_prior_from_snapshot()` exposes Solcast P10/Lo and P90/Hi percentiles. `build_features()` derives 6 tri-band features:
 `solcast_lo_kwh`, `solcast_hi_kwh`, `solcast_lo_vs_physics`, `solcast_hi_vs_physics`, `solcast_spread_pct`, `solcast_spread_ratio`.
 
-FEATURE_COLS: 62 → 70. Legacy models auto-align with zero-spread fallback. P10/P90 available only from Solcast Toolkit for future-dated requests.
+FEATURE_COLS: 62 â†’ 70. Legacy models auto-align with zero-spread fallback. P10/P90 available only from Solcast Toolkit for future-dated requests.
 LightGBM hyperparams tuned: n_estimators=650, learning_rate=0.040, max_depth=8, num_leaves=71, subsample=0.78, colsample_bytree=0.75, min_child_samples=22, reg_alpha=0.08, reg_lambda=0.12.
 
 See `references/forecast-engine.md` for full feature formulas, training details, and backward-compatibility rules.
@@ -118,7 +118,7 @@ and `plans/2026-04-17-power-loss-resilience.md` for full rationale. Short versio
   `mode=skipped` if a future change breaks the original-fs resolution.
   Regression test: `testElectronAsarShimSimulation` in
   `server/tests/crashRecovery.test.js`.
-- `electron/main.js` top-of-file block is the "survival boot" — Node+Electron
+- `electron/main.js` top-of-file block is the "survival boot" â€” Node+Electron
   core requires only, hoisted `uncaughtException` handler, `safeRequire()`
   wrapper for every third-party module, and an `app.asar` integrity gate
   via `electron/integrityGate.js` (SHA-512 sidecar manifest).
@@ -152,26 +152,26 @@ and `plans/2026-04-17-power-loss-resilience.md` for full rationale. Short versio
   covers the marker classification.
 
 Do NOT remove the `app.asar.sha512` sidecar, the stash path, or the hoisted
-`uncaughtException` handler — they are the chain that converts a torn-write
+`uncaughtException` handler â€” they are the chain that converts a torn-write
 into a 60-second recovery.
 
 ---
 
 ## Supported Platforms (Windows-only by design)
 
-The product is **Windows-only** — Electron + NSIS installer + `.exe` Python
+The product is **Windows-only** â€” Electron + NSIS installer + `.exe` Python
 services, deployed on the gateway PC. There is no cross-OS build (no Linux/Mac
 path resolver, NSIS installer, or `wevtutil.exe` event-log abstraction); this
 is intentional, not a gap (audit `audits/2026-05-28/subsystem-deep-audit.md`
-§3.3 reframes the prior "cross-OS Critical" as an audit false positive).
+Â§3.3 reframes the prior "cross-OS Critical" as an audit false positive).
 
 | Scenario | Status |
 |---|---|
 | Supported OS | **Windows 10 21H2+** and **Windows 11 21H2+** (x64) |
-| Same-OS reinstall, same machine | Fully supported — bootstrap-restore wizard + cloud restore |
+| Same-OS reinstall, same machine | Fully supported â€” bootstrap-restore wizard + cloud restore |
 | Different machine, same Windows version | DB/settings/config restore works; **license re-bind + cloud re-auth are manual** (hardware-bound license, credentials excluded from restore by security boundary) |
-| Win10 → Win11 migration | Untested; integrity gate degrades to `mode=skipped` if the event log is inaccessible (safe but invisible) |
-| Cross-OS (Win → Linux/Mac) | **Not supported — by design** |
+| Win10 â†’ Win11 migration | Untested; integrity gate degrades to `mode=skipped` if the event log is inaccessible (safe but invisible) |
+| Cross-OS (Win â†’ Linux/Mac) | **Not supported â€” by design** |
 
 ---
 
@@ -184,21 +184,21 @@ full spec and `audits/2026-04-24/counter-integrity/` for scan evidence.
   in [services/inverter_engine.py](services/inverter_engine.py), capturing
   Etotal@0-1, parcE@58-59, full 32-bit alarm@6-7, Fac@19.
 - On restart, `kwh_today` per unit is seeded via
-  `seed_pac_from_baseline()` from `(current_Etotal − midnight_baseline)`,
-  with health-gate hierarchy: `trust_etotal` → `trust_parce` → zero.
+  `seed_pac_from_baseline()` from `(current_Etotal âˆ’ midnight_baseline)`,
+  with health-gate hierarchy: `trust_etotal` â†’ `trust_parce` â†’ zero.
   Controlled via `DISABLE_COUNTER_RECOVERY=1` env var.
 - Inverter clocks are broadcast-synced daily at the `inverterClockAutoSyncAt`
   setting (default **04:25**, stagger before the 04:30 day-ahead regen).
   Drift > 1 h and RTC year-out-of-band (2047 pattern) trigger immediate sync.
-- **Slice D clock-sync transport — template-gate retired in v2.9.0**:
+- **Slice D clock-sync transport â€” template-gate retired in v2.9.0**:
   Wireshark capture of ISM's `Isla::Sincronizar` (`docs/capture-file.pcapng`,
   frame #8017) confirmed the on-wire protocol is plain Modbus FC16 (Write
   Multiple Registers) broadcast to unit 0, address 0, six UINT16s
   `[year, month, day, hour, minute, second]`. No vendor function code, no
-  19-byte template — `sync_clock()` uses pymodbus' built-in
+  19-byte template â€” `sync_clock()` uses pymodbus' built-in
   `write_registers` directly (see `services/inverter_engine.py` ~line 1714
   for the design note). The earlier template-gate from
-  `plans/2026-04-24-hardware-counter-recovery-and-clock-sync.md` §9.2 D1
+  `plans/2026-04-24-hardware-counter-recovery-and-clock-sync.md` Â§9.2 D1
   is no longer required and the `isla-sincronizar-frame.bin` artifact does
   not need to exist.
 - New tables in [server/db.js](server/db.js): `inverter_counter_state`,
@@ -213,22 +213,22 @@ full spec and `audits/2026-04-24/counter-integrity/` for scan evidence.
 - New endpoints in [server/index.js](server/index.js):
   - `GET  /api/counter-baseline/:date_key`  (localhost-internal for Python engine)
   - `POST /api/audit/counter-recovery`      (system audit writes)
-  - `GET  /api/counter-state/all`           (topology auth — admin UI feed)
-  - `GET  /api/counter-state/summary`       (unauthenticated — top-bar chip)
+  - `GET  /api/counter-state/all`           (topology auth â€” admin UI feed)
+  - `GET  /api/counter-state/summary`       (unauthenticated â€” top-bar chip)
   - `GET  /api/clock-sync-log`              (topology auth)
-  - `POST /api/sync-clock/:inv/:unit`       (bulk auth — operator)
-  - `POST /api/sync-clock/broadcast`        (bulk auth — operator)
-  - `POST /api/sync-clock-internal`         (loopback only — Python triggers)
-  - `POST /api/sync-clock/inverter/:inverter` (no operator auth — per-inverter daisy-chain broadcast; client auto-derives `adsiMM` and Node injects upstream)
+  - `POST /api/sync-clock/:inv/:unit`       (bulk auth â€” operator)
+  - `POST /api/sync-clock/broadcast`        (bulk auth â€” operator)
+  - `POST /api/sync-clock-internal`         (loopback only â€” Python triggers)
+  - `POST /api/sync-clock/inverter/:inverter` (no operator auth â€” per-inverter daisy-chain broadcast; client auto-derives `adsiMM` and Node injects upstream)
   - `GET  /admin/inverter-clock`            (topology-gated admin page)
 - Export enhancement: [server/exporter.js](server/exporter.js)
   `exportInverterData` accepts `includeEtotal` / `includeParce` / `showQuarantine`
   payload flags. Adds columns `Etotal_kWh`, `parcE_kWh`, `Counter_Source`,
   `Etotal_Quarantined`, `Quarantine_Reason`. PAC-integrated `Energy_kWh`
-  stays authoritative — hardware counters are reconciliation aids.
+  stays authoritative â€” hardware counters are reconciliation aids.
 - UI: top-bar chip in [public/index.html](public/index.html) + 30-s polling
   in [public/js/app.js](public/js/app.js). The admin surface lives in
-  **Settings → Inverter Clocks** (`#inverterClockSection`) — themed with
+  **Settings â†’ Inverter Clocks** (`#inverterClockSection`) â€” themed with
   the project's `--accent`/`--green`/`--orange`/`--red` token system.
   The old `/admin/inverter-clock` URL redirects to the settings deep link.
 - Settings keys: `inverterClockAutoSyncEnabled` (default "1"),
@@ -243,21 +243,21 @@ full spec and `audits/2026-04-24/counter-integrity/` for scan evidence.
 
 INVARIANT: PAC integration stays authoritative while the dashboard is up.
 Hardware counters are used for crash-recovery seeding, export reconciliation,
-and quarantine detection only — they never overwrite a running PAC value.
+and quarantine detection only â€” they never overwrite a running PAC value.
 
 ---
 
-## Modbus Register Reference (v2.11.x — Slice η)
+## Modbus Register Reference (v2.11.x â€” Slice Î·)
 
 The full INGECON SUN PMax register map (input + holding), command codes,
 alarm bits, and power-reduction status bits live in
-**[docs/Inverter-Modbus-Reference.md](docs/Inverter-Modbus-Reference.md)** —
+**[docs/Inverter-Modbus-Reference.md](docs/Inverter-Modbus-Reference.md)** â€”
 the source-of-truth for inverter integration work. Implementing plan:
 [plans/2026-05-10-modbus-registers-official-revamp.md](plans/2026-05-10-modbus-registers-official-revamp.md).
 Implementation status: [audits/2026-05-11/modbus-revamp-implementation-status.md](audits/2026-05-11/modbus-revamp-implementation-status.md).
 
 ---
 
-All other reference knowledge — architecture, data model, replication, forecast engine,
-UI patterns, storage paths, build commands, smoke sequences — is in `SKILL.md`.
+All other reference knowledge â€” architecture, data model, replication, forecast engine,
+UI patterns, storage paths, build commands, smoke sequences â€” is in `SKILL.md`.
 Do not duplicate it here.

@@ -1,18 +1,18 @@
----
+﻿---
 name: adsi-dashboard
 description: >
   Reference knowledge for the ADSI Inverter Dashboard (package: inverter-dashboard,
   app ID: com.engr-m.inverter-dashboard). Load this skill for any task touching
-  this codebase — feature work, bug fixes, refactors, releases, DB changes,
+  this codebase â€” feature work, bug fixes, refactors, releases, DB changes,
   UI tweaks, Python service changes, replication logic, forecast engine edits,
   or documentation updates. Relevant whenever the user mentions ADSI, ADSI Dashboard,
   InverterCoreService, ForecastCoreService, inverter dashboard, adsi.db, or any
   file path from this repo (server/index.js, public/js/app.js, etc.).
 ---
 
-# ADSI Inverter Dashboard — Codebase Reference
+# ADSI Inverter Dashboard â€” Codebase Reference
 
-Detailed reference material lives in `references/` — read those files when working in the relevant area:
+Detailed reference material lives in `references/` â€” read those files when working in the relevant area:
 
 | File | When to read |
 |---|---|
@@ -29,28 +29,28 @@ Detailed reference material lives in `references/` — read those files when wor
 | Field | Value |
 |---|---|
 | User-facing name | `ADSI Inverter Dashboard` |
-| Author | Engr. Clariden Montaño REE (Engr. M.) |
+| Author | Engr. Clariden MontaÃ±o REE (Engr. M.) |
 | Package name | `inverter-dashboard` |
-| Updater app ID | `com.engr-m.inverter-dashboard` — do not rename |
-| Repo version baseline | `2.12.7` — source of truth: `package.json` |
+| Updater app ID | `com.engr-m.inverter-dashboard` â€” do not rename |
+| Repo version baseline | `2.12.8` â€” source of truth: `package.json` |
 | Deployed server version | `2.2.32` (may legitimately lag) |
-| Latest published release | `v2.12.7` |
+| Latest published release | `v2.12.8` |
 | GitHub release channel | `mclards/ADSI-Dashboard` |
 | Default plant name | `ADSI Plant` |
-| Supported OS | **Windows 10 21H2+ / Windows 11 21H2+ (x64)** — Windows-only by design; see CLAUDE.md "Supported Platforms" |
+| Supported OS | **Windows 10 21H2+ / Windows 11 21H2+ (x64)** â€” Windows-only by design; see CLAUDE.md "Supported Platforms" |
 
 ---
 
 ## Credentials and Access Keys
 
-*(Internal — not for public docs.)*
+*(Internal â€” not for public docs.)*
 
 | Key | Value / Pattern |
 |---|---|
 | Login username | `admin` |
 | Login password | `1234` |
-| Admin auth key | `ADSI-2026` — resets to `admin` / `1234` |
-| Bulk inverter control | `adsiMM` (MM = current minute ±1; unified with topology key as of 2026-05-31) |
+| Admin auth key | `ADSI-2026` â€” resets to `admin` / `1234` |
+| Bulk inverter control | `adsiMM` (MM = current minute Â±1; unified with topology key as of 2026-05-31) |
 | Topology / IP Config auth | `adsiM` or `adsiMM` (same rolling key as bulk control) |
 | IP Config session | 1 hour |
 | Topology session | 10 minutes |
@@ -64,16 +64,16 @@ No built-in defaults for: remote gateway API token, Solcast credentials, cloud-b
 | Layer | Technology |
 |---|---|
 | Desktop shell | Electron 29 |
-| API server | Express 4 — `server/index.js`, port 3500 |
+| API server | Express 4 â€” `server/index.js`, port 3500 |
 | Database | SQLite via `better-sqlite3` |
-| Frontend | Vanilla JS + Chart.js 4 — `public/js/app.js` |
-| Inverter service | Python FastAPI port 9000, Modbus TCP — `services/inverter_engine.py` |
-| Forecast service | Python ML engine — `services/forecast_engine.py`; trains on weather + Solcast tri-band (P10/Lo, forecast, P90/Hi) as of v2.5.1+ |
-| Camera streaming | Bundled go2rtc (HLS/WebRTC) + FFmpeg fallback — `server/go2rtcManager.js`, `server/go2rtc/` |
+| Frontend | Vanilla JS + Chart.js 4 â€” `public/js/app.js` |
+| Inverter service | Python FastAPI port 9000, Modbus TCP â€” `services/inverter_engine.py` |
+| Forecast service | Python ML engine â€” `services/forecast_engine.py`; trains on weather + Solcast tri-band (P10/Lo, forecast, P90/Hi) as of v2.5.1+ |
+| Camera streaming | Bundled go2rtc (HLS/WebRTC) + FFmpeg fallback â€” `server/go2rtcManager.js`, `server/go2rtc/` |
 | Modbus driver | `drivers/modbus_tcp.py` |
-| Modbus register reference | [docs/Inverter-Modbus-Reference.md](docs/Inverter-Modbus-Reference.md) — full input + holding register map, command codes, alarm bits, power-reduction status. Source-of-truth for all inverter integration work. |
+| Modbus register reference | [docs/Inverter-Modbus-Reference.md](docs/Inverter-Modbus-Reference.md) â€” full input + holding register map, command codes, alarm bits, power-reduction status. Source-of-truth for all inverter integration work. |
 
-Data flow: `Modbus TCP → FastAPI (9000) → Express (3500) → SQLite → WebSocket → Browser`
+Data flow: `Modbus TCP â†’ FastAPI (9000) â†’ Express (3500) â†’ SQLite â†’ WebSocket â†’ Browser`
 
 ---
 
@@ -85,13 +85,13 @@ Data flow: `Modbus TCP → FastAPI (9000) → Express (3500) → SQLite → WebS
 | `electron/` | `main.js`, `preload.js` |
 | `server/` | Express server, DB, poller, exporter, subsystem modules |
 | `server/cloudProviders/` | OneDrive, Google Drive, S3 |
-| `server/go2rtc/` | Bundled go2rtc binary + YAML config (extraResources → `backend/go2rtc/`) |
+| `server/go2rtc/` | Bundled go2rtc binary + YAML config (extraResources â†’ `backend/go2rtc/`) |
 | `server/tests/` | Node.js smoke tests, Playwright UI spec |
 | `services/` | Python backend, shared data layer, PyInstaller specs |
 | `services/tests/` | Python unit tests |
 | `public/` | Frontend HTML, JS, CSS |
 | `drivers/` | Modbus TCP driver |
-| `docs/` | User guide — HTML, Markdown, PDF |
+| `docs/` | User guide â€” HTML, Markdown, PDF |
 | `dist/` | Built Python service EXEs |
 | `release/` | Installer build artifacts |
 | `scripts/` | Maintenance and DOCX utility scripts |
@@ -112,15 +112,15 @@ Data flow: `Modbus TCP → FastAPI (9000) → Express (3500) → SQLite → WebS
 | `forecast_run_audit` | One row per generation run per target date |
 | `forecast_error_compare_daily` | Per-day QA comparison rows with eligibility flags |
 | `forecast_error_compare_slot` | Per-slot QA rows with mask flags and support weights |
-| `solcast_snapshots` | Stored Solcast API snapshots — raw MW and slot kWh |
+| `solcast_snapshots` | Stored Solcast API snapshots â€” raw MW and slot kWh |
 
 ---
 
 ## Operating Modes
 
-**`gateway`** — polls plant locally; authoritative source of truth for live data, reports, forecasts, and replication snapshots; the only mode in which forecast generation runs.
+**`gateway`** â€” polls plant locally; authoritative source of truth for live data, reports, forecasts, and replication snapshots; the only mode in which forecast generation runs.
 
-**`remote`** — gateway-backed viewer; no local DB persistence from the live stream; historical views proxied to gateway; inverter write control via gateway proxy. If the gateway is unreachable during startup, a **Connection Mode** picker appears on the loading screen allowing the operator to switch to `gateway` or retry `remote`.
+**`remote`** â€” gateway-backed viewer; no local DB persistence from the live stream; historical views proxied to gateway; inverter write control via gateway proxy. If the gateway is unreachable during startup, a **Connection Mode** picker appears on the loading screen allowing the operator to switch to `gateway` or retry `remote`.
 
 Live bridge health states: `connected`, `degraded`, `stale`, `disconnected`, `auth-error`, `config-error`.
 
@@ -133,8 +133,8 @@ Switching from `remote` to `gateway` must immediately abort in-flight remote fet
 | Layer | Files |
 |---|---|
 | Electron | `electron/main.js`, `electron/preload.js` |
-| Server — core | `server/index.js`, `server/db.js`, `server/poller.js`, `server/exporter.js` |
-| Server — subsystems | `server/alarmEpisodeCore.js`, `server/currentDayEnergyCore.js`, `server/plantCapController.js`, `server/mwhHandoffCore.js`, `server/todayEnergyHealthCore.js`, `server/ws.js`, `server/bulkControlAuth.js`, `server/cloudBackup.js`, `server/tokenStore.js`, `server/go2rtcManager.js` |
+| Server â€” core | `server/index.js`, `server/db.js`, `server/poller.js`, `server/exporter.js` |
+| Server â€” subsystems | `server/alarmEpisodeCore.js`, `server/currentDayEnergyCore.js`, `server/plantCapController.js`, `server/mwhHandoffCore.js`, `server/todayEnergyHealthCore.js`, `server/ws.js`, `server/bulkControlAuth.js`, `server/cloudBackup.js`, `server/tokenStore.js`, `server/go2rtcManager.js` |
 | Frontend | `public/index.html`, `public/js/app.js`, `public/css/style.css` |
 | Python | `InverterCoreService.py`, `ForecastCoreService.py`, `services/inverter_engine.py`, `services/forecast_engine.py`, `services/shared_data.py`, `services/InverterCoreService.spec`, `services/ForecastCoreService.spec`, `drivers/modbus_tcp.py` |
 
@@ -160,6 +160,6 @@ Switching from `remote` to `gateway` must immediately abort in-flight remote fet
 | Dependable / nominal baseline (Pnom) | 906.92 kW |
 | Per node at 4 nodes (Pnom) | 226.73 kW |
 
-Source: official Ingeteam `Plantilla Parámetros_DIGOS` template (`docs/Inverter-Parameters.pdf`).
+Source: official Ingeteam `Plantilla ParÃ¡metros_DIGOS` template (`docs/Inverter-Parameters.pdf`).
 
-Availability: inverter-level uptime only, window 05:00–18:00. All 4 nodes offline = 0%.
+Availability: inverter-level uptime only, window 05:00â€“18:00. All 4 nodes offline = 0%.

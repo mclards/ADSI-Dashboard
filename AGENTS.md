@@ -1,8 +1,8 @@
-# AGENTS.md
+﻿# AGENTS.md
 
 Repository guidance for Codex and other coding agents in `d:\ADSI-Dashboard`.
 
-Read `SKILL.md` first — it is the canonical codebase reference. This file exists as an
+Read `SKILL.md` first â€” it is the canonical codebase reference. This file exists as an
 always-on summary so agents have core project rules even before skill loading.
 For server-layer rules see `server/AGENTS.md`. For Python-layer rules see `services/AGENTS.md`.
 
@@ -11,12 +11,12 @@ For server-layer rules see `server/AGENTS.md`. For Python-layer rules see `servi
 ## Project Identity
 
 - **Product name**: `ADSI Inverter Dashboard`
-- **Author**: Engr. Clariden Montaño REE (Engr. M.)
+- **Author**: Engr. Clariden MontaÃ±o REE (Engr. M.)
 - **Package**: `inverter-dashboard`
-- **Updater app ID**: `com.engr-m.inverter-dashboard` — do not rename
-- **Version source of truth**: `package.json` — not footer strings
-- **Repo version baseline**: `2.12.7`
-- **Latest published release**: `v2.12.7`
+- **Updater app ID**: `com.engr-m.inverter-dashboard` â€” do not rename
+- **Version source of truth**: `package.json` â€” not footer strings
+- **Repo version baseline**: `2.12.8`
+- **Latest published release**: `v2.12.8`
 - **GitHub release channel**: `mclards/ADSI-Dashboard`
 
 ---
@@ -27,8 +27,8 @@ For server-layer rules see `server/AGENTS.md`. For Python-layer rules see `servi
 - Express 4 API server (`server/index.js`) on port 3500
 - SQLite via `better-sqlite3` (`server/db.js`)
 - Frontend vanilla JS + Chart.js 4 (`public/js/app.js`, `public/index.html`)
-- Python inverter service (`InverterCoreService.py` → `services/inverter_engine.py`) — FastAPI port 9100, Modbus TCP
-- Python forecast service (`ForecastCoreService.py` → `services/forecast_engine.py`) — ML day-ahead and intraday
+- Python inverter service (`InverterCoreService.py` â†’ `services/inverter_engine.py`) â€” FastAPI port 9100, Modbus TCP
+- Python forecast service (`ForecastCoreService.py` â†’ `services/forecast_engine.py`) â€” ML day-ahead and intraday
 
 ---
 
@@ -45,16 +45,16 @@ For server-layer rules see `server/AGENTS.md`. For Python-layer rules see `servi
 ## Repo Layout Rules
 
 - Repo root: app entrypoints, metadata, user-visible config only.
-- Python backend support, shared modules, PyInstaller specs → `services/`
+- Python backend support, shared modules, PyInstaller specs â†’ `services/`
 - Do not reintroduce legacy duplicate service files at the repo root.
-- `ipconfig.json` and `server/ipconfig.json` are local machine config — do not commit unless intentional.
+- `ipconfig.json` and `server/ipconfig.json` are local machine config â€” do not commit unless intentional.
 
 ---
 
 ## Current-Day Energy Authority
 
 `TODAY MWh`, `ACTUAL MWh`, and per-inverter `TODAY ENERGY` must come from
-**server-side PAC × elapsed time integration only**. Never use Python/modbus
+**server-side PAC Ã— elapsed time integration only**. Never use Python/modbus
 register kWh or Python `/metrics` energy fields as authority for current-day totals.
 
 ---
@@ -67,13 +67,13 @@ Provider routing and Solcast freshness decisions are always made by Node. Python
 | Path | Trigger | Audit |
 |---|---|---|
 | Manual UI | `POST /api/forecast/generate` | Node |
-| Auto scheduler | Python loop → `_delegate_run_dayahead()` | Node |
-| Python CLI | `--generate-date` → `_delegate_run_dayahead()` | Node |
+| Auto scheduler | Python loop â†’ `_delegate_run_dayahead()` | Node |
+| Python CLI | `--generate-date` â†’ `_delegate_run_dayahead()` | Node |
 | Python CLI fallback | Node unreachable, direct `run_dayahead(write_audit=True)` | Python |
 | Node cron | 04:30/18:30/20:00/22:00, quality-aware | Node |
 
 `_delegate_run_dayahead()` uses `ADSI_SERVER_PORT` (default 3500).
-Node cron classifies tomorrow quality (`missing`/`incomplete`/`wrong_provider`/`stale_input`/`weak_quality`/`healthy`) — only `healthy` suppresses regeneration.
+Node cron classifies tomorrow quality (`missing`/`incomplete`/`wrong_provider`/`stale_input`/`weak_quality`/`healthy`) â€” only `healthy` suppresses regeneration.
 
 ---
 
@@ -86,9 +86,9 @@ Node cron classifies tomorrow quality (`missing`/`incomplete`/`wrong_provider`/`
 | Weather regime | `regimes` (clear/mixed/overcast/rainy) | Per-regime bias_ratio + reliability |
 | Season | `seasons` (dry/wet), `season_regimes` | Season-aware lookup |
 | Time-of-day | `time_of_day` (morning/midday/afternoon), `time_of_day_by_regime` | Per-slot blend and floor modulation |
-| Trend | `trend` (improving/stable/degrading) | Blend ±6-8%, residual damping adjustment |
+| Trend | `trend` (improving/stable/degrading) | Blend Â±6-8%, residual damping adjustment |
 
-All lookups have backward-compatible fallbacks — old artifacts without new keys load safely.
+All lookups have backward-compatible fallbacks â€” old artifacts without new keys load safely.
 
 ---
 
@@ -98,8 +98,8 @@ All lookups have backward-compatible fallbacks — old artifacts without new key
 and `dataQualityFlags`. The Forecast Performance Monitor panel defaults to collapsed on first load.
 
 New Python helpers:
-- `_detect_ml_backend()` — identifies active LightGBM vs sklearn
-- `_collect_data_quality_warnings()` — audits stale features, low sample count, regime imbalance
+- `_detect_ml_backend()` â€” identifies active LightGBM vs sklearn
+- `_collect_data_quality_warnings()` â€” audits stale features, low sample count, regime imbalance
 
 `ml_train_state.json` extended fields: `ml_backend_type`, `model_file_path`, `model_file_mtime_ms`,
 `training_samples_count`, `training_features_count`, `training_regimes_count`, `training_result`,
@@ -123,12 +123,12 @@ New Python helpers:
 
 ```powershell
 npm run rebuild:native:electron
-npm run build:installer         # signed build — enforces 3 safety gates
+npm run build:installer         # signed build â€” enforces 3 safety gates
 npm run rebuild:native:node     # before plain Node shell checks
 ```
 
 **`build:installer` is signed by default** (v2.7.18+). All three of `build:win`, `build:installer`, and `build:installer:signed` route through `scripts/build-installer-signed.js` and enforce:
-1. Signing required — fails fast if `build/private/codesign.env` is missing, unless `ADSI_ALLOW_UNSIGNED=1` is set
+1. Signing required â€” fails fast if `build/private/codesign.env` is missing, unless `ADSI_ALLOW_UNSIGNED=1` is set
 2. Post-build signature verification with thumbprint pin against `build/private/codesign-thumbprint.txt`
 3. Installer size floor (300 MB) + SHA-512 log
 
@@ -185,7 +185,7 @@ npm run rebuild:native:electron
 
 - Always bump `package.json` before building any release EXE.
 - Keep `SKILL.md`, `CLAUDE.md`, `AGENTS.md`, and `MEMORY.md` aligned after every release.
-- The User Guide version header must match `package.json` — update explicitly on every release.
+- The User Guide version header must match `package.json` â€” update explicitly on every release.
 - Push the release commit and tag **before** creating the GitHub release.
 - If `gh release create` times out, inspect GitHub release state before retrying.
 - Clean `release/` before every build. After publish keep only:
@@ -198,12 +198,12 @@ npm run rebuild:native:electron
 
 ## Python Service EXE Rules
 
-- `npm run build:installer` packages existing `dist/*.exe` — it does **not** rebuild them.
+- `npm run build:installer` packages existing `dist/*.exe` â€” it does **not** rebuild them.
 - Rebuild only the changed service EXE:
-  - inverter-service changes → `dist/InverterCoreService.exe`
-  - forecast-service changes → `dist/ForecastCoreService.exe`
-  - calibrator-service changes → `dist/CalibratorService.exe`
-  - shared changes (`services/shared_data.py`, `drivers/modbus_tcp.py`) → rebuild all three
+  - inverter-service changes â†’ `dist/InverterCoreService.exe`
+  - forecast-service changes â†’ `dist/ForecastCoreService.exe`
+  - calibrator-service changes â†’ `dist/CalibratorService.exe`
+  - shared changes (`services/shared_data.py`, `drivers/modbus_tcp.py`) â†’ rebuild all three
 - Do not publish if EXEs were built against stale Python binaries.
 - After rebuilding Python EXEs, always run `npm run rebuild:native:electron` before the Electron build.
 - **PyInstaller build command**: For each spec, run `pyinstaller --noconfirm services/<ServiceName>.spec` (outputs to `dist/<ServiceName>.exe`).
@@ -238,7 +238,7 @@ chrome --headless=new --disable-gpu --no-sandbox --print-to-pdf="<pdf>" --print-
 | Layer | Files |
 |---|---|
 | Electron | `electron/main.js`, `electron/preload.js` |
-| Server — core | `server/index.js`, `server/db.js`, `server/poller.js`, `server/exporter.js` |
-| Server — subsystems | `server/alarmEpisodeCore.js`, `server/currentDayEnergyCore.js`, `server/plantCapController.js`, `server/mwhHandoffCore.js`, `server/todayEnergyHealthCore.js`, `server/ws.js`, `server/bulkControlAuth.js`, `server/cloudBackup.js`, `server/tokenStore.js` |
+| Server â€” core | `server/index.js`, `server/db.js`, `server/poller.js`, `server/exporter.js` |
+| Server â€” subsystems | `server/alarmEpisodeCore.js`, `server/currentDayEnergyCore.js`, `server/plantCapController.js`, `server/mwhHandoffCore.js`, `server/todayEnergyHealthCore.js`, `server/ws.js`, `server/bulkControlAuth.js`, `server/cloudBackup.js`, `server/tokenStore.js` |
 | Frontend | `public/index.html`, `public/js/app.js`, `public/css/style.css` |
 | Python | `InverterCoreService.py`, `ForecastCoreService.py`, `services/inverter_engine.py`, `services/forecast_engine.py`, `services/shared_data.py`, `services/InverterCoreService.spec`, `services/ForecastCoreService.spec`, `drivers/modbus_tcp.py` |

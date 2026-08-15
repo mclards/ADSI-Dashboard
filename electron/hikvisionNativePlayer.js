@@ -141,6 +141,11 @@ function buildPlaybackAttempts(config) {
       url: `rtsp://${config.host}:${rtspPort}/ISAPI/streaming/channels/${channelId}`,
       auth: Buffer.from(`${config.username}:${config.password}`, "utf8").toString("base64"),
     },
+    {
+      label: "RTSP (Standard)",
+      url: `rtsp://${config.host}:${rtspPort}/Streaming/Channels/${channelId}?transport=tcp`,
+      auth: Buffer.from(`${config.username}:${config.password}`, "utf8").toString("base64"),
+    },
   ];
 }
 

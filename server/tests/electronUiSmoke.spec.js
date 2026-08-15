@@ -5,10 +5,14 @@ const path = require("path");
 const { test, expect, _electron: electron } = require("playwright/test");
 
 const REPO_ROOT = path.resolve(__dirname, "..", "..");
-const ELECTRON_EXE =
+const PACKAGED_ELECTRON_EXE = String(process.env.ADSI_PACKAGED_ELECTRON_EXE || "").trim();
+const ELECTRON_EXE = PACKAGED_ELECTRON_EXE || (
   process.platform === "win32"
     ? path.join(REPO_ROOT, "node_modules", "electron", "dist", "electron.exe")
-    : path.join(REPO_ROOT, "node_modules", "electron", "dist", "electron");
+    : path.join(REPO_ROOT, "node_modules", "electron", "dist", "electron")
+);
+const ELECTRON_ARGS = PACKAGED_ELECTRON_EXE ? [] : [REPO_ROOT];
+const REQUIRE_NATIVE_VIDEO = process.env.ADSI_REQUIRE_NATIVE_VIDEO === "1";
 const ARTIFACT_DIR = path.join(REPO_ROOT, "server", "tests", "artifacts");
 const LAUNCH_ENV = { ...process.env };
 delete LAUNCH_ENV.ELECTRON_RUN_AS_NODE;
@@ -42,7 +46,7 @@ test.describe("Electron UI smoke", () => {
 
     const electronApp = await electron.launch({
       executablePath: ELECTRON_EXE,
-      args: [REPO_ROOT],
+      args: ELECTRON_ARGS,
       cwd: REPO_ROOT,
       env: {
         ...LAUNCH_ENV,
@@ -197,6 +201,15 @@ test.describe("Electron UI smoke", () => {
       expect(nativeLayout.surfaceWidth).toBeGreaterThanOrEqual(nativeLayout.viewportWidth - 1);
       expect(nativeLayout.surfaceHeight).toBeGreaterThanOrEqual(nativeLayout.viewportHeight - 1);
       expect(nativeLayout.surfaceHeight).toBeGreaterThan(100);
+      if (REQUIRE_NATIVE_VIDEO) {
+        await expect.poll(
+          async () => nativeViewer.evaluate(() => window.electronAPI?.hikvisionNativeStatus?.()),
+          { timeout: 30000 },
+        ).toMatchObject({ running: true, visible: true, connected: true });
+        const nativeVideoStatus = await nativeViewer.evaluate(() => window.electronAPI.hikvisionNativeStatus());
+        expect(nativeVideoStatus.width).toBeGreaterThan(0);
+        expect(nativeVideoStatus.height).toBeGreaterThan(0);
+      }
       await nativeViewer.close();
       await expect.poll(
         () => electronApp.windows().filter((page) => page.url().includes("hikvision-native-viewer.html")).length,

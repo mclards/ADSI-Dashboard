@@ -1,13 +1,13 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ADSI Inverter Dashboard — User Guide v2.12.7</title>
+<title>ADSI Inverter Dashboard â€” User Guide v2.12.8</title>
 <style>
-  /* ══════════════════════════════════════════════
+  /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
      CSS VARIABLES & RESET
-     ══════════════════════════════════════════════ */
+     â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
   :root {
     --bg: #0b0e14;
     --surface: #141820;
@@ -54,9 +54,9 @@
   a { color: var(--link); text-decoration: none; }
   a:hover { text-decoration: underline; }
 
-  /* ══════════════════════════════════════════════
+  /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
      COVER PAGE
-     ══════════════════════════════════════════════ */
+     â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
   .cover {
     min-height: 100vh;
     display: flex;
@@ -147,9 +147,9 @@
   .cover-meta-item svg { flex-shrink: 0; }
   .cover-meta-item b { color: var(--text); font-weight: 600; }
 
-  /* ══════════════════════════════════════════════
+  /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
      TABLE OF CONTENTS
-     ══════════════════════════════════════════════ */
+     â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
   .toc {
     max-width: 900px;
     margin: 0 auto;
@@ -205,18 +205,18 @@
     flex-shrink: 0;
   }
 
-  /* ══════════════════════════════════════════════
+  /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
      CONTENT CONTAINER
-     ══════════════════════════════════════════════ */
+     â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
   .content {
     max-width: 920px;
     margin: 0 auto;
     padding: 0 32px 80px;
   }
 
-  /* ══════════════════════════════════════════════
+  /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
      SECTION HEADERS
-     ══════════════════════════════════════════════ */
+     â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
   section {
     margin-bottom: 52px;
     scroll-margin-top: 24px;
@@ -256,9 +256,9 @@
     letter-spacing: -0.3px;
   }
 
-  /* ══════════════════════════════════════════════
+  /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
      TYPOGRAPHY
-     ══════════════════════════════════════════════ */
+     â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
   h3 {
     font-size: 16px;
     font-weight: 600;
@@ -296,9 +296,9 @@
   }
   strong, b { font-weight: 600; }
 
-  /* ══════════════════════════════════════════════
+  /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
      CARDS
-     ══════════════════════════════════════════════ */
+     â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
   .info-card {
     background: var(--card);
     border: 1px solid var(--border);
@@ -341,9 +341,9 @@
   .info-card.note .info-card-label { color: var(--accent); }
   .info-card.danger .info-card-label { color: var(--red); }
 
-  /* ══════════════════════════════════════════════
+  /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
      TABLES
-     ══════════════════════════════════════════════ */
+     â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
   table {
     width: 100%;
     border-collapse: collapse;
@@ -380,9 +380,9 @@
     color: var(--accent-light);
   }
 
-  /* ══════════════════════════════════════════════
+  /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
      FEATURE GRID
-     ══════════════════════════════════════════════ */
+     â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
   .feat-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
@@ -416,9 +416,9 @@
   .feat-item h4 { margin: 0 0 6px; font-size: 14px; font-weight: 600; }
   .feat-item p { font-size: 12.5px; color: var(--text2); margin: 0; line-height: 1.6; }
 
-  /* ══════════════════════════════════════════════
+  /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
      SVG DIAGRAM CONTAINERS
-     ══════════════════════════════════════════════ */
+     â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
   .diagram-container {
     background: var(--card);
     border: 1px solid var(--border);
@@ -440,9 +440,9 @@
     font-style: italic;
   }
 
-  /* ══════════════════════════════════════════════
+  /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
      LEGEND
-     ══════════════════════════════════════════════ */
+     â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
   .legend-row {
     display: flex;
     gap: 16px;
@@ -468,9 +468,9 @@
     border: 1px solid rgba(255,255,255,.1);
   }
 
-  /* ══════════════════════════════════════════════
+  /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
      STEP LIST
-     ══════════════════════════════════════════════ */
+     â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
   .steps { counter-reset: step; list-style: none; padding-left: 0; }
   .steps li {
     counter-increment: step;
@@ -495,9 +495,9 @@
     justify-content: center;
   }
 
-  /* ══════════════════════════════════════════════
+  /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
      KEYBOARD SHORTCUTS
-     ══════════════════════════════════════════════ */
+     â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
   kbd {
     display: inline-block;
     padding: 3px 9px;
@@ -511,9 +511,9 @@
     font-weight: 600;
   }
 
-  /* ══════════════════════════════════════════════
+  /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
      WORKFLOW CARDS
-     ══════════════════════════════════════════════ */
+     â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
   .wf-card {
     background: var(--card);
     border: 1px solid var(--border);
@@ -542,9 +542,9 @@
     gap: 8px;
   }
 
-  /* ══════════════════════════════════════════════
+  /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
      ML HIGHLIGHT
-     ══════════════════════════════════════════════ */
+     â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
   .ml-highlight {
     background: linear-gradient(135deg, rgba(77,159,255,.06), rgba(192,132,252,.04));
     border: 1px solid rgba(77,159,255,.25);
@@ -557,9 +557,9 @@
   .ml-highlight h4 { color: var(--accent-light); margin-top: 18px; }
   .ml-highlight p, .ml-highlight li { font-size: 13.5px; line-height: 1.7; }
 
-  /* ══════════════════════════════════════════════
+  /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
      STAT ROW
-     ══════════════════════════════════════════════ */
+     â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
   .stat-row {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
@@ -587,9 +587,9 @@
     font-weight: 600;
   }
 
-  /* ══════════════════════════════════════════════
+  /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
      BACK TO TOP
-     ══════════════════════════════════════════════ */
+     â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
   .back-top {
     display: inline-flex;
     align-items: center;
@@ -600,9 +600,9 @@
     font-weight: 500;
   }
 
-  /* ══════════════════════════════════════════════
+  /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
      FOOTER
-     ══════════════════════════════════════════════ */
+     â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
   .guide-footer {
     text-align: center;
     padding: 48px 32px;
@@ -622,11 +622,11 @@
   }
   .guide-footer b { color: var(--text2); }
 
-  /* ══════════════════════════════════════════════
+  /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
      PRINT / PDF STYLES
-     ══════════════════════════════════════════════ */
+     â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
   @media print {
-    /* ── Page setup ── */
+    /* â”€â”€ Page setup â”€â”€ */
     @page {
       size: A4 portrait;
       margin: 2cm 1.8cm 2.4cm 1.8cm;
@@ -635,7 +635,7 @@
       margin-top: 0;
     }
 
-    /* ── Global resets ── */
+    /* â”€â”€ Global resets â”€â”€ */
     :root {
       --bg: #ffffff; --surface: #f8f9fb; --card: #f3f5f8; --card2: #eef1f5;
       --border: #d5dae3; --border2: #c8cfd9; --accent: #1a6ad4; --accent-light: #1a6ad4;
@@ -659,7 +659,7 @@
       box-shadow: none !important;
     }
 
-    /* ── Orphan / Widow control ── */
+    /* â”€â”€ Orphan / Widow control â”€â”€ */
     p, li, dd, dt, blockquote {
       orphans: 3;
       widows: 3;
@@ -669,7 +669,7 @@
       break-after: avoid;
     }
 
-    /* ── Cover page ── */
+    /* â”€â”€ Cover page â”€â”€ */
     .cover {
       min-height: auto;
       padding: 100px 50px 80px;
@@ -710,7 +710,7 @@
     }
     .cover-meta-item b { color: #111827 !important; }
 
-    /* ── Table of Contents ── */
+    /* â”€â”€ Table of Contents â”€â”€ */
     .toc {
       page-break-after: always;
       break-after: page;
@@ -735,7 +735,7 @@
       color: #6b7280;
     }
 
-    /* ── Section headings ── */
+    /* â”€â”€ Section headings â”€â”€ */
     .section-head {
       page-break-after: avoid;
       break-after: avoid;
@@ -766,7 +766,7 @@
       font-size: 10.5pt;
     }
 
-    /* ── Tables ── */
+    /* â”€â”€ Tables â”€â”€ */
     table {
       border: 1px solid #d5dae3 !important;
       font-size: 9pt;
@@ -797,7 +797,7 @@
     td code, th code { background: #eef3ff !important; color: #1a6ad4 !important; font-size: 8.5pt; }
     code { background: #eef3ff !important; color: #1a6ad4 !important; font-size: 8.5pt; }
 
-    /* ── Info cards ── */
+    /* â”€â”€ Info cards â”€â”€ */
     .info-card {
       background: #f8f9fb !important;
       border: 1px solid #d5dae3 !important;
@@ -818,7 +818,7 @@
     .info-card.danger::before { background: #dc2626 !important; }
     .info-card.danger .info-card-label { color: #991b1b !important; }
 
-    /* ── Feature items ── */
+    /* â”€â”€ Feature items â”€â”€ */
     .feat-item {
       background: #f8f9fb !important;
       border: 1px solid #d5dae3 !important;
@@ -830,7 +830,7 @@
     .feat-item-icon { background: #eef3ff !important; }
     .feat-item-icon svg * { stroke: #1a6ad4 !important; }
 
-    /* ── Workflow cards ── */
+    /* â”€â”€ Workflow cards â”€â”€ */
     .wf-card {
       background: #f8f9fb !important;
       border: 1px solid #d5dae3 !important;
@@ -840,7 +840,7 @@
     .wf-card::before { background: linear-gradient(180deg, #1a6ad4, #7c3aed) !important; }
     .wf-card h4 { color: #1a6ad4 !important; }
 
-    /* ── ML highlights ── */
+    /* â”€â”€ ML highlights â”€â”€ */
     .ml-highlight {
       background: #eef3ff !important;
       border-color: #1a6ad4 !important;
@@ -849,7 +849,7 @@
     }
     .ml-highlight h4 { color: #1a6ad4 !important; }
 
-    /* ── Diagrams & SVGs ── */
+    /* â”€â”€ Diagrams & SVGs â”€â”€ */
     .diagram-container {
       background: #f8f9fb !important;
       border: 1px solid #d5dae3 !important;
@@ -868,7 +868,7 @@
     }
     .diagram-caption { color: #6b7280 !important; font-size: 8.5pt; }
 
-    /* ── Legend ── */
+    /* â”€â”€ Legend â”€â”€ */
     .legend-row {
       background: #f8f9fb !important;
       border: 1px solid #d5dae3 !important;
@@ -876,7 +876,7 @@
     }
     .legend-chip { color: #1f2937 !important; }
 
-    /* ── Stat cards ── */
+    /* â”€â”€ Stat cards â”€â”€ */
     .stat-card {
       background: #f8f9fb !important;
       border: 1px solid #d5dae3 !important;
@@ -886,7 +886,7 @@
     .stat-card .stat-value { color: #1a6ad4 !important; }
     .stat-card .stat-label { color: #6b7280 !important; }
 
-    /* ── Steps ── */
+    /* â”€â”€ Steps â”€â”€ */
     .steps li {
       page-break-inside: avoid;
       break-inside: avoid;
@@ -897,7 +897,7 @@
       color: #1a6ad4 !important;
     }
 
-    /* ── Keyboard ── */
+    /* â”€â”€ Keyboard â”€â”€ */
     kbd {
       background: #f3f5f8 !important;
       border: 1px solid #d5dae3 !important;
@@ -905,10 +905,10 @@
       box-shadow: none !important;
     }
 
-    /* ── Hide non-print elements ── */
+    /* â”€â”€ Hide non-print elements â”€â”€ */
     .back-top { display: none !important; }
 
-    /* ── Footer ── */
+    /* â”€â”€ Footer â”€â”€ */
     .guide-footer {
       background: #fff !important;
       page-break-before: avoid;
@@ -917,7 +917,7 @@
     .guide-footer b { color: #374151 !important; }
     .guide-footer p { color: #6b7280 !important; }
 
-    /* ── Page-break strategy ── */
+    /* â”€â”€ Page-break strategy â”€â”€ */
     section {
       page-break-before: auto;
       page-break-inside: auto;
@@ -939,7 +939,7 @@
       break-inside: avoid;
     }
 
-    /* ── Links: show URL after text for printouts ── */
+    /* â”€â”€ Links: show URL after text for printouts â”€â”€ */
     a[href^="http"]::after {
       content: " (" attr(href) ")";
       font-size: 7.5pt;
@@ -987,7 +987,7 @@
   <div class="cover-meta">
     <div class="cover-meta-item">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1v6l4 2" stroke="#4d9fff" stroke-width="1.5" stroke-linecap="round"/><circle cx="8" cy="8" r="7" stroke="#4d9fff" stroke-width="1.5"/></svg>
-      <span><b>Version 2.12.7</b></span>
+      <span><b>Version 2.12.8</b></span>
     </div>
     <div class="cover-meta-item">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 8a3 3 0 100-6 3 3 0 000 6zM2 14c0-3.3 2.7-5 6-5s6 1.7 6 5" stroke="#c084fc" stroke-width="1.5" stroke-linecap="round"/></svg>
@@ -1232,7 +1232,7 @@
   <div class="info-card tip"><div class="info-card-label">Actuals Isolation</div>The quality assessment only reads forecast predictions, audit metadata, and Solcast weather snapshots. It never reads today&rsquo;s running energy actuals (energy_5min, inverter readings, or intraday adjustments). Live production data cannot interfere with the quality gate or trigger false regenerations.</div>
   <h3>7-Day Weather Outlook</h3>
   <p>Daily cards: sky condition, temperature range, rainfall, cloud %, wind speed, solar irradiance. Serves cached data when the API is unavailable.</p>
-  <h3>Day-Ahead vs Reality — Locked @ Previous 10 AM</h3>
+  <h3>Day-Ahead vs Reality â€” Locked @ Previous 10 AM</h3>
   <p>Multi-series comparison chart showing the frozen 10 AM day-ahead forecast snapshot (P10/P50/P90 confidence band) against intraday Solcast updates, plant actual output, and ML final forecast as the day unfolds. Displays spread % metrics, variance vs P50, and % of actual output within the confidence band. Useful for validating forecast accuracy and detecting late-day weather shifts.</p>
   <a href="#toc" class="back-top">&uarr; Back to Contents</a>
 </section>
@@ -1249,7 +1249,7 @@
   <table><thead><tr><th>Field</th><th>Description</th></tr></thead><tbody><tr><td>Plant Resource ID</td><td>Unique Solcast site identifier</td></tr><tr><td>Forecast Days</td><td>1&ndash;7 (default: 2)</td></tr><tr><td>Resolution</td><td>PT5M, PT10M, PT15M, PT30M, PT60M</td></tr><tr><td>Toolkit Email / Password</td><td>Account credentials</td></tr></tbody></table>
   <h3>Forecast Tuning</h3>
   <p>Manual overrides for ML engine training parameters. Leave blank to use the engine's own defaults.</p>
-  <table><thead><tr><th>Field</th><th>Purpose</th><th>Range</th><th>Default</th></tr></thead><tbody><tr><td>Est-actual Weight</td><td>Override the satellite est-actual training weight (how much weight the engine gives to Solcast estimated-actual values when training the model). Validate new values with a backtest before relying.</td><td>0.50–1.00</td><td>Auto (engine-tuned)</td></tr><tr><td>Intraday Blend Max</td><td>Cap how strongly intraday observed vs. day-ahead corrections are blended (0 = no intraday blending, 1 = maximum). Validate with a backtest.</td><td>0.00–1.00</td><td>0.72</td></tr></tbody></table>
+  <table><thead><tr><th>Field</th><th>Purpose</th><th>Range</th><th>Default</th></tr></thead><tbody><tr><td>Est-actual Weight</td><td>Override the satellite est-actual training weight (how much weight the engine gives to Solcast estimated-actual values when training the model). Validate new values with a backtest before relying.</td><td>0.50â€“1.00</td><td>Auto (engine-tuned)</td></tr><tr><td>Intraday Blend Max</td><td>Cap how strongly intraday observed vs. day-ahead corrections are blended (0 = no intraday blending, 1 = maximum). Validate with a backtest.</td><td>0.00â€“1.00</td><td>0.72</td></tr></tbody></table>
   <div class="ml-highlight">
     <div class="info-card-label" style="color:var(--accent)">ML Training Engine &mdash; Day-Ahead Generation</div>
     <p>The day-ahead forecast uses a <b>trained LightGBM model</b> (default since v2.4.40) that learns your plant's generation profile from historical data. It runs on the gateway and produces next-day forecasts from weather inputs and observed patterns.</p>
@@ -1407,7 +1407,7 @@
     <li><b>Read / Edit / Send</b> &mdash; FC11 <i>Report Slave ID</i> read mints a 5-minute session token. <i>Send</i> performs UNLOCK (<code>0xFFFA = 0x0065, 0x07A7</code>) &rarr; WRITE (<code>0x9C74</code>) &rarr; readback verify. Bulk-auth required, plus the active session token. <i>Verify Serial Number to send</i> (default-on) does a fleet-wide FC11 scan and rejects duplicates before the unlock frame.</li>
     <li><b>Plant Serial Map</b> &mdash; parallel FC11 sweep across every <code>(inverter, slave)</code> with duplicate-detection badges. Honors a 5-minute cache; <i>Bypass cache</i> available.</li>
     <li><b>Bulk Fix</b> &mdash; re-writes the whole plant against the <b>locked factory serial map</b>, generated 1:1 from the authoritative <code>docs/Fixed_Inverter_SerialNumbers.xlsx</code> (the permanent field guide). <i>Show target map</i> displays all 27 inverters (<code>T</code> is the nameplate, reference only; slaves 1&ndash;4 are written). <i>Scan &amp; diff</i> reads every node and classifies it <code>match</code> / <code>mismatch</code> / <code>unreachable</code> / <code>no live unit</code>, with an <b>Origin</b> per mismatch (<code>factory / unknown</code> or <code>&#x21C4; Inv X / Node Y</code> for a physically relocated module). Only mismatches are selectable. <i>Apply selected</i> writes each one sequentially with readback verify, logged to <code>serial_change_log</code> (scope <code>bulk</code>) with timestamp, operator, old&rarr;new, and a module-origin note. The per-write uniqueness scan is skipped because the factory map is pre-validated globally unique.</li>
-    <li><b>Firmware Map</b> &mdash; the nodes <b>within one inverter</b> should all run the <b>same firmware</b>; each inverter is judged only against <i>its own</i> nodes (per-inverter, never plant-wide). A <i>projection of the serial scan</i> (firmware rides the same FC11 payload &mdash; no extra bus traffic). The compared value is the <b>inverter firmware code</b> (<code>AAV1003xx</code>, the <b>Firmware</b> column) &mdash; verified 2026-05-19 by decompiling ISM&apos;s own FC11 parser (<code>IngeconModbusSlaveID_Freescale</code>: serial + one firmware code, no display-firmware field for this hardware). The <b>Aux ID 1/2</b> columns (the <code>AAS…</code> strings) are <i>unverified auxiliary identifiers</i> &mdash; diagnostics only, <b>not</b> compared. <i>Scan firmware</i> reads the fleet (bulk-auth, gateway-only); <i>Show last snapshot</i> and <i>Drift log</i> read the replicated <code>inverter_firmware_state</code> / <code>firmware_drift_log</code> and work in remote mode. Per-inverter pill: <b>all same</b> / <b>mixed nodes</b> (a node disagrees with its siblings &mdash; post-board-swap signature, dual of the serial relocation guard) / <b>partial read</b> / <b>no read</b>. Drift is logged only on a real inverter-firmware change of a previously-seen node (Aux-ID-only changes are never drift).</li>
+    <li><b>Firmware Map</b> &mdash; the nodes <b>within one inverter</b> should all run the <b>same firmware</b>; each inverter is judged only against <i>its own</i> nodes (per-inverter, never plant-wide). A <i>projection of the serial scan</i> (firmware rides the same FC11 payload &mdash; no extra bus traffic). The compared value is the <b>inverter firmware code</b> (<code>AAV1003xx</code>, the <b>Firmware</b> column) &mdash; verified 2026-05-19 by decompiling ISM&apos;s own FC11 parser (<code>IngeconModbusSlaveID_Freescale</code>: serial + one firmware code, no display-firmware field for this hardware). The <b>Aux ID 1/2</b> columns (the <code>AASâ€¦</code> strings) are <i>unverified auxiliary identifiers</i> &mdash; diagnostics only, <b>not</b> compared. <i>Scan firmware</i> reads the fleet (bulk-auth, gateway-only); <i>Show last snapshot</i> and <i>Drift log</i> read the replicated <code>inverter_firmware_state</code> / <code>firmware_drift_log</code> and work in remote mode. Per-inverter pill: <b>all same</b> / <b>mixed nodes</b> (a node disagrees with its siblings &mdash; post-board-swap signature, dual of the serial relocation guard) / <b>partial read</b> / <b>no read</b>. Drift is logged only on a real inverter-firmware change of a previously-seen node (Aux-ID-only changes are never drift).</li>
   </ul>
   <div class="info-card warn"><div class="info-card-label">Override gate</div>Duplicate serials block the write before unlock; an intentional duplicate (e.g. RMA replacement) can be sent with <code>override_conflicts</code>. Both Motorola (12 ASCII) and Texas TI (32 ASCII) firmware formats are supported.</div>
   <div class="info-card"><div class="info-card-label">Read-back is the source of truth</div>An identity write makes the inverter re-init its Modbus stack, so the FC16 write <i>response</i> is often lost even though the write landed. The pipeline always does the verify read-back (longer settle + retries when the write wasn&apos;t ACKed) and judges the result by what the unit actually reports: a confirmed read-back is <b>success</b> even with a lost ACK (flagged <code>write_ack_lost</code>); only an unchanged read-back is a real failure; if nothing can be read back the result is <code>write_unconfirmed</code> (never &ldquo;success&rdquo;) &mdash; rescan to confirm. This eliminates the false <code>write_failed</code> where a serial had actually been written.</div>
@@ -1750,7 +1750,7 @@
 
 <!-- FOOTER -->
 <div class="guide-footer">
-  <p><b>ADSI Inverter Dashboard</b> v2.12.7</p>
+  <p><b>ADSI Inverter Dashboard</b> v2.12.8</p>
   <p>Designed &amp; Developed by Engr. Clariden Monta&ntilde;o REE</p>
   <p>&copy; 2026 Engr. Clariden Monta&ntilde;o REE. All rights reserved.</p>
 </div>

@@ -21,6 +21,28 @@ try {
   const viewerJs = read("public/js/hikvision-native-viewer.js");
   const viewerCss = read("public/css/hikvision-native-viewer.css");
   const style = read("public/css/style.css");
+  const packageConfig = JSON.parse(read("package.json"));
+  const installerScript = read("scripts/installer.nsh");
+
+  assert.strictEqual(
+    packageConfig.build?.win?.requestedExecutionLevel,
+    "asInvoker",
+    "the installed dashboard must share LocalService's normal integrity level so native video can embed",
+  );
+  assert.strictEqual(packageConfig.build?.nsis?.perMachine, true, "the installer must remain per-machine/elevated");
+  assert.strictEqual(packageConfig.build?.nsis?.allowElevation, true, "the installer must retain its UAC elevation path");
+  assert(
+    installerScript.includes("*S-1-5-32-545:(OI)(CI)M"),
+    "the elevated installer must grant language-neutral Users modify ACLs for the non-elevated runtime",
+  );
+  assert(
+    installerScript.includes('DeleteRegValue HKCU "Software\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Layers" "$INSTDIR\\ADSI Inverter Dashboard.exe"'),
+    "the installer must remove the stale per-user RUNASADMIN compatibility override",
+  );
+  assert(
+    installerScript.includes('DeleteRegValue HKLM "Software\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Layers" "$INSTDIR\\ADSI Inverter Dashboard.exe"'),
+    "the installer must remove the stale machine-wide RUNASADMIN compatibility override",
+  );
 
   assert(app.includes('id="btnCamFullscreen" title="Open flexible camera viewer window"'), "Tapo fullscreen control must open the flexible viewer window");
   assert(!app.includes('id="btnCamPopout"'), "the redundant Tapo popout control must be removed");
