@@ -4132,12 +4132,25 @@ Hover any pill in the column for the row-specific explanation.">Anchor</th>
                   </select>
                 </div>
               </div>
-              <label class="cam-field-label">Playback Mode</label>
-              <select id="hikPlaybackMode" class="cam-field-input hik-playback-select">
-                <option value="localservice">Hybrid HLS + native viewer window (recommended)</option>
-                <option value="compatible">Compatible HD snapshots</option>
-                <option value="hls">Direct HLS (diagnostic)</option>
-              </select>
+              <div class="cam-field-row hik-last-row">
+                <div>
+                  <label class="cam-field-label">Transcoding Hardware</label>
+                  <select id="hikTranscodeHardware" class="cam-field-input">
+                    <option value="software" selected>Software (CPU)</option>
+                    <option value="amf">AMD (AMF)</option>
+                    <option value="nvenc">Nvidia (NVENC)</option>
+                    <option value="dxva2">Intel (DXVA2)</option>
+                  </select>
+                </div>
+                <div class="hik-grow-2">
+                  <label class="cam-field-label">Playback Mode</label>
+                  <select id="hikPlaybackMode" class="cam-field-input hik-playback-select">
+                    <option value="localservice">Hybrid HLS + native viewer window (recommended)</option>
+                    <option value="compatible">Compatible HD snapshots</option>
+                    <option value="hls">Direct HLS (diagnostic)</option>
+                  </select>
+                </div>
+              </div>
               <div class="hik-mode-summary" id="hikModeSummary">
                 <span class="mdi mdi-video-wireless-outline"></span>
                 <span><strong>Hybrid HLS + native viewer</strong><small>Uses H.264 HLS in the card and opens LocalService at original quality in a standard resizable window.</small></span>

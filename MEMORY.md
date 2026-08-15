@@ -2,12 +2,18 @@
 
 ## Project Overview
 Industrial solar power plant monitoring desktop app. Hybrid Electron + Python.
-- **Repo/package version baseline:** 2.12.5
+- **Repo/package version baseline:** 2.12.7
 - **Operator-noted deployed server-side app version:** 2.2.32
 - **Author:** Engr. Clariden Montaño REE (Engr. M.)
 - **Entry point:** electron/main.js
 - **Stack:** Electron 29, Express 4, SQLite (better-sqlite3), Chart.js 4, FastAPI (Python), pymodbus
 - **Version source-of-truth rule:** `package.json` is the repo version source of truth; hardcoded footer/about strings may lag and must not be trusted blindly.
+
+## v2.12.6 Changes — Installed Hikvision native-viewer compatibility (2026-08-14)
+- **Runtime elevation corrected:** the installed Electron dashboard now uses `asInvoker`, matching Hikvision LocalService's normal desktop integrity level so Windows UIPI does not block the native video child window from embedding.
+- **Installer elevation preserved:** the per-machine NSIS installer still requests UAC and grants the language-neutral built-in Users group modify access to `ProgramData\InverterDashboard` before launching the normal-integrity runtime.
+- **Stale elevation overrides removed:** upgrades delete only the ADSI current/legacy `AppCompatFlags\Layers` values so an old `RUNASADMIN` compatibility setting cannot override the new manifest and recreate a black native window.
+- **Regression coverage:** the Hikvision hybrid-mode contract locks the runtime manifest, installer elevation, and ProgramData ACL split so development and installed playback cannot silently diverge again.
 
 ## v2.12.5 Changes — Adaptive Hikvision remote routing and flexible camera windows (2026-08-14)
 - **Complete Remote Hikvision delivery:** Gateway HLS remains preferred, manifests are validated before playback, and a directly reachable LAN/Tailscale DVR route is used only when available. Complete Remote mode now reports a blocked route instead of launching an unusable viewer-side transcoder.

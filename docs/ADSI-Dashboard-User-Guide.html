@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ADSI Inverter Dashboard — User Guide v2.12.5</title>
+<title>ADSI Inverter Dashboard — User Guide v2.12.7</title>
 <style>
   /* ══════════════════════════════════════════════
      CSS VARIABLES & RESET
@@ -987,7 +987,7 @@
   <div class="cover-meta">
     <div class="cover-meta-item">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1v6l4 2" stroke="#4d9fff" stroke-width="1.5" stroke-linecap="round"/><circle cx="8" cy="8" r="7" stroke="#4d9fff" stroke-width="1.5"/></svg>
-      <span><b>Version 2.12.5</b></span>
+      <span><b>Version 2.12.7</b></span>
     </div>
     <div class="cover-meta-item">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 8a3 3 0 100-6 3 3 0 000 6zM2 14c0-3.3 2.7-5 6-5s6 1.7 6 5" stroke="#c084fc" stroke-width="1.5" stroke-linecap="round"/></svg>
@@ -1103,7 +1103,7 @@
     <tbody>
       <tr><td>Operating System</td><td>Windows 10 / 11 (64-bit)</td></tr>
       <tr><td>Display</td><td>1920 &times; 1080 minimum; enhanced at 2200px+ and 3000px+</td></tr>
-      <tr><td>Administrator Rights</td><td>Required &mdash; installer requests elevation automatically</td></tr>
+      <tr><td>Administrator Rights</td><td>Required for installation and updates; ordinary dashboard use runs at normal user integrity, and upgrades clear obsolete ADSI Run-as-administrator overrides</td></tr>
       <tr><td>Network</td><td>LAN access to inverter fleet (Gateway) or secure path to gateway (Remote)</td></tr>
       <tr><td>Disk Space</td><td>Sufficient for database, archives, exports, and forecast model bundles</td></tr>
       <tr><td>Ports</td><td>3500 (Express API), 9000 (Python FastAPI / Modbus proxy)</td></tr>
@@ -1567,7 +1567,7 @@
 
   <h3>Separate Hikvision DVR Card</h3>
   <p>The Hikvision DVR has its own draggable card, settings modal, browser stream, native decoder bridge, and API routes. Its DVR-specific connection remains separate from Tapo. The polished modal groups secure stream paths, device identity, DVR connection, channel/playback, stream profile, and playback status. Use the DVR&rsquo;s local username and password; Hik-Connect cloud credentials and camera access codes are not required. SDK/HTTP defaults to port <code>80</code> and RTSP to <code>554</code>.</p>
-  <div class="info-card note"><div class="info-card-label">Hybrid HLS + Native Viewer Window</div><p>Use <b>Hybrid HLS + native viewer window</b> for normal operation. The Inverters-page card uses browser-safe H.264 HLS. Expect roughly 2&ndash;3 seconds of latency and modest transcoding loss. The native-viewer control pauses card HLS and opens a standard Electron window like the Analytics popout. Hikvision LocalService fills its content area at the DVR&rsquo;s original quality and frame rate. Use the normal Windows title-bar controls to move, resize, minimize, maximize/restore, or close it. The viewer can be reduced to <b>480&times;300</b> for flexible side-by-side and multi-monitor layouts. Closing the window stops native playback and resumes HLS automatically when Inverters is visible. Compatible snapshots and Direct HLS remain explicit diagnostic/fallback modes and use ordinary HTML fullscreen.</p></div>
+  <div class="info-card note"><div class="info-card-label">Hybrid HLS + Native Viewer Window</div><p>Use <b>Hybrid HLS + native viewer window</b> for normal operation. The Inverters-page card uses browser-safe H.264 HLS. Expect roughly 2&ndash;3 seconds of latency and modest transcoding loss. The native-viewer control pauses card HLS and opens a standard Electron window like the Analytics popout. Hikvision LocalService fills its content area at the DVR&rsquo;s original quality and frame rate. The installed dashboard runs at normal user integrity so Windows permits LocalService to embed this surface; do not force <b>Run as administrator</b>. Use the normal Windows title-bar controls to move, resize, minimize, maximize/restore, or close it. The viewer can be reduced to <b>480&times;300</b> for flexible side-by-side and multi-monitor layouts. Closing the window stops native playback and resumes HLS automatically when Inverters is visible. Compatible snapshots and Direct HLS remain explicit diagnostic/fallback modes and use ordinary HTML fullscreen.</p></div>
   <p>When you leave the Inverters page, the Hikvision card disappears completely and its HLS playback stops. Returning restores the card in its saved grid position and reconnects playback. The card provides <b>Settings</b> and <b>Open native viewer window</b> controls. If LocalService cannot start, the native viewer displays <b>Retry</b>; otherwise video fills the complete content area.</p>
   <h4>Hikvision Routing in Gateway and Remote Modes</h4>
   <p>The settings modal shows a prominent <b>Gateway mode</b> or <b>Remote mode</b> context banner. Camera-route selection is independent from inverter-data authority.</p>
@@ -1603,7 +1603,7 @@
     <tr><td>Auto-restart stopped</td><td>3+ consecutive crashes</td><td>Check go2rtc logs, fix RTSP source, then manually restart</td></tr>
     <tr><td>Hikvision card stays on &ldquo;Starting&rdquo;</td><td>The media service is unavailable, the DVR is unreachable, or the local DVR login failed</td><td>Verify the DVR/LAN connection, then use Verify Connection</td></tr>
     <tr><td>Remote gateway relay unavailable</td><td>The gateway is older, unhealthy, or returned a non-HLS response</td><td>Use Check Routes. A reachable RTSP path activates direct HLS automatically; otherwise restore the gateway relay or DVR subnet route</td></tr>
-    <tr><td>HLS works but the native viewer is blank</td><td>Hikvision LocalService is unavailable or blocked</td><td>Start LocalService and select Retry, or close the viewer with the normal Windows close button</td></tr>
+    <tr><td>HLS works but the native viewer is blank</td><td>Hikvision LocalService is unavailable, or the dashboard was manually forced to run as administrator</td><td>Start LocalService, relaunch the dashboard normally (not Run as administrator), then select Retry</td></tr>
     <tr><td>Remote card works but native viewer is blocked</td><td>The gateway relay is healthy, but the viewer lacks an approved DVR route or viewer-local password</td><td>Advertise and approve the DVR <code>/32</code>, allow its SDK/RTSP ports, save the DVR password on the viewer, then use Check Routes</td></tr>
     <tr><td>Secure Stream Paths reports Tailscale offline</td><td>Tailscale is stopped on a workstation outside the DVR subnet</td><td>If the modal says local LAN active, no action is needed; otherwise reconnect Tailscale and rerun Check Routes</td></tr>
     <tr><td>Hikvision profile unavailable</td><td>DVR IP, local RTSP account, or LAN route is incorrect</td><td>Verify DVR reachability, then use Test Stream</td></tr>
@@ -1750,7 +1750,7 @@
 
 <!-- FOOTER -->
 <div class="guide-footer">
-  <p><b>ADSI Inverter Dashboard</b> v2.12.5</p>
+  <p><b>ADSI Inverter Dashboard</b> v2.12.7</p>
   <p>Designed &amp; Developed by Engr. Clariden Monta&ntilde;o REE</p>
   <p>&copy; 2026 Engr. Clariden Monta&ntilde;o REE. All rights reserved.</p>
 </div>

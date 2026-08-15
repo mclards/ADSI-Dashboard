@@ -95,7 +95,7 @@ function sanitizeConfig(raw, options = {}) {
       ? requestedMode
       : "localservice";
   const requestedHardware = cleanText(src.transcodeHardware || base.transcodeHardware, 16).toLowerCase();
-  const transcodeHardware = ["auto", "cuda", "dxva2", "software"].includes(requestedHardware)
+  const transcodeHardware = ["auto", "cuda", "dxva2", "software", "amf"].includes(requestedHardware)
     ? requestedHardware
     : "auto";
   const out = {
@@ -173,7 +173,9 @@ function writeRuntimeConfig(cfg) {
     ? `-c:v libx264 ${commonEncode} -profile:v high -level:v 5.1 -preset:v veryfast -tune:v zerolatency -pix_fmt:v yuv420p`
     : cfg.transcodeHardware === "dxva2"
       ? `-c:v h264_qsv ${commonEncode} -profile:v high -level:v 5.1 -preset:v veryfast -async_depth:v 1`
-      : `-c:v h264_nvenc ${commonEncode} -profile:v high -level:v auto -preset:v p2 -tune:v ll`;
+      : cfg.transcodeHardware === "amf"
+        ? `-c:v h264_amf ${commonEncode} -profile:v high -level:v auto -quality speed`
+        : `-c:v h264_nvenc ${commonEncode} -profile:v high -level:v auto -preset:v p2 -tune:v ll`;
   const browserUrl = `ffmpeg:${ffmpegInputUrl}#video=h264`;
   const doc = {
     streams: {

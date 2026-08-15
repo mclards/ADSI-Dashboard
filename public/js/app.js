@@ -8750,7 +8750,7 @@ function showMsg(id, text, cls) {
   setTimeout(() => {
     el.textContent = "";
     el.className = "smsg";
-  }, 4000);
+  }, 10000);
 }
 
 function showSnapshotWarningToast(prefix, warningInput) {
@@ -16539,6 +16539,7 @@ function initHikvisionPlayer() {
     username: $("hikUser")?.value || "admin",
     password: $("hikPassword")?.value || "",
     playbackMode: $("hikPlaybackMode")?.value || "localservice",
+    transcodeHardware: $("hikTranscodeHardware")?.value || "software",
     autoStart: Boolean($("hikAutoStart")?.checked),
   });
 
@@ -16642,6 +16643,7 @@ function initHikvisionPlayer() {
     }
     nativePasswordConfigured = cfg.nativePasswordConfigured ?? cfg.passwordConfigured ?? false;
     if ($("hikPlaybackMode")) $("hikPlaybackMode").value = cfg.playbackMode || "localservice";
+    if ($("hikTranscodeHardware")) $("hikTranscodeHardware").value = cfg.transcodeHardware || "software";
     if ($("hikAutoStart")) $("hikAutoStart").checked = Boolean(cfg.autoStart);
     const label = $("hikvisionLabel");
     if (label) label.textContent = cfg.name || "Hikvision CCTV";
