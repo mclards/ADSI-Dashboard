@@ -317,6 +317,29 @@ stream.on('end', () => {
   const digest = hash.digest('base64');
   console.log('[build-installer-signed] SHA-512 (base64): ' + digest);
   console.log('');
+  
+  // Clean release directory: keep only installer, blockmap, and latest.yml
+  const keepFiles = [
+    path.basename(installerPath),
+    path.basename(installerPath) + '.blockmap',
+    'latest.yml'
+  ];
+  const allFiles = fs.readdirSync(releaseDir);
+  let cleanedCount = 0;
+  for (const f of allFiles) {
+    if (!keepFiles.includes(f)) {
+      try {
+        fs.rmSync(path.join(releaseDir, f), { recursive: true, force: true });
+        cleanedCount++;
+      } catch (err) {
+        console.warn('[build-installer-signed] WARNING: failed to clean up ' + f + ': ' + err.message);
+      }
+    }
+  }
+  if (cleanedCount > 0) {
+    console.log('[build-installer-signed] Cleaned ' + cleanedCount + ' intermediate files from release/ directory.');
+  }
+
   console.log('[build-installer-signed] Build OK — ready for upload');
   process.exit(0);
 });
