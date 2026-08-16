@@ -57,6 +57,7 @@ const State = {
     solcastResourceId: "",
     solcastToolkitEmail: "",
     solcastToolkitPassword: "",
+    solcastToolkitTotpSecret: "",
     solcastToolkitSiteRef: "",
     solcastToolkitDays: "2",
     solcastToolkitPeriod: "PT5M",
@@ -6471,6 +6472,7 @@ async function loadSettings() {
     $("setSolcastResourceId").value = s.solcastResourceId || "";
     $("setSolcastToolkitEmail").value = s.solcastToolkitEmail || "";
     $("setSolcastToolkitPassword").value = s.solcastToolkitPassword || "";
+    if ($("setSolcastToolkitTotpSecret")) $("setSolcastToolkitTotpSecret").value = s.solcastToolkitTotpSecret || "";
     $("setSolcastToolkitSiteRef").value = s.solcastToolkitSiteRef || "";
     if ($("setSolcastToolkitDays")) $("setSolcastToolkitDays").value = s.solcastToolkitDays || "2";
     if ($("setSolcastToolkitPeriod")) $("setSolcastToolkitPeriod").value = s.solcastToolkitPeriod || "PT5M";
@@ -6613,6 +6615,7 @@ function readSolcastSettingsForm() {
     solcastResourceId: $("setSolcastResourceId")?.value || "",
     solcastToolkitEmail: $("setSolcastToolkitEmail")?.value || "",
     solcastToolkitPassword: $("setSolcastToolkitPassword")?.value || "",
+    solcastToolkitTotpSecret: $("setSolcastToolkitTotpSecret")?.value || "",
     solcastToolkitSiteRef: $("setSolcastToolkitSiteRef")?.value || "",
     solcastToolkitDays: $("setSolcastToolkitDays")?.value || "2",
     solcastToolkitPeriod: $("setSolcastToolkitPeriod")?.value || "PT5M",
@@ -7106,6 +7109,8 @@ function pickSettingsConfigFields(src) {
     out.solcastToolkitEmail = String(src.solcastToolkitEmail ?? "");
   if (hasOwn(src, "solcastToolkitPassword"))
     out.solcastToolkitPassword = String(src.solcastToolkitPassword ?? "");
+  if (hasOwn(src, "solcastToolkitTotpSecret"))
+    out.solcastToolkitTotpSecret = String(src.solcastToolkitTotpSecret ?? "");
   if (hasOwn(src, "solcastToolkitSiteRef"))
     out.solcastToolkitSiteRef = String(src.solcastToolkitSiteRef ?? "");
   if (hasOwn(src, "solcastToolkitDays"))
@@ -20335,6 +20340,7 @@ async function loadAnalytics(options = {}) {
               solcastAccessMode: mode,
               solcastToolkitEmail: s.solcastToolkitEmail,
               solcastToolkitPassword: s.solcastToolkitPassword,
+              solcastToolkitTotpSecret: s.solcastToolkitTotpSecret,
               solcastToolkitSiteRef: s.solcastToolkitSiteRef,
               solcastTimezone: s.solcastTimezone || "",
               solcastToolkitPeriod: s.solcastToolkitPeriod || "PT5M",

@@ -8779,6 +8779,7 @@ function ensurePersistedSettings() {
     solcastResourceId: "",
     solcastToolkitEmail: "",
     solcastToolkitPassword: "",
+    solcastToolkitTotpSecret: "",
     solcastToolkitSiteRef: "",
     solcastToolkitDays: "2",
     solcastToolkitPeriod: SOLCAST_TOOLKIT_PERIOD,
@@ -8849,6 +8850,7 @@ function buildDefaultSettingsSnapshot() {
     solcastResourceId: "",
     solcastToolkitEmail: "",
     solcastToolkitPassword: "",
+    solcastToolkitTotpSecret: "",
     solcastToolkitSiteRef: "",
     solcastToolkitDays: "2",
     solcastToolkitPeriod: SOLCAST_TOOLKIT_PERIOD,
@@ -8958,6 +8960,10 @@ function buildSettingsSnapshot() {
     solcastToolkitPassword: getSetting(
       "solcastToolkitPassword",
       defaults.solcastToolkitPassword,
+    ),
+    solcastToolkitTotpSecret: getSetting(
+      "solcastToolkitTotpSecret",
+      defaults.solcastToolkitTotpSecret,
     ),
     solcastToolkitSiteRef: getSetting(
       "solcastToolkitSiteRef",
@@ -9251,6 +9257,9 @@ function getSolcastConfig() {
     toolkitPassword: String(
       getSetting("solcastToolkitPassword", "") || "",
     ).trim(),
+    toolkitTotpSecret: String(
+      getSetting("solcastToolkitTotpSecret", "") || "",
+    ).trim(),
     toolkitSiteRef: String(
       getSetting("solcastToolkitSiteRef", "") || "",
     ).trim(),
@@ -9285,6 +9294,12 @@ function buildSolcastConfigFromInput(input = null) {
       src.solcastToolkitPassword ??
         src.toolkitPassword ??
         base.toolkitPassword ??
+        "",
+    ).trim(),
+    toolkitTotpSecret: String(
+      src.solcastToolkitTotpSecret ??
+        src.toolkitTotpSecret ??
+        base.toolkitTotpSecret ??
         "",
     ).trim(),
     toolkitSiteRef: String(
@@ -9661,6 +9676,31 @@ function normalizeSolcastToolkitForecastRecords(records) {
   return out;
 }
 
+function generateTOTP(secret, window = 0) {
+  if (!secret) return "";
+  const base32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  let bits = "";
+  for (let i = 0; i < secret.length; i++) {
+    const val = base32.indexOf(secret.charAt(i).toUpperCase());
+    if (val !== -1) bits += val.toString(2).padStart(5, "0");
+  }
+  const key = Buffer.alloc(Math.floor(bits.length / 8));
+  for (let i = 0; i < key.length; i++) {
+    key[i] = parseInt(bits.substring(i * 8, i * 8 + 8), 2);
+  }
+  const epoch = Math.round(Date.now() / 1000.0);
+  const time = Buffer.alloc(8);
+  let counter = Math.floor(epoch / 30) + window;
+  time.writeUInt32BE(Math.floor(counter / 0x100000000), 0);
+  time.writeUInt32BE(counter & 0xffffffff, 4);
+  const hmac = require("crypto").createHmac("sha1", key);
+  hmac.update(time);
+  const digest = hmac.digest();
+  const offset = digest[digest.length - 1] & 0xf;
+  const code = (digest.readUInt32BE(offset) & 0x7fffffff) % 1000000;
+  return code.toString().padStart(6, "0");
+}
+
 async function fetchSolcastToolkitForecastRecords(cfg, options = {}) {
   const cfgHours = cfg.toolkitDays ? cfg.toolkitDays * 24 : undefined;
   const site = parseSolcastToolkitSiteRef(cfg.toolkitSiteRef, cfg.baseUrl, {
@@ -9684,22 +9724,27 @@ async function fetchSolcastToolkitForecastRecords(cfg, options = {}) {
   mergeCookiesIntoJar(cookieJar, landing);
 
   const authUrl = new URL("/auth/credentials", site.origin).toString();
-  const authBody = new URLSearchParams({
+  const payload = {
     userName: cfg.toolkitEmail,
     password: cfg.toolkitPassword,
     rememberMe: "false",
     continue: site.pageUrl,
-  }).toString();
+  };
+  
+  if (cfg.toolkitTotpSecret) {
+    payload.meta = { TwoFactorCode: generateTOTP(cfg.toolkitTotpSecret) };
+  }
+
   const authResp = await fetch(authUrl, {
     method: "POST",
     timeout: SOLCAST_TIMEOUT_MS,
     redirect: "manual",
     headers: buildHeaders({
-      "Content-Type": "application/x-www-form-urlencoded",
-      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Content-Type": "application/json",
+      Accept: "application/json",
       Referer: site.pageUrl,
     }),
-    body: authBody,
+    body: JSON.stringify(payload),
   });
   mergeCookiesIntoJar(cookieJar, authResp);
   if (authResp.status >= 400) {
@@ -21122,6 +21167,7 @@ app.post("/api/settings", async (req, res) => {
     solcastResourceId,
     solcastToolkitEmail,
     solcastToolkitPassword,
+    solcastToolkitTotpSecret,
     solcastToolkitSiteRef,
     solcastToolkitDays,
     solcastToolkitPeriod,
@@ -21298,6 +21344,10 @@ app.post("/api/settings", async (req, res) => {
   if (solcastToolkitPassword !== undefined) {
     const pwd = String(solcastToolkitPassword || "").trim();
     updates.solcastToolkitPassword = pwd.slice(0, 256);
+  }
+  if (solcastToolkitTotpSecret !== undefined) {
+    const sec = String(solcastToolkitTotpSecret || "").trim();
+    updates.solcastToolkitTotpSecret = sec.slice(0, 256);
   }
   if (solcastToolkitSiteRef !== undefined) {
     const ref = String(solcastToolkitSiteRef || "").trim();

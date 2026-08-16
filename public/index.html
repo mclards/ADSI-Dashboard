@@ -2306,6 +2306,15 @@
                     placeholder="Stored toolkit account password"
                     title="Password for the Solcast toolkit account. Stored locally and never transmitted to external services."
                 /></label>
+                <label style="grid-column:span 2"
+                  >Toolkit TOTP Secret<input
+                    type="password"
+                    id="setSolcastToolkitTotpSecret"
+                    class="inp"
+                    autocomplete="off"
+                    placeholder="Optional 2FA TOTP secret"
+                    title="The raw setup key for 2FA. Used to automatically generate the 6-digit authenticator code on the fly."
+                /></label>
               </div>
             </div>
             <div class="settings-subsection forecast-preview-panel" id="solcastPreviewPanel" hidden>

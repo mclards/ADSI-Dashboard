@@ -14,6 +14,11 @@ import re
 import sqlite3
 import sys
 import tempfile
+import time
+import hmac
+import hashlib
+import base64
+import struct
 from urllib.parse import urlparse
 
 import requests
@@ -24,11 +29,27 @@ SETTINGS_KEYS = (
     "solcastAccessMode",
     "solcastToolkitEmail",
     "solcastToolkitPassword",
+    "solcastToolkitTotpSecret",
     "solcastToolkitSiteRef",
     "solcastToolkitPeriod",
     "plantLatitude",
     "plantLongitude",
 )
+
+def get_totp_token(secret: str) -> str:
+    if not secret:
+        return ""
+    padding = '=' * ((8 - len(secret) % 8) % 8)
+    try:
+        key = base64.b32decode(secret + padding, casefold=True)
+    except Exception:
+        return ""
+    timestamp = int(time.time()) // 30
+    msg = struct.pack(">Q", timestamp)
+    h = hmac.new(key, msg, hashlib.sha1).digest()
+    o = h[19] & 15
+    token = (struct.unpack(">I", h[o:o+4])[0] & 0x7fffffff) % 1000000
+    return f"{token:06d}"
 
 def read_settings():
     uri = f"file:{DB_PATH}?mode=ro"
@@ -207,6 +228,7 @@ def main():
     base_url = (settings.get("solcastBaseUrl") or "https://api.solcast.com.au").strip().rstrip("/")
     email = (settings.get("solcastToolkitEmail") or "").strip()
     password = (settings.get("solcastToolkitPassword") or "").strip()
+    totp_secret = (settings.get("solcastToolkitTotpSecret") or "").strip()
     site_ref = (settings.get("solcastToolkitSiteRef") or "").strip()
     period = (settings.get("solcastToolkitPeriod") or "PT5M").strip() or "PT5M"
 
@@ -259,13 +281,17 @@ def main():
         "rememberMe": "false",
         "continue": page_url,
     }
+    if totp_secret:
+        auth_body["meta"] = {"TwoFactorCode": get_totp_token(totp_secret)}
+
     r2 = session.post(
         auth_url,
-        data=auth_body,
+        json=auth_body,
         timeout=25,
         allow_redirects=False,
         headers={
-            "Content-Type": "application/x-www-form-urlencoded",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
             "Referer": page_url,
         },
     )
