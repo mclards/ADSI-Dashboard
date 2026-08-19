@@ -255,7 +255,7 @@ const {
 const app = express();
 let plantCapController = null;
 expressWs(app);
-const LOCAL_ORIGIN_RE = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i;
+const LOCAL_ORIGIN_RE = /^https?:\/\/(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+|172\.\d+\.\d+\.\d+|100\.\d+\.\d+\.\d+)(:\d+)?$/i;
 app.use(
   cors({
     origin(origin, cb) {
@@ -9276,6 +9276,9 @@ function getSolcastConfig() {
 function buildSolcastConfigFromInput(input = null) {
   const base = getSolcastConfig();
   const src = input && typeof input === "object" ? input : {};
+  const resolveMasked = (val) =>
+    typeof val === "string" && /^\*{4,}$/.test(val) ? undefined : val;
+
   const cfg = {
     baseUrl: String(
       src.solcastBaseUrl ?? src.baseUrl ?? base.baseUrl ?? "",
@@ -9291,14 +9294,14 @@ function buildSolcastConfigFromInput(input = null) {
       src.solcastToolkitEmail ?? src.toolkitEmail ?? base.toolkitEmail ?? "",
     ).trim(),
     toolkitPassword: String(
-      src.solcastToolkitPassword ??
-        src.toolkitPassword ??
+      resolveMasked(src.solcastToolkitPassword) ??
+        resolveMasked(src.toolkitPassword) ??
         base.toolkitPassword ??
         "",
     ).trim(),
     toolkitTotpSecret: String(
-      src.solcastToolkitTotpSecret ??
-        src.toolkitTotpSecret ??
+      resolveMasked(src.solcastToolkitTotpSecret) ??
+        resolveMasked(src.toolkitTotpSecret) ??
         base.toolkitTotpSecret ??
         "",
     ).trim(),
@@ -21071,72 +21074,7 @@ app.post("/api/substation-meter/:date/recalculate", (req, res) => {
   res.status(202).json({ ok: true, message: `QA recalculation for ${dateStr} scheduled (5s debounce).` });
 });
 
-// --- REMOTE MODE PROXY SUPPORT ---
-async function _applySettingsPostRemote(req, res, targetUrl, token, modeBefore) {
-  try {
-    const payload = { ...req.body };
-    // Strip local-only config before proxying to gateway
-    if (payload.remoteGatewayUrl !== undefined) delete payload.remoteGatewayUrl;
-    if (payload.remoteApiToken !== undefined) delete payload.remoteApiToken;
-    if (payload.cameraConfig !== undefined) delete payload.cameraConfig;
-    if (payload.operationMode === 'gateway') delete payload.operationMode;
-
-    // Attempt remote save
-    const { default: fetch } = await import('node-fetch');
-    const response = await fetch(`${targetUrl}/api/settings`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-auth-token': token },
-      body: JSON.stringify(payload)
-    });
-
-    if (response.ok) {
-      // Allow local update of things like operationMode and token if they exist in original request
-      // But we intercept the rest. Actually, let's just let the normal save proceed locally too,
-      // so local DB matches remote gateway, but we swallow the fact it was done locally.
-      return { remoteSuccess: true, response: await response.json() };
-    } else {
-      return { remoteSuccess: false, status: response.status, text: await response.text() };
-    }
-  } catch (err) {
-    return { remoteSuccess: false, error: err.message };
-  }
-}
-
 app.post("/api/settings", async (req, res) => {
-  const currentMode = readOperationMode();
-
-  // ── Local-only settings: persist BEFORE any remote proxy so they are
-  // always saved regardless of gateway connectivity or remote save outcome.
-  // cameraConfig and go2rtcAutoStart are never forwarded to the gateway.
-  {
-    const localUpdates = {};
-    if (req.body.cameraConfig !== undefined) {
-      localUpdates.cameraConfig = JSON.stringify(sanitizeCameraConfig(req.body.cameraConfig));
-    }
-    if (req.body.go2rtcAutoStart !== undefined) {
-      localUpdates.go2rtcAutoStart =
-        req.body.go2rtcAutoStart === "1" || req.body.go2rtcAutoStart === true ? "1" : "0";
-    }
-    if (Object.keys(localUpdates).length) {
-      try {
-        db.transaction(() => {
-          Object.entries(localUpdates).forEach(([k, v]) => setSetting(k, v));
-        })();
-      } catch (_) { /* non-fatal — will be retried in main save block */ }
-    }
-  }
-
-  if (currentMode === 'remote' && req.body.operationMode !== 'gateway') {
-    const targetUrl = getRemoteGatewayBaseUrl();
-    const token = getRemoteApiToken();
-    if (targetUrl && token) {
-      const remoteRes = await _applySettingsPostRemote(req, res, targetUrl, token, currentMode);
-      if (!remoteRes.remoteSuccess) {
-         return res.status(500).json({ ok: false, error: 'Remote save failed', details: remoteRes });
-      }
-    }
-  }
-
   const updates = {};
   let exportDirCreated = false;
   let exportDirResolved = "";
@@ -21343,11 +21281,11 @@ app.post("/api/settings", async (req, res) => {
   }
   if (solcastToolkitPassword !== undefined) {
     const pwd = String(solcastToolkitPassword || "").trim();
-    updates.solcastToolkitPassword = pwd.slice(0, 256);
+    if (!/^\*{4,}$/.test(pwd)) updates.solcastToolkitPassword = pwd.slice(0, 256);
   }
   if (solcastToolkitTotpSecret !== undefined) {
     const sec = String(solcastToolkitTotpSecret || "").trim();
-    updates.solcastToolkitTotpSecret = sec.slice(0, 256);
+    if (!/^\*{4,}$/.test(sec)) updates.solcastToolkitTotpSecret = sec.slice(0, 256);
   }
   if (solcastToolkitSiteRef !== undefined) {
     const ref = String(solcastToolkitSiteRef || "").trim();
