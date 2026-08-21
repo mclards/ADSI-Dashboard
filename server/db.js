@@ -5,6 +5,7 @@
  */
 
 const Database = require("better-sqlite3");
+const crypto = require("crypto");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
@@ -846,6 +847,40 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_fd_ts      ON forecast_dayahead(ts);
   CREATE INDEX IF NOT EXISTS idx_fd_date_ts ON forecast_dayahead(date, ts);
 
+  CREATE TABLE IF NOT EXISTS forecast_dayahead_immutable (
+    date         TEXT NOT NULL,
+    issuance_id  TEXT NOT NULL,
+    generated_ts INTEGER NOT NULL,
+    slot         INTEGER NOT NULL,
+    time_hms     TEXT NOT NULL,
+    kwh_inc      REAL NOT NULL,
+    kwh_lo       REAL NOT NULL,
+    kwh_hi       REAL NOT NULL,
+    source       TEXT NOT NULL DEFAULT 'service',
+    PRIMARY KEY(date, issuance_id, slot)
+  );
+  CREATE INDEX IF NOT EXISTS idx_fdi_date_generated_ts
+    ON forecast_dayahead_immutable(date, generated_ts DESC);
+
+  CREATE TABLE IF NOT EXISTS forecast_dayahead_issuance (
+    issuance_id            TEXT PRIMARY KEY,
+    date                   TEXT NOT NULL,
+    generated_ts           INTEGER NOT NULL,
+    source                 TEXT NOT NULL DEFAULT 'service',
+    expected_slot_count    INTEGER NOT NULL,
+    basis_checksum         TEXT NOT NULL,
+    weather_snapshot_json  TEXT,
+    weather_snapshot_sha256 TEXT,
+    constraint_snapshot_json TEXT,
+    constraint_snapshot_sha256 TEXT,
+    model_sha256           TEXT,
+    artifact_sha256        TEXT,
+    base_run_audit_id      INTEGER,
+    created_by             TEXT NOT NULL DEFAULT 'forecast_engine'
+  );
+  CREATE INDEX IF NOT EXISTS idx_fdi_issuance_date_generated_ts
+    ON forecast_dayahead_issuance(date, generated_ts DESC);
+
   CREATE TABLE IF NOT EXISTS forecast_intraday_adjusted (
     date       TEXT NOT NULL,
     ts         INTEGER NOT NULL,
@@ -856,10 +891,49 @@ db.exec(`
     kwh_hi     REAL DEFAULT 0,
     source     TEXT DEFAULT 'service',
     updated_ts INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)),
+    series_run_id TEXT,
     PRIMARY KEY(date, slot)
   );
   CREATE INDEX IF NOT EXISTS idx_fia_ts      ON forecast_intraday_adjusted(ts);
   CREATE INDEX IF NOT EXISTS idx_fia_date_ts ON forecast_intraday_adjusted(date, ts);
+
+  CREATE TABLE IF NOT EXISTS forecast_intraday_run_audit (
+    id                       INTEGER PRIMARY KEY,
+    target_date              TEXT    NOT NULL,
+    generated_ts             INTEGER NOT NULL,
+    cutoff_slot              INTEGER NOT NULL,
+    base_run_audit_id        INTEGER,
+    base_forecast_updated_ts INTEGER,
+    algorithm_version        TEXT    NOT NULL,
+    execution_mode           TEXT    NOT NULL DEFAULT 'active',
+    actual_source            TEXT    NOT NULL DEFAULT 'pac_loss_adjusted',
+    eligible_slots           INTEGER NOT NULL DEFAULT 0,
+    excluded_cap_slots       INTEGER NOT NULL DEFAULT 0,
+    excluded_outage_slots    INTEGER NOT NULL DEFAULT 0,
+    excluded_quality_slots   INTEGER NOT NULL DEFAULT 0,
+    excluded_curtailed_slots INTEGER NOT NULL DEFAULT 0,
+    recent_log_ratio         REAL,
+    session_log_ratio        REAL,
+    strength                 REAL,
+    half_life_minutes        REAL,
+    dayahead_total_kwh       REAL,
+    nowcast_total_kwh        REAL,
+    constraint_mode          TEXT,
+    run_status               TEXT    NOT NULL DEFAULT 'success',
+    notes_json               TEXT,
+    series_run_id            TEXT,
+    output_updated_ts        INTEGER,
+    authoritative_algorithm  TEXT,
+    challenger_status        TEXT,
+    authoritative_write_status TEXT,
+    configured_mode          TEXT,
+    prior_series_preserved   INTEGER,
+    UNIQUE(target_date, generated_ts)
+  );
+  CREATE INDEX IF NOT EXISTS idx_fira_date_ts
+    ON forecast_intraday_run_audit(target_date, generated_ts DESC);
+  CREATE INDEX IF NOT EXISTS idx_fira_status
+    ON forecast_intraday_run_audit(target_date, run_status);
 
   CREATE TABLE IF NOT EXISTS solcast_snapshots (
     forecast_day    TEXT    NOT NULL,
@@ -1756,6 +1830,102 @@ function ensureColumn(tableName, columnName, columnDDL) {
   db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnDDL}`);
 }
 
+// v2.12.x — immutable day-ahead replay inputs must identify one complete,
+// originally-issued batch. Earlier builds populated this table opportunistically
+// during context sync with Date.now(), which cannot establish issue-time causality.
+// Those legacy rows are retained in a clearly non-causal backup table instead of
+// inventing an issuance id/checksum for data whose original provenance is unknown.
+function ensureForecastDayAheadImmutableSchema() {
+  const desiredColumns = [
+    "date",
+    "issuance_id",
+    "generated_ts",
+    "slot",
+    "time_hms",
+    "kwh_inc",
+    "kwh_lo",
+    "kwh_hi",
+    "source",
+  ];
+  const columns = db.prepare("PRAGMA table_info(forecast_dayahead_immutable)").all();
+  const names = new Set(columns.map((column) => String(column?.name || "")));
+  const primaryKey = columns
+    .filter((column) => Number(column?.pk || 0) > 0)
+    .sort((a, b) => Number(a.pk) - Number(b.pk))
+    .map((column) => String(column.name));
+  const schemaIsCurrent =
+    desiredColumns.every((name) => names.has(name)) &&
+    primaryKey.join("|") === "date|issuance_id|slot";
+
+  if (!schemaIsCurrent) {
+    const legacyRowCount = Number(
+      db.prepare("SELECT COUNT(*) AS n FROM forecast_dayahead_immutable").get()?.n || 0,
+    );
+    const replacement = "forecast_dayahead_immutable__issuance_migrate";
+    let legacyTable = "forecast_dayahead_immutable_legacy_noncausal";
+    let suffix = 2;
+    const tableExists = (name) => Boolean(
+      db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name),
+    );
+    while (tableExists(legacyTable)) {
+      legacyTable = `forecast_dayahead_immutable_legacy_noncausal_${suffix++}`;
+    }
+    db.transaction(() => {
+      db.exec(`
+        DROP TABLE IF EXISTS ${replacement};
+        CREATE TABLE ${replacement} (
+          date         TEXT NOT NULL,
+          issuance_id  TEXT NOT NULL,
+          generated_ts INTEGER NOT NULL,
+          slot         INTEGER NOT NULL,
+          time_hms     TEXT NOT NULL,
+          kwh_inc      REAL NOT NULL,
+          kwh_lo       REAL NOT NULL,
+          kwh_hi       REAL NOT NULL,
+          source       TEXT NOT NULL DEFAULT 'service',
+          PRIMARY KEY(date, issuance_id, slot)
+        );
+        ALTER TABLE forecast_dayahead_immutable RENAME TO ${legacyTable};
+        DROP INDEX IF EXISTS idx_fdi_date;
+        DROP INDEX IF EXISTS idx_fdi_date_generated_ts;
+        ALTER TABLE ${replacement} RENAME TO forecast_dayahead_immutable;
+      `);
+    })();
+    if (legacyRowCount > 0) {
+      console.warn(
+        `[db] Preserved ${legacyRowCount} non-causal immutable day-ahead row(s) in ${legacyTable}; ` +
+          "only new checksummed issuances are eligible for replay.",
+      );
+    }
+  }
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_fdi_date_generated_ts
+      ON forecast_dayahead_immutable(date, generated_ts DESC);
+    CREATE INDEX IF NOT EXISTS idx_fdi_issuance_date_generated_ts
+      ON forecast_dayahead_issuance(date, generated_ts DESC);
+  `);
+}
+
+ensureForecastDayAheadImmutableSchema();
+
+ensureColumn("forecast_dayahead_issuance", "constraint_snapshot_json", "constraint_snapshot_json TEXT");
+ensureColumn("forecast_dayahead_issuance", "constraint_snapshot_sha256", "constraint_snapshot_sha256 TEXT");
+ensureColumn("forecast_intraday_adjusted", "series_run_id", "series_run_id TEXT");
+ensureColumn("forecast_intraday_run_audit", "series_run_id", "series_run_id TEXT");
+ensureColumn("forecast_intraday_run_audit", "output_updated_ts", "output_updated_ts INTEGER");
+ensureColumn("forecast_intraday_run_audit", "authoritative_algorithm", "authoritative_algorithm TEXT");
+ensureColumn("forecast_intraday_run_audit", "challenger_status", "challenger_status TEXT");
+ensureColumn("forecast_intraday_run_audit", "authoritative_write_status", "authoritative_write_status TEXT");
+ensureColumn("forecast_intraday_run_audit", "configured_mode", "configured_mode TEXT");
+ensureColumn("forecast_intraday_run_audit", "prior_series_preserved", "prior_series_preserved INTEGER");
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_fia_series_run_id
+    ON forecast_intraday_adjusted(series_run_id);
+  CREATE INDEX IF NOT EXISTS idx_fira_series_run_id
+    ON forecast_intraday_run_audit(target_date, series_run_id);
+`);
+
 // Migration: ensure replication-friendly update tracking columns exist.
 ensureColumn("alarms", "updated_ts", "updated_ts INTEGER NOT NULL DEFAULT 0");
 ensureColumn("daily_report", "updated_ts", "updated_ts INTEGER NOT NULL DEFAULT 0");
@@ -2436,9 +2606,34 @@ const stmts = {
       source=excluded.source,
       updated_ts=excluded.updated_ts
   `),
+  insertForecastDayAheadIssuance: db.prepare(`
+    INSERT INTO forecast_dayahead_issuance(
+      issuance_id, date, generated_ts, source, expected_slot_count,
+      basis_checksum, weather_snapshot_json, weather_snapshot_sha256,
+      constraint_snapshot_json, constraint_snapshot_sha256,
+      model_sha256, artifact_sha256, base_run_audit_id, created_by
+    ) VALUES(
+      @issuance_id, @date, @generated_ts, @source, @expected_slot_count,
+      @basis_checksum, @weather_snapshot_json, @weather_snapshot_sha256,
+      @constraint_snapshot_json, @constraint_snapshot_sha256,
+      @model_sha256, @artifact_sha256, @base_run_audit_id, @created_by
+    )
+  `),
+  insertForecastDayAheadImmutable: db.prepare(`
+    INSERT INTO forecast_dayahead_immutable(
+      date, issuance_id, generated_ts, slot, time_hms,
+      kwh_inc, kwh_lo, kwh_hi, source
+    ) VALUES(
+      @date, @issuance_id, @generated_ts, @slot, @time_hms,
+      @kwh_inc, @kwh_lo, @kwh_hi, @source
+    )
+  `),
   upsertForecastIntradayAdjusted: db.prepare(`
-    INSERT INTO forecast_intraday_adjusted(date, ts, slot, time_hms, kwh_inc, kwh_lo, kwh_hi, source, updated_ts)
-    VALUES (@date, @ts, @slot, @time_hms, @kwh_inc, @kwh_lo, @kwh_hi, @source, @updated_ts)
+    INSERT INTO forecast_intraday_adjusted(
+      date, ts, slot, time_hms, kwh_inc, kwh_lo, kwh_hi, source, updated_ts, series_run_id
+    ) VALUES(
+      @date, @ts, @slot, @time_hms, @kwh_inc, @kwh_lo, @kwh_hi, @source, @updated_ts, @series_run_id
+    )
     ON CONFLICT(date, slot) DO UPDATE SET
       ts=excluded.ts,
       time_hms=excluded.time_hms,
@@ -2446,7 +2641,8 @@ const stmts = {
       kwh_lo=excluded.kwh_lo,
       kwh_hi=excluded.kwh_hi,
       source=excluded.source,
-      updated_ts=excluded.updated_ts
+      updated_ts=excluded.updated_ts,
+      series_run_id=excluded.series_run_id
   `),
   upsertSolcastSnapshot: db.prepare(`
     INSERT INTO solcast_snapshots(
@@ -2735,7 +2931,7 @@ const stmts = {
      ORDER BY ts ASC`,
   ),
   getForecastIntradayAdjustedDate: db.prepare(
-    `SELECT date, ts, slot, time_hms, kwh_inc, kwh_lo, kwh_hi, source, updated_ts
+    `SELECT date, ts, slot, time_hms, kwh_inc, kwh_lo, kwh_hi, source, updated_ts, series_run_id
      FROM forecast_intraday_adjusted
      WHERE date=?
      ORDER BY ts ASC`,
@@ -2747,10 +2943,23 @@ const stmts = {
      ORDER BY ts ASC`,
   ),
   getForecastIntradayAdjustedRange: db.prepare(
-    `SELECT date, ts, slot, time_hms, kwh_inc, kwh_lo, kwh_hi, source, updated_ts
+    `SELECT date, ts, slot, time_hms, kwh_inc, kwh_lo, kwh_hi, source, updated_ts, series_run_id
      FROM forecast_intraday_adjusted
      WHERE ts BETWEEN ? AND ?
      ORDER BY ts ASC`,
+  ),
+  getLatestForecastIntradayRunAuditForDate: db.prepare(
+    `SELECT * FROM forecast_intraday_run_audit
+      WHERE target_date=?
+      ORDER BY generated_ts DESC LIMIT 1`,
+  ),
+  getForecastIntradayRunAuditBySeriesRunId: db.prepare(
+    `SELECT * FROM forecast_intraday_run_audit
+      WHERE target_date=? AND series_run_id=? AND authoritative_write_status='success'
+      ORDER BY generated_ts DESC LIMIT 1`,
+  ),
+  pruneForecastIntradayRunAuditBeforeTs: db.prepare(
+    `DELETE FROM forecast_intraday_run_audit WHERE generated_ts < ?`,
   ),
   insertChatMessage: db.prepare(`
     INSERT INTO chat_messages (ts, from_machine, to_machine, from_name, message, read_ts)
@@ -3777,12 +3986,182 @@ const bulkInsertPollerBatch = db.transaction((readingRows, energyRows = []) => {
   }
 });
 
-const bulkUpsertForecastDayAhead = db.transaction((date, rows, source = "service") => {
-  stmts.deleteForecastDayAheadDate.run(String(date || ""));
+const IMMUTABLE_DAYAHEAD_START_SLOT = 60;
+const IMMUTABLE_DAYAHEAD_END_SLOT = 216;
+
+function sha256Utf8(value) {
+  return crypto.createHash("sha256").update(String(value), "utf8").digest("hex");
+}
+
+function canonicalForecastBasisChecksum(rows) {
+  const lines = [...rows]
+    .sort((a, b) => Number(a.slot) - Number(b.slot))
+    .map((row) => [
+      Number(row.slot),
+      String(row.time_hms),
+      Number(row.kwh_inc).toFixed(9),
+      Number(row.kwh_lo).toFixed(9),
+      Number(row.kwh_hi).toFixed(9),
+    ].join("|"));
+  return sha256Utf8(lines.join("\n"));
+}
+
+function validateImmutableDayAheadIssuance(day, rows, source, issuance) {
+  const issuanceId = String(issuance?.issuance_id || "").trim();
+  const generatedTs = Number(issuance?.generated_ts || 0);
+  const expectedSlotCount = Number(issuance?.expected_slot_count);
+  const basisChecksum = String(issuance?.basis_checksum || "").trim().toLowerCase();
+  const issuanceDate = String(issuance?.date || day).trim();
+  const requiredSlots = new Set(
+    Array.from(
+      { length: IMMUTABLE_DAYAHEAD_END_SLOT - IMMUTABLE_DAYAHEAD_START_SLOT },
+      (_, index) => IMMUTABLE_DAYAHEAD_START_SLOT + index,
+    ),
+  );
+  const seenSlots = new Set();
+  const normalizedRows = [];
+
+  for (const row of rows) {
+    const slot = Number(row?.slot);
+    const timeHms = String(row?.time_hms || "").trim();
+    const match = /^(\d{2}):(\d{2}):(\d{2})$/.exec(timeHms);
+    const kwhInc = Number(row?.kwh_inc);
+    const kwhLo = Number(row?.kwh_lo);
+    const kwhHi = Number(row?.kwh_hi);
+    const timeSlot = match
+      ? Math.floor((Number(match[1]) * 60 + Number(match[2])) / 5)
+      : -1;
+    if (
+      !Number.isInteger(slot) ||
+      !requiredSlots.has(slot) ||
+      seenSlots.has(slot) ||
+      !match || Number(match[1]) > 23 || Number(match[2]) > 59 ||
+      timeSlot !== slot || Number(match[3]) !== 0 || Number(match[2]) % 5 !== 0 ||
+      ![kwhInc, kwhLo, kwhHi].every(Number.isFinite) ||
+      kwhLo < 0 || kwhInc < 0 || kwhHi < 0 ||
+      kwhLo > kwhInc || kwhInc > kwhHi
+    ) {
+      throw new Error("Invalid immutable day-ahead slot batch");
+    }
+    seenSlots.add(slot);
+    normalizedRows.push({ slot, time_hms: timeHms, kwh_inc: kwhInc, kwh_lo: kwhLo, kwh_hi: kwhHi });
+  }
+
+  const requiredCount = IMMUTABLE_DAYAHEAD_END_SLOT - IMMUTABLE_DAYAHEAD_START_SLOT;
+  if (
+    !issuanceId ||
+    !Number.isSafeInteger(generatedTs) || generatedTs <= 0 ||
+    issuanceDate !== day ||
+    expectedSlotCount !== requiredCount || rows.length !== requiredCount ||
+    seenSlots.size !== requiredCount ||
+    !/^[a-f0-9]{64}$/.test(basisChecksum) ||
+    canonicalForecastBasisChecksum(normalizedRows) !== basisChecksum
+  ) {
+    throw new Error("Invalid immutable day-ahead issuance metadata or checksum");
+  }
+
+  const weatherJson = issuance?.weather_snapshot_json == null
+    ? null
+    : String(issuance.weather_snapshot_json);
+  const weatherSha = issuance?.weather_snapshot_sha256 == null
+    ? null
+    : String(issuance.weather_snapshot_sha256).trim().toLowerCase();
+  if (!weatherJson || !/^[a-f0-9]{64}$/.test(weatherSha || "") || sha256Utf8(weatherJson) !== weatherSha) {
+    throw new Error("Invalid immutable day-ahead weather snapshot checksum");
+  }
+  try {
+    const weatherSnapshot = JSON.parse(weatherJson);
+    const appliedWeatherRows = Array.isArray(weatherSnapshot?.applied_hourly)
+      ? weatherSnapshot.applied_hourly
+      : [];
+    const weatherRows = appliedWeatherRows.length > 0
+      ? appliedWeatherRows
+      : weatherSnapshot?.raw_hourly;
+    if (
+      !weatherSnapshot || Array.isArray(weatherSnapshot) || typeof weatherSnapshot !== "object" ||
+      String(weatherSnapshot.day || "") !== day ||
+      !Array.isArray(weatherRows) || weatherRows.length === 0
+    ) {
+      throw new Error("invalid weather snapshot shape");
+    }
+  } catch (_) {
+    throw new Error("Invalid immutable day-ahead weather snapshot payload");
+  }
+
+  const constraintJson = issuance?.constraint_snapshot_json == null
+    ? null
+    : String(issuance.constraint_snapshot_json);
+  const constraintSha = issuance?.constraint_snapshot_sha256 == null
+    ? null
+    : String(issuance.constraint_snapshot_sha256).trim().toLowerCase();
+  if (
+    !constraintJson || !/^[a-f0-9]{64}$/.test(constraintSha || "") ||
+    sha256Utf8(constraintJson) !== constraintSha
+  ) {
+    throw new Error("Invalid immutable day-ahead constraint snapshot checksum");
+  }
+  try {
+    const constraints = JSON.parse(constraintJson);
+    const slotCap = Number(constraints?.slot_cap_kwh);
+    const blendMax = Number(constraints?.nowcast_config?.forecastIntradayBlendMax);
+    const validMask = (value) => (
+      Array.isArray(value) && value.length === 288 &&
+      value.every((item) => item === 0 || item === 1 || item === false || item === true)
+    );
+    if (
+      !constraints || Array.isArray(constraints) || typeof constraints !== "object" ||
+      !Number.isFinite(slotCap) || slotCap <= 0 ||
+      !Number.isFinite(blendMax) || blendMax < 0 || blendMax > 1 ||
+      !validMask(constraints.cap_dispatch_mask) ||
+      !validMask(constraints.outage_mask) ||
+      normalizedRows.some((row) => Number(row.kwh_hi) > slotCap + 1e-9)
+    ) {
+      throw new Error("invalid constraint snapshot shape");
+    }
+  } catch (_) {
+    throw new Error("Invalid immutable day-ahead constraint snapshot payload");
+  }
+
+  for (const field of ["model_sha256", "artifact_sha256"]) {
+    const value = issuance?.[field];
+    if (value != null && !/^[a-f0-9]{64}$/.test(String(value).trim().toLowerCase())) {
+      throw new Error(`Invalid immutable day-ahead ${field}`);
+    }
+  }
+  if (
+    issuance?.base_run_audit_id != null &&
+    (!Number.isSafeInteger(Number(issuance.base_run_audit_id)) || Number(issuance.base_run_audit_id) <= 0)
+  ) {
+    throw new Error("Invalid immutable day-ahead base_run_audit_id");
+  }
+
+  return {
+    issuance_id: issuanceId,
+    date: day,
+    generated_ts: generatedTs,
+    source: String(issuance?.source || source || "service"),
+    expected_slot_count: requiredCount,
+    basis_checksum: basisChecksum,
+    weather_snapshot_json: weatherJson,
+    weather_snapshot_sha256: weatherSha,
+    constraint_snapshot_json: constraintJson,
+    constraint_snapshot_sha256: constraintSha,
+    model_sha256: issuance?.model_sha256 == null ? null : String(issuance.model_sha256).trim().toLowerCase(),
+    artifact_sha256: issuance?.artifact_sha256 == null ? null : String(issuance.artifact_sha256).trim().toLowerCase(),
+    base_run_audit_id: issuance?.base_run_audit_id == null ? null : Number(issuance.base_run_audit_id),
+    created_by: String(issuance?.created_by || "forecast_engine"),
+    rows: normalizedRows,
+  };
+}
+
+const bulkUpsertForecastDayAhead = db.transaction((date, rows, source = "service", issuance = null) => {
+  const day = String(date || "");
+  const batch = Array.isArray(rows) ? rows : [];
+  stmts.deleteForecastDayAheadDate.run(day);
   const now = Date.now();
-  for (const r of rows || []) {
+  for (const r of batch) {
     stmts.upsertForecastDayAhead.run({
-      date: String(date || ""),
+      date: day,
       ts: Number(r?.ts || 0),
       slot: Number(r?.slot || 0),
       time_hms: String(r?.time_hms || ""),
@@ -3792,6 +4171,28 @@ const bulkUpsertForecastDayAhead = db.transaction((date, rows, source = "service
       source: String(source || "service"),
       updated_ts: now,
     });
+  }
+
+  // Immutable replay history is written only when the caller supplies the
+  // original issuance identity and canonical checksum. Generic context sync
+  // deliberately updates only the mutable table; Date.now() is not an issue
+  // timestamp and must never be promoted into causal replay evidence.
+  if (issuance != null) {
+    const validated = validateImmutableDayAheadIssuance(day, batch, source, issuance);
+    stmts.insertForecastDayAheadIssuance.run(validated);
+    for (const r of validated.rows) {
+      stmts.insertForecastDayAheadImmutable.run({
+        date: day,
+        issuance_id: validated.issuance_id,
+        generated_ts: validated.generated_ts,
+        slot: Number(r?.slot || 0),
+        time_hms: String(r?.time_hms || ""),
+        kwh_inc: Number(r?.kwh_inc || 0),
+        kwh_lo: Number(r?.kwh_lo || 0),
+        kwh_hi: Number(r?.kwh_hi || 0),
+        source: validated.source,
+      });
+    }
   }
 });
 
@@ -3809,6 +4210,7 @@ const bulkUpsertForecastIntradayAdjusted = db.transaction((date, rows, source = 
       kwh_hi: Number(r?.kwh_hi || 0),
       source: String(source || "service"),
       updated_ts: now,
+      series_run_id: String(r?.series_run_id || "").trim() || null,
     });
   }
 });

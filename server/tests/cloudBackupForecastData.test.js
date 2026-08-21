@@ -41,6 +41,8 @@ async function run() {
     const settingsStore = new Map();
     const service = new CloudBackupService({
       dataDir,
+      backupDir: path.join(root, "cloud_backups"),
+      historyFile: path.join(root, "cloud_backup_history.json"),
       db: {
         backup: async (dest) => {
           fs.copyFileSync(sourceDb, dest);

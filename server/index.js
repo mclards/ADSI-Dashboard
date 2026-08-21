@@ -1,7 +1,6 @@
 "use strict";
 const express = require("express");
 const expressWs = require("express-ws");
-const cors = require("cors");
 const path = require("path");
 const fs = require("fs");
 const http = require("http");
@@ -22,6 +21,7 @@ const streaming = require("./streaming");
 const go2rtcManager = require("./go2rtcManager");
 const hikvisionManager = require("./hikvisionManager");
 const forecastGenLock = require("./forecastGenLock");
+const { createBrowserAuth } = require("./browserAuth");
 
 const {
   getSetting,
@@ -255,15 +255,10 @@ const {
 const app = express();
 let plantCapController = null;
 expressWs(app);
-const LOCAL_ORIGIN_RE = /^https?:\/\/(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+|172\.\d+\.\d+\.\d+|100\.\d+\.\d+\.\d+)(:\d+)?$/i;
-app.use(
-  cors({
-    origin(origin, cb) {
-      if (!origin || LOCAL_ORIGIN_RE.test(origin)) return cb(null, true);
-      return cb(new Error("CORS blocked"));
-    },
-  }),
-);
+const browserAuth = createBrowserAuth({
+  credentialPath: process.env.ADSI_LOGIN_CREDENTIAL_PATH,
+});
+app.use(browserAuth.originGuard);
 app.use(express.json({ limit: "50mb" }));
 app.use((err, req, res, next) => {
   if (err && (err.type === "entity.too.large" || Number(err.status || 0) === 413)) {
@@ -274,6 +269,7 @@ app.use((err, req, res, next) => {
   }
   return next(err);
 });
+browserAuth.registerRoutes(app);
 
 // Block external callers from -internal endpoints (Python loopback only).
 app.use((req, res, next) => {
@@ -287,6 +283,7 @@ app.use((req, res, next) => {
   }
   next();
 });
+app.use(browserAuth.pageGuard);
 
 const staticNoCache = {
   etag: false,
@@ -676,7 +673,7 @@ const REPLICATION_TABLE_DEFS = [
   {
     name: "forecast_intraday_adjusted",
     orderBy: "date ASC, slot ASC",
-    columns: ["date", "ts", "slot", "time_hms", "kwh_inc", "kwh_lo", "kwh_hi", "source", "updated_ts"],
+    columns: ["date", "ts", "slot", "time_hms", "kwh_inc", "kwh_lo", "kwh_hi", "source", "updated_ts", "series_run_id"],
   },
   {
     name: "settings",
@@ -3123,7 +3120,7 @@ function mergeUpdatedReplicationRow(tableName, payload, cols, preserveSettings =
       " ON CONFLICT(date, slot) DO UPDATE SET" +
       " ts=excluded.ts, time_hms=excluded.time_hms," +
       " kwh_inc=excluded.kwh_inc, kwh_lo=excluded.kwh_lo, kwh_hi=excluded.kwh_hi," +
-      " source=excluded.source, updated_ts=excluded.updated_ts";
+      " source=excluded.source, updated_ts=excluded.updated_ts, series_run_id=excluded.series_run_id";
     const fiSql = authoritative ? fiBase : fiBase + " WHERE COALESCE(excluded.updated_ts,0) >= COALESCE(forecast_intraday_adjusted.updated_ts,0)";
     stmtCached(authoritative ? "merge:forecast_intraday_adjusted:auth" : "merge:forecast_intraday_adjusted:lww", fiSql).run(payload);
     return true;
@@ -7811,13 +7808,11 @@ function _isPublicUnauthedApiPath(req) {
 }
 
 function remoteApiTokenGate(req, res, next) {
-  const token = getRemoteApiToken();
-  if (!token) return next();
-  if (isLoopbackRequest(req)) return next();
-  if (_isPublicUnauthedApiPath(req)) return next();
-  const provided = resolveRequestToken(req);
-  if (provided === token) return next();
-  return res.status(401).json({ ok: false, error: "Unauthorized API request." });
+  const auth = browserAuth.authorizeApiRequest(req, getRemoteApiToken());
+  if (auth.ok) return next();
+  return res
+    .status(Number(auth.status || 401))
+    .json({ ok: false, error: String(auth.error || "Unauthorized API request.") });
 }
 
 function localDateStr(ts = Date.now()) {
@@ -8485,6 +8480,8 @@ function getIntradayAdjustedRowsForDate(day) {
       ts: Number(r?.ts || 0),
       kwh_inc: Number(kwhInc.toFixed(6)),
       mwh_inc: Number((kwhInc / 1000).toFixed(6)),
+      updated_ts: Number(r?.updated_ts || 0),
+      series_run_id: String(r?.series_run_id || "").trim() || null,
     };
   });
 }
@@ -8507,6 +8504,7 @@ function normalizeDayAheadSeries(day, series) {
       kwh_inc: Number.isFinite(kwhInc) ? Number(kwhInc.toFixed(6)) : 0,
       kwh_lo: Number.isFinite(kwhLo) ? Number(kwhLo.toFixed(6)) : 0,
       kwh_hi: Number.isFinite(kwhHi) ? Number(kwhHi.toFixed(6)) : 0,
+      series_run_id: String(rec?.series_run_id || "").trim() || null,
     });
   }
   out.sort((a, b) => Number(a.ts || 0) - Number(b.ts || 0) || Number(a.slot || 0) - Number(b.slot || 0));
@@ -8789,6 +8787,7 @@ function ensurePersistedSettings() {
     forecastExportLimitMw: "24",
     forecastEstActualWeight: "",
     forecastIntradayBlendMax: "",
+    forecastVirtualNowcastMode: "off",
     plantCapUpperMw: "",
     plantCapLowerMw: "",
     plantCapSequenceMode: "ascending",
@@ -8860,6 +8859,7 @@ function buildDefaultSettingsSnapshot() {
     forecastExportLimitMw: 24,
     forecastEstActualWeight: null,
     forecastIntradayBlendMax: null,
+    forecastVirtualNowcastMode: "off",
     plantCapUpperMw: null,
     plantCapLowerMw: null,
     plantCapSequenceMode: "ascending",
@@ -9002,6 +9002,10 @@ function buildSettingsSnapshot() {
       if (!raw) return null;
       const n = Number(raw);
       return Number.isFinite(n) && n >= 0.0 && n <= 1.0 ? n : null;
+    })(),
+    forecastVirtualNowcastMode: (() => {
+      const raw = String(getSetting("forecastVirtualNowcastMode", "off") || "off").trim().toLowerCase();
+      return ["off", "shadow", "active"].includes(raw) ? raw : "off";
     })(),
     plantCapUpperMw: (() => {
       const raw = String(getSetting("plantCapUpperMw", "") || "").trim();
@@ -9276,9 +9280,8 @@ function getSolcastConfig() {
 function buildSolcastConfigFromInput(input = null) {
   const base = getSolcastConfig();
   const src = input && typeof input === "object" ? input : {};
-  const resolveMasked = (val) =>
-    typeof val === "string" && /^\*{4,}$/.test(val) ? undefined : val;
-
+  const resolveMasked = (value) =>
+    browserAuth.isMaskedSecret(value) ? undefined : value;
   const cfg = {
     baseUrl: String(
       src.solcastBaseUrl ?? src.baseUrl ?? base.baseUrl ?? "",
@@ -9286,7 +9289,12 @@ function buildSolcastConfigFromInput(input = null) {
     accessMode: String(
       src.solcastAccessMode ?? src.accessMode ?? base.accessMode ?? "",
     ).trim(),
-    apiKey: String(src.solcastApiKey ?? src.apiKey ?? base.apiKey ?? "").trim(),
+    apiKey: String(
+      resolveMasked(src.solcastApiKey) ??
+        resolveMasked(src.apiKey) ??
+        base.apiKey ??
+        "",
+    ).trim(),
     resourceId: String(
       src.solcastResourceId ?? src.resourceId ?? base.resourceId ?? "",
     ).trim(),
@@ -13173,7 +13181,27 @@ function backfillAuditIpsFromConfig() {
 // Ensure all user-facing settings exist in DB and survive restarts.
 ensurePersistedSettings();
 
-app.ws("/ws", (ws) => {
+function authorizeDashboardWebSocket(ws, req) {
+  const auth = browserAuth.authorizeWebSocket(req, getRemoteApiToken());
+  if (!auth.ok) {
+    try { ws.close(Number(auth.closeCode || 1008), "Authentication required"); } catch (_) {}
+    return null;
+  }
+  if (auth.mode === "session" && Number(auth.expiresAt || 0) > 0) {
+    const remainingMs = Math.max(1, Number(auth.expiresAt) - Date.now());
+    const expiryTimer = setTimeout(() => {
+      try { ws.close(1008, "Browser session expired"); } catch (_) {}
+    }, remainingMs);
+    expiryTimer.unref?.();
+    const clearExpiry = () => clearTimeout(expiryTimer);
+    ws.once("close", clearExpiry);
+    ws.once("error", clearExpiry);
+  }
+  return auth;
+}
+
+app.ws("/ws", (ws, req) => {
+  if (!authorizeDashboardWebSocket(ws, req)) return;
   registerClient(ws);
   const todayEnergy = getTodayEnergyRowsForWs();
   const plantCap =
@@ -13204,6 +13232,7 @@ app.ws("/ws", (ws) => {
 
 /* ── Camera RTSP → MPEG1/TS WebSocket ─────────────────────────────── */
 app.ws("/ws/camera", (ws, req) => {
+  if (!authorizeDashboardWebSocket(ws, req)) return;
   let registered = false;
 
   function tryStart(rtspUrl) {
@@ -20539,7 +20568,12 @@ app.get("/api/credentials-reference", (req, res) => {
 });
 
 app.get("/api/settings", (req, res) => {
-  res.json(buildSettingsSnapshot());
+  res.json(
+    browserAuth.redactSettingsSnapshot(
+      buildSettingsSnapshot(),
+      !browserAuth.directLoopback(req),
+    ),
+  );
 });
 
 app.get("/api/settings/defaults", (req, res) => {
@@ -21074,7 +21108,73 @@ app.post("/api/substation-meter/:date/recalculate", (req, res) => {
   res.status(202).json({ ok: true, message: `QA recalculation for ${dateStr} scheduled (5s debounce).` });
 });
 
+// --- REMOTE MODE PROXY SUPPORT ---
+async function _applySettingsPostRemote(req, res, targetUrl, token, modeBefore) {
+  try {
+    const payload = { ...req.body };
+    // Strip local-only config before proxying to gateway
+    if (payload.remoteGatewayUrl !== undefined) delete payload.remoteGatewayUrl;
+    if (payload.remoteApiToken !== undefined) delete payload.remoteApiToken;
+    if (payload.cameraConfig !== undefined) delete payload.cameraConfig;
+    // A viewer must never switch the authoritative gateway into Remote mode.
+    if (payload.operationMode !== undefined) delete payload.operationMode;
+
+    // Attempt remote save
+    const { default: fetch } = await import('node-fetch');
+    const response = await fetch(`${targetUrl}/api/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...buildRemoteProxyHeaders(token) },
+      body: JSON.stringify(payload)
+    });
+
+    if (response.ok) {
+      // Allow local update of things like operationMode and token if they exist in original request
+      // But we intercept the rest. Actually, let's just let the normal save proceed locally too,
+      // so local DB matches remote gateway, but we swallow the fact it was done locally.
+      return { remoteSuccess: true, response: await response.json() };
+    } else {
+      return { remoteSuccess: false, status: response.status, text: await response.text() };
+    }
+  } catch (err) {
+    return { remoteSuccess: false, error: err.message };
+  }
+}
+
 app.post("/api/settings", async (req, res) => {
+  const currentMode = readOperationMode();
+
+  // ── Local-only settings: persist BEFORE any remote proxy so they are
+  // always saved regardless of gateway connectivity or remote save outcome.
+  // cameraConfig and go2rtcAutoStart are never forwarded to the gateway.
+  {
+    const localUpdates = {};
+    if (req.body.cameraConfig !== undefined) {
+      localUpdates.cameraConfig = JSON.stringify(sanitizeCameraConfig(req.body.cameraConfig));
+    }
+    if (req.body.go2rtcAutoStart !== undefined) {
+      localUpdates.go2rtcAutoStart =
+        req.body.go2rtcAutoStart === "1" || req.body.go2rtcAutoStart === true ? "1" : "0";
+    }
+    if (Object.keys(localUpdates).length) {
+      try {
+        db.transaction(() => {
+          Object.entries(localUpdates).forEach(([k, v]) => setSetting(k, v));
+        })();
+      } catch (_) { /* non-fatal — will be retried in main save block */ }
+    }
+  }
+
+  if (currentMode === 'remote' && req.body.operationMode !== 'gateway') {
+    const targetUrl = getRemoteGatewayBaseUrl();
+    const token = getRemoteApiToken();
+    if (targetUrl && token) {
+      const remoteRes = await _applySettingsPostRemote(req, res, targetUrl, token, currentMode);
+      if (!remoteRes.remoteSuccess) {
+         return res.status(500).json({ ok: false, error: 'Remote save failed', details: remoteRes });
+      }
+    }
+  }
+
   const updates = {};
   let exportDirCreated = false;
   let exportDirResolved = "";
@@ -21117,6 +21217,7 @@ app.post("/api/settings", async (req, res) => {
     forecastExportLimitMw,
     forecastEstActualWeight,
     forecastIntradayBlendMax,
+    forecastVirtualNowcastMode,
     plantCapUpperMw,
     plantCapLowerMw,
     plantCapSequenceMode,
@@ -21170,7 +21271,9 @@ app.post("/api/settings", async (req, res) => {
     updates.remoteGatewayUrl = url;
   }
   if (remoteApiToken !== undefined) {
-    updates.remoteApiToken = String(remoteApiToken || "").trim().slice(0, 256);
+    if (!browserAuth.isMaskedSecret(remoteApiToken)) {
+      updates.remoteApiToken = String(remoteApiToken || "").trim().slice(0, 256);
+    }
   }
   if (tailscaleDeviceHint !== undefined || wireguardInterface !== undefined) {
     const hintSource =
@@ -21260,7 +21363,7 @@ app.post("/api/settings", async (req, res) => {
   }
   if (solcastApiKey !== undefined) {
     const key = String(solcastApiKey || "").trim();
-    updates.solcastApiKey = key.slice(0, 256);
+    if (!browserAuth.isMaskedSecret(key)) updates.solcastApiKey = key.slice(0, 256);
   }
   if (solcastResourceId !== undefined) {
     const rid = String(solcastResourceId || "").trim();
@@ -21281,11 +21384,11 @@ app.post("/api/settings", async (req, res) => {
   }
   if (solcastToolkitPassword !== undefined) {
     const pwd = String(solcastToolkitPassword || "").trim();
-    if (!/^\*{4,}$/.test(pwd)) updates.solcastToolkitPassword = pwd.slice(0, 256);
+    if (!browserAuth.isMaskedSecret(pwd)) updates.solcastToolkitPassword = pwd.slice(0, 256);
   }
   if (solcastToolkitTotpSecret !== undefined) {
     const sec = String(solcastToolkitTotpSecret || "").trim();
-    if (!/^\*{4,}$/.test(sec)) updates.solcastToolkitTotpSecret = sec.slice(0, 256);
+    if (!browserAuth.isMaskedSecret(sec)) updates.solcastToolkitTotpSecret = sec.slice(0, 256);
   }
   if (solcastToolkitSiteRef !== undefined) {
     const ref = String(solcastToolkitSiteRef || "").trim();
@@ -21367,6 +21470,16 @@ app.post("/api/settings", async (req, res) => {
       }
       updates.forecastIntradayBlendMax = String(val);
     }
+  }
+  if (forecastVirtualNowcastMode !== undefined) {
+    const mode = String(forecastVirtualNowcastMode || "off").trim().toLowerCase();
+    if (!["off", "shadow", "active"].includes(mode)) {
+      return res.status(400).json({
+        ok: false,
+        error: "forecastVirtualNowcastMode must be off, shadow, or active",
+      });
+    }
+    updates.forecastVirtualNowcastMode = mode;
   }
   if (plantCapUpperMw !== undefined) {
     const rawUpper = String(plantCapUpperMw ?? "").trim();
@@ -21593,6 +21706,7 @@ app.post("/api/settings", async (req, res) => {
       "remoteApiToken",
       "solcastApiKey",
       "solcastToolkitPassword",
+      "solcastToolkitTotpSecret",
     ]);
     const operatorName = String(
       (req.body && req.body.operator) ||
@@ -21679,7 +21793,10 @@ app.post("/api/settings", async (req, res) => {
     ok: true,
     csvSavePath: exportDirResolved || getSetting("csvSavePath", "C:\\Logs\\InverterDashboard"),
     exportDirCreated,
-    settings: snapshot,
+    settings: browserAuth.redactSettingsSnapshot(
+      snapshot,
+      !browserAuth.directLoopback(req),
+    ),
     retentionApplied: retentionScheduled ? { ok: true, scheduled: true } : null,
   });
 });
@@ -22353,10 +22470,36 @@ app.get("/api/analytics/dayahead-chart", (req, res) => {
     // 4. ML final = intraday-adjusted forecast (primary) with day-ahead fallback
     //    Converted from kwh_inc (per 5-min slot) back to MW via (kwh / (5/60) / 1000).
     let mlFinalRows = [];
+    let usedIntradayRows = false;
+    let intradayBatchRunId = null;
+    let intradayBatchProvenance = "not_applicable";
+    let intradayBatchUpdatedTs = null;
     try {
       let srcRows = getIntradayAdjustedRowsForDate(date);
       if (!srcRows || srcRows.length === 0) {
         srcRows = getDayAheadRowsForDate(date);
+      } else {
+        usedIntradayRows = true;
+        const runIds = new Set(
+          srcRows
+            .map((row) => String(row?.series_run_id || "").trim())
+            .filter(Boolean),
+        );
+        const hasMissingRunId = srcRows.some(
+          (row) => !String(row?.series_run_id || "").trim(),
+        );
+        if (!hasMissingRunId && runIds.size === 1) {
+          intradayBatchRunId = Array.from(runIds)[0];
+          intradayBatchProvenance = "unknown";
+        } else {
+          // Mixed or missing ids mean the rows do not represent one provable
+          // authoritative batch. Keep plotting the data, but never guess an audit.
+          intradayBatchProvenance = "unknown";
+        }
+        const updatedValues = srcRows
+          .map((row) => Number(row?.updated_ts || 0))
+          .filter((value) => Number.isFinite(value) && value > 0);
+        intradayBatchUpdatedTs = updatedValues.length ? Math.max(...updatedValues) : null;
       }
       const midnightTs = new Date(`${date}T00:00:00`).getTime();
       mlFinalRows = (srcRows || []).map((r) => {
@@ -22373,6 +22516,118 @@ app.get("/api/analytics/dayahead-chart", (req, res) => {
     } catch (e) {
       console.warn(`[dayahead-chart] ml_final read failed for ${date}:`, e.message);
     }
+
+    // Latest challenger audit is deliberately separate from forecast_run_audit,
+    // which remains the authoritative day-ahead ledger.
+    const configuredNowcastMode = (() => {
+      const raw = String(getSetting("forecastVirtualNowcastMode", "off") || "off").trim().toLowerCase();
+      return ["off", "shadow", "active"].includes(raw) ? raw : "off";
+    })();
+
+    let mlFinalMeta = {
+      series_generated_ts: usedIntradayRows ? intradayBatchUpdatedTs : null,
+      series_algorithm: usedIntradayRows ? "unknown" : "dayahead",
+      series_kind: usedIntradayRows ? "intraday_adjusted" : "dayahead_fallback",
+      series_run_id: intradayBatchRunId,
+      provenance_status: intradayBatchProvenance,
+      cutoff_slot: null,
+      eligible_slots: 0,
+      excluded_slots: { total: 0, cap: 0, outage: 0, quality: 0, curtailed: 0 },
+      strength: 0,
+      configured_mode: configuredNowcastMode,
+      fallback_reason: usedIntradayRows ? null : "no_intraday_series",
+      recent_log_ratio: null,
+      session_log_ratio: null,
+      challenger_meta: null,
+      latest_attempt: null,
+      authoritative_status: usedIntradayRows ? "unknown" : "fallback",
+    };
+
+    try {
+      // Provenance belongs to the exact row batch, never to whichever audit
+      // happened to be latest/successful. A successful current-algorithm write
+      // after challenger fallback remains authoritative even though run_status
+      // describes the challenger outcome as "fallback".
+      const authAudit = usedIntradayRows && intradayBatchRunId
+        ? stmts.getForecastIntradayRunAuditBySeriesRunId.get(date, intradayBatchRunId)
+        : null;
+      if (authAudit) {
+        let notes = {};
+        try { notes = JSON.parse(String(authAudit.notes_json || "{}")); } catch (_) {}
+        const excluded = {
+          cap: Number(authAudit.excluded_cap_slots || 0),
+          outage: Number(authAudit.excluded_outage_slots || 0),
+          quality: Number(authAudit.excluded_quality_slots || 0),
+          curtailed: Number(authAudit.excluded_curtailed_slots || 0),
+        };
+        excluded.total = excluded.cap + excluded.outage + excluded.quality + excluded.curtailed;
+        mlFinalMeta.series_generated_ts =
+          Number(authAudit.output_updated_ts || 0) ||
+          intradayBatchUpdatedTs ||
+          Number(authAudit.generated_ts || 0) ||
+          null;
+        mlFinalMeta.series_algorithm = authAudit.authoritative_algorithm || notes?.authoritative_algorithm || String(authAudit.algorithm_version || "robust_decay_v1");
+        mlFinalMeta.series_run_id = authAudit.series_run_id || null;
+        mlFinalMeta.provenance_status = "matched";
+        mlFinalMeta.authoritative_status = String(authAudit.authoritative_write_status || "success");
+        if (authAudit.configured_mode) {
+          mlFinalMeta.configured_mode = authAudit.configured_mode;
+        }
+        mlFinalMeta.cutoff_slot = Number.isFinite(Number(authAudit.cutoff_slot)) ? Number(authAudit.cutoff_slot) : null;
+        mlFinalMeta.eligible_slots = Number(authAudit.eligible_slots || 0);
+        mlFinalMeta.excluded_slots = excluded;
+        mlFinalMeta.strength = Number(authAudit.strength || 0);
+        mlFinalMeta.series_fallback_reason = String(authAudit.execution_mode || "") === "shadow"
+          ? null
+          : (notes?.fallback_reason || null);
+        mlFinalMeta.recent_log_ratio = authAudit.recent_log_ratio != null ? Number(authAudit.recent_log_ratio) : null;
+        mlFinalMeta.session_log_ratio = authAudit.session_log_ratio != null ? Number(authAudit.session_log_ratio) : null;
+      }
+
+      // Latest attempt is diagnostic history and must not be hidden merely
+      // because the operator subsequently changed today's setting to "off".
+      const latestAudit = stmts.getLatestForecastIntradayRunAuditForDate.get(date);
+      if (latestAudit) {
+        let notes = {};
+        try { notes = JSON.parse(String(latestAudit.notes_json || "{}")); } catch (_) {}
+        const challengerStatus = String(latestAudit.challenger_status || "").trim();
+        mlFinalMeta.latest_attempt = {
+          series_run_id: String(latestAudit.series_run_id || "").trim() || null,
+          generated_ts: Number(latestAudit.generated_ts || 0) || null,
+          configured_mode: String(latestAudit.configured_mode || latestAudit.execution_mode || "unknown"),
+          execution_mode: String(latestAudit.execution_mode || "unknown"),
+          run_status: String(latestAudit.run_status || "unknown"),
+          challenger_status: challengerStatus || null,
+          authoritative_write_status: String(latestAudit.authoritative_write_status || "unknown"),
+          authoritative_algorithm: String(latestAudit.authoritative_algorithm || notes?.authoritative_algorithm || "unknown"),
+          prior_series_preserved: Boolean(latestAudit.prior_series_preserved),
+          fallback_reason: notes?.fallback_reason || null,
+        };
+        if (challengerStatus && challengerStatus !== "not_run") {
+          mlFinalMeta.challenger_meta = {
+            algorithm_version: String(latestAudit.algorithm_version || "unknown"),
+            status: challengerStatus,
+            strength: Number(latestAudit.strength || 0),
+            would_write: Boolean(notes?.challenger_would_write),
+            evaluation_only: String(latestAudit.execution_mode || "") === "shadow",
+            checkpoints: notes?.checkpoints || null,
+          };
+        }
+      }
+    } catch (e) {
+      console.warn(`[dayahead-chart] nowcast audit read failed for ${date}:`, e.message);
+    }
+
+    mlFinalMeta.fallback_used = Boolean(
+      mlFinalMeta.series_kind === "dayahead_fallback" ||
+      mlFinalMeta.series_fallback_reason ||
+      (
+        mlFinalMeta.latest_attempt?.execution_mode === "active" &&
+        ["failed", "fallback", "timeout"].includes(String(mlFinalMeta.latest_attempt?.challenger_status || "")) &&
+        mlFinalMeta.series_run_id === mlFinalMeta.latest_attempt?.series_run_id
+      )
+    );
+    mlFinalMeta.status = mlFinalMeta.authoritative_status;
 
     // Meta: actuals-so-far total + variance + within-band tracking
     const actualTotalKwhSoFar = plantActualRows.reduce(
@@ -22415,7 +22670,7 @@ app.get("/api/analytics/dayahead-chart", (req, res) => {
       locked,
       intraday_solcast: { rows: intradaySolcastRows },
       plant_actual: { rows: plantActualRows },
-      ml_final: { rows: mlFinalRows },
+      ml_final: { rows: mlFinalRows, meta: mlFinalMeta },
       meta: {
         plant_cap_mw: locked.plant_cap_mw,
         actual_total_mwh_so_far: Number((actualTotalKwhSoFar / 1000).toFixed(4)),
@@ -25964,6 +26219,24 @@ async function _prunDailyParamRetention() {
 }
 setTimeout(_prunDailyParamRetention, 6 * 60 * 1000).unref();            // first run after 6 min (offset from stopReasons)
 setInterval(_prunDailyParamRetention, 6 * 60 * 60 * 1000).unref();      // every 6 h thereafter
+
+// Virtual-nowcast audit rows are diagnostic rather than operational data.
+// Keep the hot table bounded and skip maintenance in viewer/remote mode, where
+// the gateway remains the only writer and owner of the authoritative history.
+function _pruneForecastIntradayAuditRetention() {
+  if (isRemoteMode()) return;
+  try {
+    const cutoffTs = Date.now() - (30 * 24 * 60 * 60 * 1000);
+    const result = stmts.pruneForecastIntradayRunAuditBeforeTs.run(cutoffTs);
+    if (Number(result?.changes || 0) > 0) {
+      console.log(`[forecast] pruned ${result.changes} intraday audit rows older than 30 days`);
+    }
+  } catch (err) {
+    console.warn("[forecast] intraday audit retention failed:", err?.message || err);
+  }
+}
+setTimeout(_pruneForecastIntradayAuditRetention, 7 * 60 * 1000).unref();
+setInterval(_pruneForecastIntradayAuditRetention, 6 * 60 * 60 * 1000).unref();
 
 // ─── v2.11.x Phase 2 — IGBT health snapshot writer ───────────────────────────
 // Captures computed scores and telemetry every 5 min (gateway-only) so the

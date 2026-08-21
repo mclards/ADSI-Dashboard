@@ -268,6 +268,14 @@ test.describe("Electron UI smoke", () => {
       await expect(mainWindow.locator("#expEnergyStart")).toHaveCount(0);
       await expect(mainWindow.locator("#expEnergyEnd")).toHaveCount(0);
 
+      await mainWindow.locator('[data-page="forecast"]').evaluate((el) => el.click());
+      await expect(mainWindow.locator("#page-forecast")).toBeVisible();
+      await mainWindow.locator('#fcTabTuning').evaluate((el) => el.click());
+      const nowcastMode = mainWindow.locator("#setForecastVirtualNowcastMode");
+      await expect(nowcastMode).toBeVisible();
+      await expect(nowcastMode.locator("option")).toHaveCount(3);
+      await expect(nowcastMode).toHaveValue(/^(off|shadow|active)$/);
+
       await mainWindow.locator('[data-page="inverters"]').evaluate((el) => el.click());
       await expect(mainWindow.locator("#page-inverters")).toBeVisible();
       await expect(hikvisionCard).toBeVisible();

@@ -342,6 +342,7 @@ const SETTINGS_SECTION_IDS = [
   "connectivitySection",
   "licenseSection",
   "appUpdateSection",
+  "aboutSection",
   "cloudBackupSection",
   "localBackupSection",
   "inverterClockSection",
@@ -369,6 +370,10 @@ const SETTINGS_SECTION_META = {
   appUpdateSection: {
     title: "App Updates",
     copy: "Review the installed build, compare it with the release channel, and run update actions from here.",
+  },
+  aboutSection: {
+    title: "About Application",
+    copy: "Application details, operator guide, credentials, and credits.",
   },
   cloudBackupSection: {
     title: "Cloud Backup",
@@ -1831,6 +1836,7 @@ function getChartPalette() {
     lockedBand: cssVar("--chart-locked-band", "rgba(96,165,250,0.40)"),
     lockedBandFill: cssVar("--chart-locked-band-fill", "rgba(96,165,250,0.08)"),
     solcastEst: cssVar("--chart-solcast-est", "#c084fc"),
+    nowcast: cssVar("--chart-nowcast", "#8b5cf6"),
     metered: cssVar("--chart-metered", "#e879f9"),
   };
 }
@@ -1902,34 +1908,43 @@ function refreshChartsTheme() {
     }
 
     if (key === "totalPac" && Array.isArray(chart.data?.datasets)) {
-      if (chart.data.datasets[0]) {
-        chart.data.datasets[0].borderColor = pal.actual;
-        chart.data.datasets[0].backgroundColor = cvs
-          ? gradientPair(cvs, pal.actual, 0.26, 0.02) : pal.actualFill;
-        chart.data.datasets[0].pointBackgroundColor = pal.actual;
-      }
-      if (chart.data.datasets[1]) {
-        chart.data.datasets[1].borderColor = pal.ahead;
-        chart.data.datasets[1].backgroundColor = cvs
-          ? gradientPair(cvs, pal.ahead, 0.16, 0.01) : pal.aheadFill;
-        chart.data.datasets[1].pointBackgroundColor = pal.ahead;
-      }
+      chart.data.datasets.forEach(ds => {
+        if (ds.id === "actual") {
+          ds.borderColor = pal.actual;
+          ds.backgroundColor = cvs ? gradientPair(cvs, pal.actual, 0.26, 0.02) : pal.actualFill;
+          ds.pointBackgroundColor = pal.actual;
+        } else if (ds.id === "ahead") {
+          ds.borderColor = pal.ahead;
+          ds.backgroundColor = cvs ? gradientPair(cvs, pal.ahead, 0.16, 0.01) : pal.aheadFill;
+          ds.pointBackgroundColor = pal.ahead;
+        } else if (ds.id === "nowcast") {
+          ds.borderColor = pal.nowcast;
+          ds.pointBackgroundColor = pal.nowcast;
+        } else if (ds.id === "solcast") {
+          ds.borderColor = pal.solcastEst;
+          ds.pointBackgroundColor = pal.solcastEst;
+        } else if (ds.id === "p90" || ds.id === "p10") {
+          ds.borderColor = pal.bandBorder;
+          ds.pointBackgroundColor = pal.locked;
+        } else if (ds.id === "p50") {
+          ds.borderColor = pal.locked;
+          ds.pointBackgroundColor = pal.locked;
+        }
+      });
+      chart.update("none");
+      _renderHtmlLegend(chart);
     }
     if (key === "solcastPreview" && Array.isArray(chart.data?.datasets)) {
-      if (chart.data.datasets[0]) {
-        chart.data.datasets[0].borderColor = "rgba(0,0,0,0)";
-        chart.data.datasets[0].backgroundColor = "rgba(0,0,0,0)";
-      }
-      if (chart.data.datasets[1]) {
-        chart.data.datasets[1].borderColor = "rgba(0,0,0,0)";
-        chart.data.datasets[1].backgroundColor = pal.bandFill;
-      }
-      if (chart.data.datasets[2]) {
-        chart.data.datasets[2].borderColor = pal.actual;
-        chart.data.datasets[2].backgroundColor = cvs
-          ? gradientPair(cvs, pal.actual, 0.22, 0.02) : pal.actualFill;
-        chart.data.datasets[2].pointBackgroundColor = pal.actual;
-      }
+      chart.data.datasets.forEach(ds => {
+        if (ds.label === "Actual (MWh)") {
+          ds.borderColor = pal.actual;
+          ds.backgroundColor = cvs ? gradientPair(cvs, pal.actual, 0.32, 0.02) : pal.actualFill;
+          ds.pointBackgroundColor = pal.actual;
+        } else if (ds.label === "P50 (locked base)" || (ds.label && ds.label.includes("band"))) {
+          ds.borderColor = "rgba(0,0,0,0)";
+          ds.backgroundColor = ds.label === "P10 (band bottom)" ? pal.bandFill : "rgba(0,0,0,0)";
+        }
+      });
       if (chart.data.datasets[3]) {
         chart.data.datasets[3].borderColor = pal.ahead;
         chart.data.datasets[3].backgroundColor = "transparent";
@@ -4552,12 +4567,32 @@ function setSideNavOpen(open, persist = true) {
 function setupSideNav() {
   const toggleBtn = $("navToggleBtn");
   const sideNav = $("sideNav");
+  const closeBtn = $("sideNavCloseBtn");
+  const mobMoreBtn = $("mobMoreBtn");
+  const backdrop = $("sideNavBackdrop");
+
   // Always start closed on app load.
   setSideNavOpen(false, false);
   if (toggleBtn) {
     toggleBtn.addEventListener("click", () => {
       const next = !document.body.classList.contains("sidebar-open");
       setSideNavOpen(next, true);
+    });
+  }
+  if (closeBtn) {
+    closeBtn.addEventListener("click", () => {
+      setSideNavOpen(false, true);
+    });
+  }
+  if (mobMoreBtn) {
+    mobMoreBtn.addEventListener("click", () => {
+      const next = !document.body.classList.contains("sidebar-open");
+      setSideNavOpen(next, true);
+    });
+  }
+  if (backdrop) {
+    backdrop.addEventListener("click", () => {
+      setSideNavOpen(false, true);
     });
   }
 
@@ -4567,6 +4602,7 @@ function setupSideNav() {
     const target = ev.target;
     if (!target) return;
     if (toggleBtn && toggleBtn.contains(target)) return;
+    if (mobMoreBtn && mobMoreBtn.contains(target)) return;
     if (sideNav && sideNav.contains(target)) return;
     setSideNavOpen(false, true);
   });
@@ -4608,6 +4644,10 @@ function setupNav() {
         }
       }
     });
+  });
+
+  document.querySelectorAll(".mob-nav-btn[data-page]").forEach((btn) => {
+    btn.addEventListener("click", () => switchPage(btn.dataset.page));
   });
   initNavDrag();
 }
@@ -4847,12 +4887,13 @@ function switchPage(page) {
     .querySelectorAll(".page")
     .forEach((p) => p.classList.remove("active"));
   document
-    .querySelectorAll(".nav-btn")
+    .querySelectorAll(".nav-btn, .mob-nav-btn")
     .forEach((b) => b.classList.remove("active"));
   const pg = $("page-" + page);
   if (pg) pg.classList.add("active");
-  const btn = document.querySelector(`[data-page="${page}"]`);
-  if (btn) btn.classList.add("active");
+  document
+    .querySelectorAll(`[data-page="${page}"]`)
+    .forEach((b) => b.classList.add("active"));
   if (window.innerWidth <= 1200) setSideNavOpen(false, true);
 
   if (page === "inverters" || page === "camera") {
@@ -4978,8 +5019,8 @@ function openGuideModal() {
   const iframe = $("guideIframe");
   if (iframe) {
     iframe.removeAttribute("srcdoc");
-    if (!iframe.src || iframe.src === "about:blank" || !iframe.src.endsWith("/user-guide.html")) {
-      iframe.src = "/user-guide.html";
+    if (!iframe.src || iframe.src === "about:blank" || !iframe.src.endsWith("/docs/ADSI-Dashboard-User-Guide.html")) {
+      iframe.src = "/docs/ADSI-Dashboard-User-Guide.html";
     }
   }
   const title = m.querySelector(".guide-modal-title");
@@ -5137,6 +5178,11 @@ function setActiveSettingsSection(sectionId, persist = true) {
 
   renderActiveSettingsMeta(activeId);
 
+  const sel = $("settingsSectionSelect");
+  if (sel && sel.value !== activeId) {
+    sel.value = activeId;
+  }
+
   document
     .querySelectorAll("#settingsSectionMenu .settings-menu-btn")
     .forEach((btn) => {
@@ -5217,9 +5263,15 @@ function applyLocalBackupModeVisibility() {
 }
 
 function initSettingsSectionNav() {
-  const menu = $("settingsSectionMenu");
-  if (!menu) return;
+  const sel = $("settingsSectionSelect");
+  if (sel && sel.dataset.bound !== "1") {
+    sel.dataset.bound = "1";
+    sel.addEventListener("change", (e) => {
+      setActiveSettingsSection(e.target.value, true);
+    });
+  }
 
+  const menu = $("settingsSectionMenu");
   if (menu && menu.dataset.bound !== "1") {
     menu.dataset.bound = "1";
     // Complete the ARIA tab pattern: the menu is role="tablist", so each button
@@ -6466,6 +6518,7 @@ async function loadSettings() {
     $("setForecastProvider").value = s.forecastProvider || "ml_local";
     if ($("setForecastEstActualWeight")) $("setForecastEstActualWeight").value = s.forecastEstActualWeight ?? "";
     if ($("setForecastIntradayBlendMax")) $("setForecastIntradayBlendMax").value = s.forecastIntradayBlendMax ?? "";
+    if ($("setForecastVirtualNowcastMode")) $("setForecastVirtualNowcastMode").value = ["off", "shadow", "active"].includes(String(s.forecastVirtualNowcastMode || "off").toLowerCase()) ? String(s.forecastVirtualNowcastMode || "off").toLowerCase() : "off";
     $("setSolcastBaseUrl").value = s.solcastBaseUrl || "https://api.solcast.com.au";
     $("setSolcastAccessMode").value = s.solcastAccessMode || "toolkit";
     $("setSolcastApiKey").value = s.solcastApiKey || "";
@@ -7763,6 +7816,7 @@ async function saveSettings() {
       const val = Number(raw);
       return Number.isFinite(val) && val >= 0.0 && val <= 1.0 ? String(val) : "";
     })(),
+    forecastVirtualNowcastMode: $("setForecastVirtualNowcastMode")?.value || "off",
     ...solcastConfig,
     plantLatitude:  Number($("setPlantLatitude")?.value  ?? ""),
     plantLongitude: Number($("setPlantLongitude")?.value ?? ""),
@@ -10934,7 +10988,7 @@ function buildGridControlPane() {
 
       <div id="gcSafetyBanner" class="apc-lockout-banner">
         <span class="mdi mdi-alert-circle-outline" aria-hidden="true"></span>
-        <span><b>Writes are DISABLED.</b> Enabling requires (1) security review, (2) 2-week single-inverter soak, (3) operator sign-off, and (4) <code>gridControlEnabled = "1"</code> in settings. Read-back works regardless. See <a href="user-guide.html#s6" target="_blank">User Guide → Plant Cap</a>.</span>
+        <span><b>Writes are DISABLED.</b> Enabling requires (1) security review, (2) 2-week single-inverter soak, (3) operator sign-off, and (4) <code>gridControlEnabled = "1"</code> in settings. Read-back works regardless. See <a href="/docs/ADSI-Dashboard-User-Guide.html#s6" target="_blank">User Guide → Plant Cap</a>.</span>
       </div>
 
       <div class="apc-form-grid">
@@ -11030,19 +11084,27 @@ function buildGridControlPane() {
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:10px;padding:8px 14px 14px;">
         <div class="cmp-chart-card">
           <div class="cmp-chart-title">P vs f <span class="cmp-chart-hint">(NGCP 59.7–60.3 Hz continuous · 58.2–61.8 Hz withstand)</span></div>
-          <canvas id="gmChartPf" height="180"></canvas>
+          <div class="cmp-chart-wrap">
+            <canvas id="gmChartPf" height="180"></canvas>
+          </div>
         </div>
         <div class="cmp-chart-card">
           <div class="cmp-chart-title">Q vs V <span class="cmp-chart-hint">(±5% nominal band shaded)</span></div>
-          <canvas id="gmChartQv" height="180"></canvas>
+          <div class="cmp-chart-wrap">
+            <canvas id="gmChartQv" height="180"></canvas>
+          </div>
         </div>
         <div class="cmp-chart-card">
           <div class="cmp-chart-title">dP/dt — ramp rate <span class="cmp-chart-hint">(red line = configured APC ramp limit when enabled)</span></div>
-          <canvas id="gmChartDp" height="180"></canvas>
+          <div class="cmp-chart-wrap">
+            <canvas id="gmChartDp" height="180"></canvas>
+          </div>
         </div>
         <div class="cmp-chart-card">
           <div class="cmp-chart-title">Observed PF <span class="cmp-chart-hint">(NGCP 0.95 lag/lead boundaries)</span></div>
-          <canvas id="gmChartPfTs" height="180"></canvas>
+          <div class="cmp-chart-wrap">
+            <canvas id="gmChartPfTs" height="180"></canvas>
+          </div>
         </div>
       </div>
     </div>`;
@@ -13451,6 +13513,9 @@ function updateInverterCards() {
   if (mncEl) mncEl.textContent = activeNodes;
   const mntEl = $("metricNodeTotal");
   if (mntEl) mntEl.textContent = `/ ${invCount * nodeCount}`; // designed total, not configured-only
+  if (State.invDetailInv) {
+    renderInverterDetailStats(State.invDetailInv);
+  }
   renderTodayKwhFromPac();
 }
 
@@ -14956,9 +15021,9 @@ function filterInverters() {
 function clearInverterDetail() {
   // Return the inv-card to the grid before hiding the panel
   const inv = State.invDetailInv;
+  const grid = $("invGrid");
   if (inv) {
     const card = document.getElementById(`inv-card-${inv}`);
-    const grid = $("invGrid");
     if (card && grid && !grid.contains(card)) {
       // re-insert among sibling inv-cards in numeric order
       const allCards = [...grid.querySelectorAll(".inv-card")];
@@ -14967,6 +15032,9 @@ function clearInverterDetail() {
       grid.insertBefore(card, after || null);
     }
   }
+  if (grid) grid.style.display = "";
+  const layoutLabel = $("invGridLayout")?.closest("label");
+  if (layoutLabel) layoutLabel.style.display = "";
   const panel = $("invDetailPanel");
   if (panel) panel.style.display = "none";
   if (State.invDetailRefreshTimer) {
@@ -14987,6 +15055,11 @@ async function loadInverterDetail(inv) {
   State.invDetailInv = inv;
   State.invDetailLoading = true;
 
+  const grid = $("invGrid");
+  if (grid) grid.style.display = "none";
+  const layoutLabel = $("invGridLayout")?.closest("label");
+  if (layoutLabel) layoutLabel.style.display = "none";
+
   const panel = $("invDetailPanel");
   if (!panel) return;
   panel.style.display = "flex";
@@ -14996,10 +15069,26 @@ async function loadInverterDetail(inv) {
   const slot = $("invDetailCardSlot");
   if (card && slot) {
     slot.innerHTML = "";
+    card.style.display = "";
     slot.appendChild(card);
   }
 
   const invLabel = getInverterDisplayLabel(inv, { includeIp: true });
+  const headingEl = $("invDetailHeading");
+  if (headingEl) headingEl.textContent = `${invLabel} Telemetry & Status`;
+
+  const backBtn = $("btnBackToFleet");
+  if (backBtn && !backBtn._bound) {
+    backBtn._bound = true;
+    backBtn.addEventListener("click", () => {
+      const invFilterEl = $("invFilter");
+      if (invFilterEl) {
+        invFilterEl.value = "all";
+        filterInverters();
+      }
+    });
+  }
+
   const statsEl = $("invDetailStats");
   const alarmsEl = $("invDetailAlarms");
   const historyEl = $("invDetailHistory");
@@ -15133,17 +15222,22 @@ function renderInverterDetailStats(inv) {
   ).length;
 
   const chips = [
-    { label: "Today Energy", value: kwh.toFixed(2),                unit: "kWh" },
-    { label: "DC Power",     value: (pdc / 1000).toFixed(2),       unit: "kW"  },
-    { label: "Today Availability", value: availPct !== null ? availPct.toFixed(1) : "—", unit: availPct !== null ? "%" : "" },
-    { label: "Active Nodes", value: String(nodeCount),             unit: "/ " + totalNodes },
+    { label: "Today Energy", value: Number.isFinite(kwh) ? kwh.toFixed(2) : "—", unit: "kWh", icon: "mdi-flash-outline", color: "var(--accent)" },
+    { label: "DC Power", value: (pdc / 1000).toFixed(2), unit: "kW", icon: "mdi-solar-power-variant-outline", color: "var(--amber, #f59e0b)" },
+    { label: "Today Availability", value: availPct !== null ? availPct.toFixed(1) : "—", unit: availPct !== null ? "%" : "", icon: "mdi-chart-timeline-variant", color: "var(--cyan, #06b6d4)" },
+    { label: "Active Nodes", value: String(nodeCount), unit: "/ " + totalNodes, icon: "mdi-server-network", color: "var(--green, #10b981)" },
   ];
 
   el.innerHTML = chips.map((c) => `
     <div class="inv-detail-stat">
-      <span class="inv-detail-stat-label">${c.label}</span>
-      <span class="inv-detail-stat-value">${c.value}</span>
-      <span class="inv-detail-stat-unit">${c.unit}</span>
+      <div class="inv-detail-stat-header">
+        <span class="inv-detail-stat-label">${c.label}</span>
+        <span class="mdi ${c.icon}" style="color:${c.color}; font-size: 15px;"></span>
+      </div>
+      <div class="inv-detail-stat-row">
+        <span class="inv-detail-stat-value">${c.value}</span>
+        <span class="inv-detail-stat-unit">${c.unit}</span>
+      </div>
     </div>`).join("");
 }
 
@@ -20856,11 +20950,40 @@ function slotToHHMM(slot) {
   return `${pad2(hour)}:${pad2(min)}`;
 }
 
+function buildNowcastDisplayModel(meta = {}, formatTimestamp = (value) => String(value)) {
+  const mode = String(meta.configured_mode || "off");
+  const algorithm = String(meta.series_algorithm || "unknown");
+  const seriesKind = String(meta.series_kind || "dayahead_fallback");
+  const runId = meta.series_run_id || "—";
+  const provenanceStatus = String(meta.provenance_status || "unknown");
+  const generatedTs = Number(meta.series_generated_ts || 0);
+  const latestAttempt = meta.latest_attempt || null;
+  const challenger = meta.challenger_meta || null;
+  const plottedLabel = seriesKind === "dayahead_fallback" ? "day-ahead fallback" : algorithm;
+  const challengerLabel = challenger?.algorithm_version
+    ? ` · challenger ${String(challenger.algorithm_version)}`
+    : "";
+  return {
+    mode,
+    algorithm,
+    seriesKind,
+    runId,
+    provenanceStatus,
+    generatedTs,
+    generatedLabel: generatedTs ? formatTimestamp(generatedTs) : "unknown",
+    latestAttempt,
+    challenger,
+    summary: `${mode} · plotted ${plottedLabel}${challengerLabel}`,
+  };
+}
+
 function renderDayAheadChart(payload) {
   const locked = payload?.locked;
   const meta = payload?.meta;
+  const lockedRows = Array.isArray(locked?.rows) ? locked.rows : [];
+  const nowcastRows = Array.isArray(payload?.ml_final?.rows) ? payload.ml_final.rows : [];
 
-  if (!locked || !Array.isArray(locked.rows) || locked.rows.length === 0) {
+  if (lockedRows.length === 0 && nowcastRows.length === 0) {
     State.dayAheadLockedPayload = null;
     return;
   }
@@ -20871,15 +20994,17 @@ function renderDayAheadChart(payload) {
   // Update header fields in the merged card
   const capturedEl = $("anaDayAheadCaptured");
   if (capturedEl) {
-    const reason = locked.capture_reason || "unknown";
-    capturedEl.textContent = `captured: ${locked.captured_local || "—"} (${reason})`;
+    const reason = locked?.capture_reason || "unknown";
+    capturedEl.textContent = lockedRows.length > 0
+      ? `captured: ${locked?.captured_local || "—"} (${reason})`
+      : "captured: —";
   }
 
   const spreadEl = $("anaDayAheadSpread");
   if (spreadEl) {
-    const avg = Number(locked.spread_pct_cap_avg || 0).toFixed(1);
-    const max = Number(locked.spread_pct_cap_max || 0).toFixed(1);
-    spreadEl.textContent = `spread: ${avg}% avg / ${max}% max`;
+    const avg = Number(locked?.spread_pct_cap_avg || 0).toFixed(1);
+    const max = Number(locked?.spread_pct_cap_max || 0).toFixed(1);
+    spreadEl.textContent = lockedRows.length > 0 ? `spread: ${avg}% avg / ${max}% max` : "spread: —";
   }
 
   const withinBandEl = $("anaDayAheadWithinBand");
@@ -20893,6 +21018,59 @@ function renderDayAheadChart(payload) {
     const variance = Number(meta?.variance_vs_p50_pct || 0);
     const sign = variance >= 0 ? "+" : "";
     varianceEl.textContent = `variance vs P50: ${sign}${variance.toFixed(1)}%`;
+  }
+
+  const nowcastEl = $("anaNowcastMeta");
+  const nowcastSummary = $("anaNowcastMetaSummary");
+  const nowcastBody = $("anaNowcastMetaBody");
+  if (nowcastEl && nowcastSummary && nowcastBody) {
+    const nm = payload?.ml_final?.meta || {};
+    const display = buildNowcastDisplayModel(nm, fmtTsWithAge);
+    const {
+      mode,
+      algorithm,
+      seriesKind,
+      runId,
+      provenanceStatus: provStatus,
+      generatedLabel,
+      latestAttempt,
+      challenger,
+    } = display;
+    const eligible = Number(nm.eligible_slots || 0);
+    const strength = Number(nm.strength || 0);
+    const fallback = Boolean(nm.fallback_used);
+
+    nowcastEl.dataset.mode = mode;
+    nowcastEl.dataset.fallback = String(fallback);
+    nowcastEl.dataset.kind = seriesKind;
+    nowcastEl.dataset.provenance = provStatus;
+    nowcastEl.dataset.latestStatus = String(latestAttempt?.run_status || "unknown");
+
+    nowcastSummary.textContent = display.summary;
+    nowcastBody.innerHTML = [
+      `<div>Plotted algorithm: <strong>${escapeHtml(algorithm)}</strong></div>`,
+      `<div>Kind: <strong>${escapeHtml(seriesKind)}</strong></div>`,
+      `<div>Run ID: <span class="hash-text">${escapeHtml(String(runId))}</span></div>`,
+      `<div>Provenance: <strong>${escapeHtml(String(provStatus))}</strong></div>`,
+      `<div>Generated: <strong>${escapeHtml(generatedLabel)}</strong></div>`,
+      `<div>Eligible observations: <strong>${eligible}</strong></div>`,
+      `<div>Correction strength: <strong>${(strength * 100).toFixed(1)}%</strong></div>`,
+      `<div>Cutoff: <strong>${Number.isFinite(nm.cutoff_slot) ? slotToHHMM(Number(nm.cutoff_slot)) : "N/A"}</strong></div>`,
+      `<div>Authoritative write: <strong>${escapeHtml(String(nm.authoritative_status || "unknown"))}</strong></div>`,
+      latestAttempt
+        ? `<div>Latest attempt: <strong>${escapeHtml(String(latestAttempt.run_status || "unknown"))}</strong>` +
+          ` / write ${escapeHtml(String(latestAttempt.authoritative_write_status || "unknown"))}` +
+          ` / ${escapeHtml(latestAttempt.generated_ts ? fmtTsWithAge(Number(latestAttempt.generated_ts)) : "unknown")}</div>`
+        : "",
+      challenger
+        ? `<div>Challenger: <strong>${escapeHtml(String(challenger.algorithm_version || "unknown"))}</strong>` +
+          ` / ${escapeHtml(String(challenger.status || "unknown"))}` +
+          `${challenger.evaluation_only ? " / evaluation only" : ""}</div>`
+        : "",
+      latestAttempt?.fallback_reason
+        ? `<div>Fallback reason: <strong>${escapeHtml(String(latestAttempt.fallback_reason))}</strong></div>`
+        : "",
+    ].filter(Boolean).join("");
   }
 
   // Re-render the merged total chart with locked overlays
@@ -21246,6 +21424,10 @@ function ensureAnalyticsCards() {
         '<span id="anaDayAheadSpread">spread: —</span>' +
         '<span id="anaDayAheadWithinBand">—</span>' +
         '<span id="anaDayAheadVariance">—</span>' +
+        '<details id="anaNowcastMeta" class="ana-nowcast-meta" data-mode="off" data-fallback="false">' +
+          '<summary id="anaNowcastMetaSummary" title="Virtual-nowcast run metadata">nowcast: off</summary>' +
+          '<div id="anaNowcastMetaBody" class="ana-nowcast-meta-body"></div>' +
+        '</details>' +
       '</div>' +
     '</div>' +
     '<div class="ana-chart-legend" id="anaChartLegend"></div>' +
@@ -21677,12 +21859,14 @@ function upsertTotalCompareChart(
   const COL_BAND    = pal.lockedBand;   // band border
   const COL_BAND_BG = pal.lockedBandFill; // band fill
   const COL_SOLCAST = pal.solcastEst;   // Solcast est. actual
+  const COL_NOWCAST = pal.nowcast;      // local ML virtual nowcast
 
   function buildDatasets(cvs) {
     const actualGrad = cvs ? gradientPair(cvs, COL_ACTUAL, 0.32, 0.02) : pal.actualFill;
 
     const datasets = [
       {
+        id: "actual",
         label: "Actual (MWh)",
         data: actual,
         borderColor: COL_ACTUAL,
@@ -21698,6 +21882,7 @@ function upsertTotalCompareChart(
         order: 0,
       },
       {
+        id: "ahead",
         label: "Day-ahead (MWh)",
         data: ahead,
         borderColor: COL_AHEAD,
@@ -21717,14 +21902,18 @@ function upsertTotalCompareChart(
 
     // Merge locked day-ahead P10/P50/P90 + Solcast intraday if available
     const lp = State.dayAheadLockedPayload;
-    if (lp && lp.locked && Array.isArray(lp.locked.rows) && lp.locked.rows.length > 0) {
+    if (lp) {
       const lockedByLabel = new Map();
-      (lp.locked.rows || []).forEach(r => {
+      (lp.locked?.rows || []).forEach(r => {
         lockedByLabel.set(slotToHHMM(Number(r.slot)), r);
       });
       const intradayByLabel = new Map();
       (lp.intraday_solcast?.rows || []).forEach(r => {
         intradayByLabel.set(slotToHHMM(Number(r.slot)), r);
+      });
+      const nowcastByLabel = new Map();
+      (lp.ml_final?.rows || []).forEach(r => {
+        nowcastByLabel.set(slotToHHMM(Number(r.slot)), r);
       });
 
       const p90Data = labels.map(lbl => {
@@ -21743,13 +21932,18 @@ function upsertTotalCompareChart(
         const r = intradayByLabel.get(lbl);
         return r && r.est_actual_mw != null ? Number((Number(r.est_actual_mw) / MW_PER_MWH).toFixed(6)) : null;
       });
+      const nowcastData = labels.map(lbl => {
+        const r = nowcastByLabel.get(lbl);
+        return r && r.ml_mw != null ? Number((Number(r.ml_mw) / MW_PER_MWH).toFixed(6)) : null;
+      });
 
       // Band fill: use a proper gradient for visibility
       const bandGrad = cvs ? gradientPair(cvs, COL_P50, 0.18, 0.03) : COL_BAND_BG;
 
       // Insert band + P50 — high order = drawn behind Actual/Day-ahead
-      datasets.unshift(
+      if (lockedByLabel.size > 0) datasets.unshift(
         {
+          id: "p90",
           label: "P90 (band top)",
           data: p90Data,
           borderColor: COL_BAND,
@@ -21765,6 +21959,7 @@ function upsertTotalCompareChart(
           order: 10,
         },
         {
+          id: "p10",
           label: "P10 (band bottom)",
           data: p10Data,
           borderColor: COL_BAND,
@@ -21780,6 +21975,7 @@ function upsertTotalCompareChart(
           order: 11,
         },
         {
+          id: "p50",
           label: "P50 (locked)",
           data: p50Data,
           borderColor: COL_P50,
@@ -21799,6 +21995,7 @@ function upsertTotalCompareChart(
       const hasIntraday = intradayData.some(v => v != null);
       if (hasIntraday) {
         datasets.push({
+          id: "solcast",
           label: "Solcast est. actual",
           data: intradayData,
           borderColor: COL_SOLCAST,
@@ -21812,6 +22009,38 @@ function upsertTotalCompareChart(
           fill: false,
           tension: 0.3,
           order: 3,
+        });
+      }
+
+      // Keep the local ML nowcast visually and semantically separate from the
+      // provider's satellite-derived est_actual overlay. Future segments after
+      // the run cutoff are dashed; assimilated observations remain solid.
+      const hasNowcast = nowcastData.some(v => v != null);
+      if (hasNowcast) {
+        const cutoffSlot = Number.isFinite(lp.ml_final?.meta?.cutoff_slot) ? Number(lp.ml_final?.meta?.cutoff_slot) : null;
+        datasets.push({
+          id: "nowcast",
+          label: (lp.ml_final?.meta?.series_kind === "dayahead_fallback") ? "ML day-ahead fallback" : "ML intraday nowcast",
+          data: nowcastData,
+          borderColor: COL_NOWCAST,
+          backgroundColor: "transparent",
+          borderWidth: 2.4,
+          pointRadius: 0,
+          pointHoverRadius: 3,
+          pointBackgroundColor: COL_NOWCAST,
+          pointBorderWidth: 0,
+          fill: false,
+          tension: 0.25,
+          spanGaps: false,
+          segment: {
+            borderDash: (ctx) => {
+              const label = labels[ctx.p1DataIndex] || "";
+              const parts = String(label).split(":").map(Number);
+              const slot = parts.length === 2 ? (parts[0] * 12) + Math.floor(parts[1] / 5) : -1;
+              return Number.isFinite(cutoffSlot) && slot > cutoffSlot ? [7, 4] : [];
+            },
+          },
+          order: 1,
         });
       }
     }
@@ -21838,6 +22067,7 @@ function upsertTotalCompareChart(
       const hasMetered = meteredData.some(v => v != null);
       if (hasMetered) {
         datasets.push({
+          id: "metered",
           label: "Subs. metered (MWh)",
           data: meteredData,
           borderColor: pal.metered,
@@ -21862,23 +22092,37 @@ function upsertTotalCompareChart(
   const canvas = $(canvasId);
   if (!canvas) return;
   const newDatasets = buildDatasets(canvas);
+  const visibilityById = new Map();
+  if (existing) {
+    existing.data.datasets.forEach((dataset, index) => {
+      if (dataset?.id) visibilityById.set(String(dataset.id), existing.isDatasetVisible(index));
+    });
+  }
 
   // Update in-place if dataset count matches; rebuild only when structure changes
   if (existing && existing.data.datasets.length === newDatasets.length) {
-    // Preserve user's legend toggle state — Chart.js stores visibility
-    // on the dataset meta, accessed via isDatasetVisible()
-    for (let i = 0; i < newDatasets.length; i++) {
-      if (!existing.isDatasetVisible(i)) {
-        newDatasets[i].hidden = true;
-      }
-    }
     existing.data.labels = labels;
     existing.data.datasets = newDatasets;
+    // Dataset order can change while the count remains constant (for example,
+    // Solcast disappears as metered data arrives). Preserve toggles by stable id.
+    newDatasets.forEach((dataset, index) => {
+      const stableId = String(dataset?.id || "");
+      if (stableId && visibilityById.has(stableId)) {
+        existing.setDatasetVisibility(index, visibilityById.get(stableId));
+      }
+    });
     existing.update("none");
+    _renderHtmlLegend(existing);
     return;
   }
 
   // Dataset count changed (locked data arrived/cleared) — full rebuild
+  newDatasets.forEach((dataset) => {
+    const stableId = String(dataset?.id || "");
+    if (stableId && visibilityById.has(stableId)) {
+      dataset.hidden = !visibilityById.get(stableId);
+    }
+  });
   if (existing) {
     existing.destroy();
     State.charts[key] = null;
@@ -21892,11 +22136,29 @@ function upsertTotalCompareChart(
     if (val == null || isNaN(val)) return `${ctx.dataset.label}: —`;
     const mwh = Number(val).toFixed(4);
     const mw = Number(val * MW_PER_MWH).toFixed(3);
-    return `${ctx.dataset.label}: ${mwh} MWh | ${mw} MW`;
+    const valueLine = `${ctx.dataset.label}: ${mwh} MWh | ${mw} MW`;
+    if (ctx.dataset.id !== "nowcast") return valueLine;
+    const nm = State.dayAheadLockedPayload?.ml_final?.meta || {};
+    const generatedTs = Number(nm.series_generated_ts || 0);
+    const cutoffLabel = Number.isFinite(nm.cutoff_slot)
+      ? slotToHHMM(Number(nm.cutoff_slot))
+      : "N/A";
+    const lines = [
+      valueLine,
+      `mode ${nm.configured_mode || "off"} · plotted ${nm.series_algorithm || "unknown"}`,
+      `generated ${generatedTs ? fmtTsWithAge(generatedTs) : "unknown"} · cutoff ${cutoffLabel}`,
+      `${Number(nm.eligible_slots || 0)} eligible · ${(Number(nm.strength || 0) * 100).toFixed(1)}% strength · provenance ${nm.provenance_status || "unknown"}${nm.fallback_used ? " · fallback" : ""}`,
+    ];
+    if (nm.challenger_meta) {
+      lines.push(
+        `challenger ${nm.challenger_meta.algorithm_version || "unknown"} · ${nm.challenger_meta.status || "unknown"}${nm.challenger_meta.evaluation_only ? " · evaluation only" : ""}`,
+      );
+    }
+    return lines;
   };
   const chartInstance = new Chart(canvas, {
     type: "line",
-    data: { labels, datasets: buildDatasets(canvas) },
+    data: { labels, datasets: newDatasets },
     options: opts,
   });
   State.charts[key] = chartInstance;
@@ -21910,7 +22172,10 @@ function _renderHtmlLegend(chart) {
   chart.data.datasets.forEach((ds, i) => {
     const item = document.createElement("button");
     item.type = "button";
-    item.className = "ana-legend-item" + (ds.hidden ? " ana-legend-off" : "");
+    const isVisible = chart.isDatasetVisible(i);
+    item.className = "ana-legend-item" + (isVisible ? "" : " ana-legend-off");
+    item.setAttribute("aria-pressed", String(isVisible));
+    item.setAttribute("aria-label", `${isVisible ? "Hide" : "Show"} ${ds.label}`);
     const swatch = document.createElement("span");
     swatch.className = "ana-legend-swatch";
     swatch.style.background = ds.borderColor;
@@ -21931,6 +22196,8 @@ function _renderHtmlLegend(chart) {
       chart.setDatasetVisibility(i, !visible);
       chart.update("none");
       item.classList.toggle("ana-legend-off", visible);
+      item.setAttribute("aria-pressed", String(!visible));
+      item.setAttribute("aria-label", `${visible ? "Show" : "Hide"} ${ds.label}`);
     });
     container.appendChild(item);
   });

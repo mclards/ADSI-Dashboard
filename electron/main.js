@@ -4033,6 +4033,18 @@ function startServer(retryCount = 0, skipProcessSetup = false) {
     return;
   }
 
+  // The embedded HTTP server must verify browser logins against the exact
+  // credential file used by Electron IPC. Publish only the absolute path;
+  // passwords and hashes never enter the environment. Standalone server
+  // launches intentionally lack this value and therefore fail closed for
+  // external browser authentication while retaining direct-loopback access.
+  try {
+    process.env.ADSI_LOGIN_CREDENTIAL_PATH = getLoginCredPath();
+  } catch (err) {
+    delete process.env.ADSI_LOGIN_CREDENTIAL_PATH;
+    console.warn("[auth] browser credential path unavailable:", err.message);
+  }
+
   // Run the Express server in-process for both packaged and workspace runs.
   // This avoids stale detached dev server processes serving old backend code.
   const ok = startEmbeddedServer(serverEntry);
@@ -6045,7 +6057,7 @@ ipcMain.handle("download-user-guide-pdf", async (event) => {
       show: false,
       webPreferences: { offscreen: true },
     });
-    await hidden.loadURL(`${SERVER_URL}/user-guide.html`);
+    await hidden.loadURL(`${SERVER_URL}/docs/ADSI-Dashboard-User-Guide.html`);
     // inject light-mode overrides so PDF renders with readable contrast
     await hidden.webContents.insertCSS(`
       :root {

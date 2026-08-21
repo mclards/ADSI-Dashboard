@@ -5,8 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ADSI Inverter Dashboard Sign In</title>
     <link rel="manifest" href="/manifest.json" />
+    <meta name="theme-color" content="#050c17" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+    <meta name="apple-mobile-web-app-title" content="ADSI Dashboard" />
     <link rel="apple-touch-icon" href="/assets/icon-256.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link
@@ -637,7 +639,59 @@
         const rememberCheck = document.getElementById("rememberMe");
         const modalBg = document.getElementById("modal-bg");
         const resetBg = document.getElementById("reset-bg");
-        const api = window.loginAPI;
+        const electronLoginApi = window.loginAPI;
+        const api = electronLoginApi || {
+          lastError: "",
+          async checkLogin(username, password) {
+            this.lastError = "";
+            try {
+              const response = await fetch("/api/auth/login", {
+                method: "POST",
+                credentials: "same-origin",
+                cache: "no-store",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ username, password }),
+              });
+              const payload = await response.json().catch(() => ({}));
+              if (!response.ok) {
+                this.lastError = String(payload?.error || "The sign-in details are not valid.");
+                return false;
+              }
+              return true;
+            } catch (_) {
+              this.lastError = "The dashboard server could not complete sign-in.";
+              return false;
+            }
+          },
+          async getRemembered() { return { remember: false }; },
+          async saveRemembered() { return false; },
+          async clearRemembered() { return true; },
+          async changeUsernamePassword() { return false; },
+          async resetPassword() { return false; },
+          loginSuccess() { window.location.replace("/"); },
+          async hasSession() {
+            try {
+              const response = await fetch("/api/auth/session", {
+                credentials: "same-origin",
+                cache: "no-store",
+              });
+              return response.ok;
+            } catch (_) {
+              return false;
+            }
+          },
+        };
+
+        if (!electronLoginApi) {
+          const rememberLabel = rememberCheck?.closest("label");
+          if (rememberLabel) rememberLabel.style.display = "none";
+          const links = document.querySelector(".links");
+          if (links) links.style.display = "none";
+          if (await api.hasSession()) {
+            window.location.replace("/");
+            return;
+          }
+        }
 
         function showMsg(text, type = "success") {
           msg.textContent = text;
@@ -683,7 +737,7 @@
           if (!user || !pass) return showMsg("Enter your username and password.", "error");
 
           const ok = await api.checkLogin(user, pass);
-          if (!ok) return showMsg("The sign-in details are not valid.", "error");
+          if (!ok) return showMsg(api.lastError || "The sign-in details are not valid.", "error");
 
           if (rememberCheck.checked) {
             await api.saveRemembered({ username: user, password: pass, remember: true });

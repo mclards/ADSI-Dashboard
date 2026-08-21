@@ -11,8 +11,10 @@
     />
     <link rel="icon" type="image/x-icon" href="/assets/icon.ico" />
     <link rel="manifest" href="/manifest.json" />
+    <meta name="theme-color" content="#0c0608" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+    <meta name="apple-mobile-web-app-title" content="ADSI Dashboard" />
     <link rel="apple-touch-icon" href="/assets/icon-256.png" />
     <link rel="stylesheet" href="css/style.css" />
     <script>
@@ -113,95 +115,88 @@
       <button id="licenseNoticeUpload" type="button" title="Upload a new license file to replace the current one.">Upload Replacement License</button>
     </div>
     <aside id="sideNav" class="side-nav">
+      <div class="side-nav-header">
+        <div class="side-nav-title-row">
+          <span class="mdi mdi-view-dashboard-outline side-nav-header-ico" aria-hidden="true"></span>
+          <span class="side-nav-header-title">Navigation</span>
+        </div>
+        <div class="side-nav-header-right">
+          <div class="side-nav-status-pill" title="Real-time telemetry and control active">
+            <span class="side-nav-pulse-dot"></span>
+            <span>LIVE</span>
+          </div>
+          <button id="sideNavCloseBtn" class="side-nav-close-btn" type="button" aria-label="Close navigation" title="Close menu">
+            <span class="mdi mdi-close"></span>
+          </button>
+        </div>
+      </div>
       <nav class="tb-nav" id="mainNav">
         <button class="nav-btn active" data-page="inverters" title="Live inverter status, node-level control, and real-time output monitoring.">
-          <span class="nav-icon"><span class="mdi mdi-flash"></span></span><span>Inverters</span>
+          <span class="nav-icon"><span class="mdi mdi-flash"></span></span>
+          <span class="nav-label">Inverters</span>
+          <span class="nav-btn-arrow mdi mdi-chevron-right" aria-hidden="true"></span>
         </button>
-        <button class="nav-btn" data-page="analytics" title="Daily energy analytics with interval charts and day-ahead forecast comparison.">
-          <span class="nav-icon"><span class="mdi mdi-chart-line"></span></span><span>Analytics</span>
+        <button class="nav-btn" data-page="igbt-health" title="Power electronics asset health: IGBT module aging + AC contactor (K1) wear across the 27-inverter fleet.">
+          <span class="nav-icon"><span class="mdi mdi-heart-pulse"></span></span>
+          <span class="nav-label">Asset Health</span>
+          <span class="nav-btn-arrow mdi mdi-chevron-right" aria-hidden="true"></span>
         </button>
         <button class="nav-btn" data-page="forecast" title="Dedicated forecast workspace for day-ahead generation and Solcast provider management.">
-          <span class="nav-icon"><span class="mdi mdi-weather-partly-cloudy"></span></span><span>Forecast</span>
+          <span class="nav-icon"><span class="mdi mdi-weather-partly-cloudy"></span></span>
+          <span class="nav-label">Forecast</span>
+          <span class="nav-btn-arrow mdi mdi-chevron-right" aria-hidden="true"></span>
+        </button>
+        <button class="nav-btn" data-page="analytics" title="Daily energy analytics with interval charts and day-ahead forecast comparison.">
+          <span class="nav-icon"><span class="mdi mdi-chart-line"></span></span>
+          <span class="nav-label">Analytics</span>
+          <span class="nav-btn-arrow mdi mdi-chevron-right" aria-hidden="true"></span>
         </button>
         <button class="nav-btn" data-page="alarms" title="Alarm episode history with severity, duration, and acknowledgement tracking.">
-          <span class="nav-icon"><span class="mdi mdi-bell-alert-outline"></span></span><span>Alarms</span>
+          <span class="nav-icon"><span class="mdi mdi-bell-alert-outline"></span></span>
+          <span class="nav-label">Alarms</span>
           <span class="nav-badge" id="alarmBadge" aria-live="polite" style="display: none">0</span>
+          <span class="nav-btn-arrow mdi mdi-chevron-right" aria-hidden="true"></span>
         </button>
-        <button class="nav-btn" data-page="energy" title="Per-node 5-minute parameter log (Pdc/Vdc/Idc, Vac1-3, Iac1-3, Pac, CosΦ, Freq, Alarms). Live for today, history for past dates.">
-          <span class="nav-icon"><span class="mdi mdi-table-large"></span></span><span>Parameters</span>
+        <button class="nav-btn" data-page="energy" title="Per-node 5-minute parameter log (Pdc/Vdc/Idc, Vac1-3, Iac1-3, Pac, CosΦ, Freq, Alarms).">
+          <span class="nav-icon"><span class="mdi mdi-table-large"></span></span>
+          <span class="nav-label">Parameters</span>
+          <span class="nav-btn-arrow mdi mdi-chevron-right" aria-hidden="true"></span>
         </button>
         <button class="nav-btn" data-page="audit" title="Operator command history with timestamps, scope, and results.">
-          <span class="nav-icon"><span class="mdi mdi-clipboard-text-outline"></span></span><span>Audit</span>
+          <span class="nav-icon"><span class="mdi mdi-clipboard-text-outline"></span></span>
+          <span class="nav-label">Audit</span>
+          <span class="nav-btn-arrow mdi mdi-chevron-right" aria-hidden="true"></span>
         </button>
         <button class="nav-btn" data-page="report" title="Daily performance report with energy, output, availability, and alarm counts per inverter.">
-          <span class="nav-icon"><span class="mdi mdi-file-chart-outline"></span></span><span>Report</span>
+          <span class="nav-icon"><span class="mdi mdi-file-chart-outline"></span></span>
+          <span class="nav-label">Report</span>
+          <span class="nav-btn-arrow mdi mdi-chevron-right" aria-hidden="true"></span>
         </button>
         <button class="nav-btn" data-page="export" title="Export operational data, alarms, reports, and forecasts to Excel or CSV.">
-          <span class="nav-icon"><span class="mdi mdi-export-variant"></span></span><span>Export</span>
+          <span class="nav-icon"><span class="mdi mdi-export-variant"></span></span>
+          <span class="nav-label">Export</span>
+          <span class="nav-btn-arrow mdi mdi-chevron-right" aria-hidden="true"></span>
         </button>
-        <button class="nav-btn" data-page="plant-cap" title="Plant Controller — Active Power Control + grid test runners (T2 Frequency Withstand, T3 Q-V, T5 APC Sweep) + report archive.">
-          <span class="nav-icon"><span class="mdi mdi-flash-alert"></span></span><span>Plant Controller</span>
+        <button class="nav-btn" data-page="plant-cap" title="Plant Controller — Active Power Control + grid test runners + report archive.">
+          <span class="nav-icon"><span class="mdi mdi-flash-alert"></span></span>
+          <span class="nav-label">Plant Controller</span>
+          <span class="nav-btn-arrow mdi mdi-chevron-right" aria-hidden="true"></span>
         </button>
-        <button class="nav-btn" data-page="igbt-health" title="Power electronics asset health: IGBT module aging + AC contactor (K1) wear across the 27-inverter fleet. Composite scores, tier filters, linked-findings cross-correlation, and capital-planning CSV export.">
-          <span class="nav-icon"><span class="mdi mdi-heart-pulse"></span></span><span>Asset Health</span>
-        </button>
-        <!-- v2.11.x — FIELD CALIB nav entry removed from the dashboard: field
-             calibration is now the standalone "ADSI Utility Tool"
-             (Settings → Utility Tool / Utility Tool Shortcut). The
-             #page-field-calibration markup + fcal JS are intentionally kept
-             because the standalone tool reuses this exact page via the
-             ?calibrator=1 boot hook. Do not delete the page itself. -->
         <button class="nav-btn" data-page="settings" title="Plant configuration, connectivity, license, updates, and cloud backup management.">
-          <span class="nav-icon"><span class="mdi mdi-cog-outline"></span></span><span>Settings</span>
+          <span class="nav-icon"><span class="mdi mdi-cog-outline"></span></span>
+          <span class="nav-label">Settings</span>
+          <span class="nav-btn-arrow mdi mdi-chevron-right" aria-hidden="true"></span>
         </button>
-        <section id="aboutSection" class="side-about-card" aria-label="About">
-          <div class="side-about-info">
-            <div class="side-about-head">
-              <span class="side-about-appname">ADSI Inverter Dashboard</span>
-              <span class="side-about-ver">v2.11.6</span>
-            </div>
-            <a
-              class="side-about-link"
-              href="https://www.alterpowerdigos.com/"
-              target="_blank"
-              rel="noopener noreferrer"
-              aria-label="Open Alterpower Digos Solar Plant website"
-            >
-              <span class="mdi mdi-web" aria-hidden="true"></span>
-              <span>alterpowerdigos.com</span>
-            </a>
-            <div class="side-about-meta">
-              <div class="side-about-row">
-                <span>License</span>
-                <b id="aboutLicenseStatus" class="side-about-inline-status">—</b>
-              </div>
-              <div class="side-about-row">
-                <span>Updates</span>
-                <b id="aboutUpdateStatus">—</b>
-              </div>
-              <div class="side-about-row side-about-row-path">
-                <span>Data Directory</span>
-                <code id="setDataDir">—</code>
-              </div>
-            </div>
-          </div>
-          <div class="side-about-actions">
-            <button id="btnAboutCheckUpdate" class="btn btn-outline" title="Check if a newer version is available on the release channel.">
-              <span class="mdi mdi-update" aria-hidden="true"></span>
-              <span>Check for Updates</span>
-            </button>
-            <button id="btnOpenGuide" class="btn btn-outline" title="Open the built-in operator guide for this application.">
-              <span class="mdi mdi-book-open-page-variant-outline" aria-hidden="true"></span>
-              <span>User Guide</span>
-            </button>
-            <button id="btnOpenCredentials" class="btn btn-outline" title="View credentials and authorization keys (requires admin auth key).">
-              <span class="mdi mdi-shield-key-outline" aria-hidden="true"></span>
-              <span>Credentials</span>
-            </button>
-          </div>
-          <div class="side-about-credit"><b>Engr. Clariden Montaño, REE</b> · © 2026</div>
-        </section>
+        <button class="nav-btn" id="remoteSignOutBtn" style="display: none" title="Sign out of the remote web session.">
+          <span class="nav-icon"><span class="mdi mdi-logout"></span></span>
+          <span class="nav-label">Sign Out</span>
+          <span class="nav-btn-arrow mdi mdi-chevron-right" aria-hidden="true"></span>
+        </button>
       </nav>
+      <div class="side-nav-footer">
+        <span class="side-nav-footer-brand">ADSI Inverter Dashboard</span>
+        <span class="side-nav-footer-ver">v2.12.9</span>
+      </div>
     </aside>
 
     <!-- --------------------------- MAIN CONTENT --------------------------------- -->
@@ -213,6 +208,7 @@
             <select id="invFilter" class="sel" aria-label="Filter inverters by status" title="Filter inverter cards by status: all, online, offline, or alarmed.">
               <option value="all">All Inverters</option>
             </select>
+            <button id="btnAckAllInv" class="btn-ack-toolbar" type="button" title="Acknowledge all active alarms" hidden><span class="mdi mdi-check-all" aria-hidden="true"></span>Ack All</button>
             <label
               >Layout
               <select
@@ -232,10 +228,10 @@
             </label>
           </div>
           <div class="tl-center pac-legend-wrap" title="Node output level indicator — based on percentage of rated capacity per node.">
-            <span class="pac-leg" title="Node output at 90% or above rated capacity."><span class="pac-leg-ind pac-leg-high"></span>&#x2265;90%&nbsp;High</span>
-            <span class="pac-leg" title="Node output between 70% and 90% of rated capacity."><span class="pac-leg-ind pac-leg-moderate"></span>&gt;70%&nbsp;Moderate</span>
-            <span class="pac-leg" title="Node output between 40% and 70% of rated capacity."><span class="pac-leg-ind pac-leg-mild"></span>&gt;40%&nbsp;Mild</span>
-            <span class="pac-leg" title="Node output at 40% or below rated capacity."><span class="pac-leg-ind pac-leg-low"></span>&#x2264;40%&nbsp;Low</span>
+            <span class="pac-leg" title="Node output at 90% or above rated capacity."><span class="pac-leg-ind pac-leg-high"></span>&#x2265;90%<span class="pac-leg-desc">&nbsp;High</span></span>
+            <span class="pac-leg" title="Node output between 70% and 90% of rated capacity."><span class="pac-leg-ind pac-leg-moderate"></span>&gt;70%<span class="pac-leg-desc">&nbsp;Moderate</span></span>
+            <span class="pac-leg" title="Node output between 40% and 70% of rated capacity."><span class="pac-leg-ind pac-leg-mild"></span>&gt;40%<span class="pac-leg-desc">&nbsp;Mild</span></span>
+            <span class="pac-leg" title="Node output at 40% or below rated capacity."><span class="pac-leg-ind pac-leg-low"></span>&#x2264;40%<span class="pac-leg-desc">&nbsp;Low</span></span>
             <span class="pac-leg" title="Node has an active unacknowledged alarm."><span class="pac-leg-ind pac-leg-blink pac-leg-alarm"></span>Alarm</span>
           </div>
           <div class="tl-right">
@@ -249,22 +245,30 @@
                  title="Modbus polling interval per inverter. Vendor (Ingeteam Level 2) recommends ≤ 1 Hz; faster polling stresses the comm board.">
               Poll: <b id="pollCadenceValue">—</b>/inv
             </div>
-            <button id="btnAckAllInv" class="btn-ack-toolbar" type="button" title="Acknowledge all active alarms" hidden><span class="mdi mdi-check-all" aria-hidden="true"></span>Ack All</button>
           </div>
         </div>
         <div class="inv-page-body">
         <div class="inv-grid" id="invGrid"></div>
         <div id="invDetailPanel" class="inv-detail-panel" style="display:none">
+          <div class="inv-detail-topbar">
+            <div class="inv-detail-title-group">
+              <span class="mdi mdi-solar-panel-large" style="color:var(--accent); font-size: 18px;"></span>
+              <span class="inv-detail-heading" id="invDetailHeading">Inverter Details</span>
+            </div>
+            <button id="btnBackToFleet" class="btn btn-sm" type="button" title="Return to fleet overview">
+              <span class="mdi mdi-view-grid-outline"></span> All Inverters
+            </button>
+          </div>
           <div class="inv-detail-stats" id="invDetailStats"></div>
           <div class="inv-detail-body">
             <div id="invDetailCardSlot" class="inv-detail-card-slot"></div>
             <div class="inv-detail-card inv-detail-alarms-wrap">
-              <div class="inv-detail-card-title">Today's Alarm Activity</div>
+              <div class="inv-detail-card-title"><span class="mdi mdi-alert-circle-outline"></span> Today's Alarm Activity</div>
               <div id="invDetailAlarms"></div>
             </div>
           </div>
           <div class="inv-detail-card inv-detail-history-wrap">
-            <div class="inv-detail-card-title">Last 7 Days Summary</div>
+            <div class="inv-detail-card-title"><span class="mdi mdi-calendar-clock-outline"></span> Last 7 Days Summary</div>
             <div id="invDetailHistory"></div>
           </div>
         </div>
@@ -1665,18 +1669,35 @@
       <section id="page-settings" class="page">
         <div class="settings-shell">
           <aside class="settings-sidebar">
-            <div class="settings-sidebar-card">
+            <div class="settings-sidebar-card settings-nav-card">
               <div class="settings-sidebar-head">
                 <span class="mdi mdi-cog-outline" aria-hidden="true"></span>
                 <span>Settings</span>
               </div>
+              <div class="settings-select-wrap" id="settingsSelectWrap">
+                <select id="settingsSectionSelect" class="sel settings-section-sel" aria-label="Select settings section" title="Choose a settings category to configure">
+                  <optgroup label="Plant &amp; Data">
+                    <option value="plantConfigSection" selected>Plant</option>
+                    <option value="opsCompactSection">Data &amp; Polling</option>
+                  </optgroup>
+                  <optgroup label="Inverter Hardware">
+                    <option value="inverterClockSection">Inverter Clocks</option>
+                    <option value="stopReasonsSection">Stop Reasons</option>
+                    <option value="serialNumberSection">Serial Number</option>
+                  </optgroup>
+                  <optgroup label="Connectivity &amp; Backup">
+                    <option value="connectivitySection">Connectivity &amp; Sync</option>
+                    <option value="cloudBackupSection">Cloud Backup</option>
+                    <option value="localBackupSection">Local Backup</option>
+                  </optgroup>
+                  <optgroup label="System">
+                    <option value="licenseSection">License</option>
+                    <option value="appUpdateSection">App Updates</option>
+                    <option value="aboutSection">About</option>
+                  </optgroup>
+                </select>
+              </div>
               <div class="settings-menu" id="settingsSectionMenu" role="tablist" aria-label="Settings sections">
-                <!-- Reordered + grouped by type/purpose (2026-05-30):
-                     Plant & Data → Inverter Hardware → Connectivity & Backup → System.
-                     The .settings-menu-group-label divs are decorative (aria-hidden) — the
-                     buttons keep their own accessible names, and the nav JS matches on
-                     .settings-menu-btn / data-settings-section, so the extra label nodes and
-                     DOM order never affect behavior. -->
                 <div class="settings-menu-group-label" aria-hidden="true">Plant &amp; Data</div>
                 <button class="settings-menu-btn active" type="button" data-settings-section="plantConfigSection" title="Site identity, operator naming, and core fleet sizing.">
                   <span class="mdi mdi-factory settings-menu-ico" aria-hidden="true"></span>
@@ -1721,6 +1742,10 @@
                   <span class="mdi mdi-cloud-download-outline settings-menu-ico" aria-hidden="true"></span>
                   <span class="settings-menu-label">App Updates</span>
                 </button>
+                <button class="settings-menu-btn" type="button" data-settings-section="aboutSection" title="Application details, operator guide, credentials, and credits.">
+                  <span class="mdi mdi-information-outline settings-menu-ico" aria-hidden="true"></span>
+                  <span class="settings-menu-label">About</span>
+                </button>
               </div>
             </div>
 
@@ -1747,20 +1772,19 @@
                   <span>Open Folder</span>
                 </button>
                 <div class="settings-utility-sep" aria-hidden="true"></div>
-                <button id="btnOpenIpConfig" class="btn btn-outline settings-utility-wide" title="Open Global Configuration for inverter addressing, plant data, hardware clocks, connectivity, and backup.">
+                <button id="btnOpenIpConfig" class="btn btn-outline" title="Open Global Configuration for inverter addressing, plant data, hardware clocks, connectivity, and backup.">
                   <span class="mdi mdi-lan-connect" aria-hidden="true"></span>
                   <span>Global Configuration</span>
                 </button>
-                <button id="btnOpenCalibrator" class="btn btn-outline settings-utility-wide" title="Open the isolated Utility Tool (calibration + inverter settings viewer) with COM vs Ethernet transport selector.">
+                <button id="btnOpenCalibrator" class="btn btn-outline" title="Open the isolated Utility Tool (calibration + inverter settings viewer) with COM vs Ethernet transport selector.">
                   <span class="mdi mdi-tune-variant" aria-hidden="true"></span>
                   <span>Utility Tool</span>
                 </button>
-                <button id="btnCreateCalibratorShortcut" class="btn btn-outline settings-utility-wide" title="Create a Desktop shortcut that launches the Utility Tool directly — no dashboard, no login required.">
+                <button id="btnCreateCalibratorShortcut" class="btn btn-outline" title="Create a Desktop shortcut that launches the Utility Tool directly — no dashboard, no login required.">
                   <span class="mdi mdi-rocket-launch-outline" aria-hidden="true"></span>
                   <span>Utility Tool Shortcut</span>
                 </button>
-                <div class="settings-utility-sep settings-utility-sep--danger" aria-hidden="true"></div>
-                <button id="btnResetSettingsDefaults" class="btn btn-red settings-utility-wide" title="Reset all settings to factory defaults. This cannot be undone without a prior export or backup.">
+                <button id="btnResetSettingsDefaults" class="btn btn-red" title="Reset all settings to factory defaults. This cannot be undone without a prior export or backup.">
                   <span class="mdi mdi-restore" aria-hidden="true"></span>
                   <span>Restore Defaults</span>
                 </button>
@@ -2425,6 +2449,16 @@
                     placeholder="0.72"
                     title="Caps how strongly intraday observed-vs-day-ahead corrections are applied (0.00–1.00). Blank = engine default 0.72. Validate with a backtest."
                 /></label>
+                <label
+                  >Virtual Nowcast Mode<select
+                    id="setForecastVirtualNowcastMode"
+                    class="inp"
+                    title="Off keeps the current intraday algorithm. Shadow evaluates the robust challenger without publishing it. Active publishes the challenger with automatic fallback to the current algorithm."
+                  >
+                    <option value="off">Off (current)</option>
+                    <option value="shadow">Shadow (evaluate only)</option>
+                    <option value="active">Active (publish with fallback)</option>
+                  </select></label>
               </div>
             </div>
             </div><!-- /#fcPanelTuning -->
@@ -2526,6 +2560,44 @@
                 Restart &amp; Install
               </button>
               <span class="smsg" id="updateMsg"></span>
+            </div>
+          </div>
+          <div class="sgroup settings-card" id="aboutSection">
+            <div class="sgroup-title" title="Application details, operator guide, credentials, and credits."><span class="mdi mdi-information-outline icon-inline" aria-hidden="true"></span> About Application</div>
+            <div class="license-grid">
+              <div class="license-item" title="Application Name">
+                <div class="license-label">Application</div>
+                <div class="license-value">ADSI Inverter Dashboard</div>
+              </div>
+              <div class="license-item" title="Installed Version">
+                <div class="license-label">Version</div>
+                <div class="license-value">v2.12.9</div>
+              </div>
+              <div class="license-item" title="Plant Site">
+                <div class="license-label">Website</div>
+                <div class="license-value"><a href="https://www.alterpowerdigos.com/" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none">alterpowerdigos.com</a></div>
+              </div>
+              <div class="license-item" title="Data Storage Location">
+                <div class="license-label">Data Directory</div>
+                <div id="setDataDir" class="license-value" style="font-family:var(--font-mono);font-size:10px">—</div>
+              </div>
+            </div>
+            <div class="sgroup-actions">
+              <button id="btnAboutCheckUpdate" class="btn btn-outline" title="Check if a newer version is available on the release channel.">
+                <span class="mdi mdi-update" aria-hidden="true"></span>
+                <span>Check for Updates</span>
+              </button>
+              <button id="btnOpenGuide" class="btn btn-outline" title="Open the built-in operator guide for this application.">
+                <span class="mdi mdi-book-open-page-variant-outline" aria-hidden="true"></span>
+                <span>User Guide</span>
+              </button>
+              <button id="btnOpenCredentials" class="btn btn-outline" title="View credentials and authorization keys (requires admin auth key).">
+                <span class="mdi mdi-shield-key-outline" aria-hidden="true"></span>
+                <span>Credentials</span>
+              </button>
+            </div>
+            <div class="sinfo" style="margin-top:10px;text-align:center;font-size:11px;color:var(--text2)">
+              Developed by <b>Engr. Clariden D. Montaño, REE</b> · © 2026 Alterpower Digos Solar, Inc.
             </div>
           </div>
           <!-- -- Cloud Backup Panel ------------------------------------------- -->
@@ -4335,5 +4407,30 @@ Hover any pill in the column for the row-specific explanation.">Anchor</th>
         <div id="pdfViewerFrame" class="pdf-viewer-frame"></div>
       </div>
     </div>
-</body>
+
+    <!-- Mobile Bottom Navigation Bar (hidden on desktop, shown on mobile via CSS) -->
+    <nav id="mobileBottomNav" class="mobile-bottom-nav" aria-label="Mobile navigation">
+      <button class="mob-nav-btn active" data-page="inverters" title="Inverters">
+        <span class="mob-nav-icon"><span class="mdi mdi-flash"></span></span>
+        <span class="mob-nav-label">Inverters</span>
+      </button>
+      <button class="mob-nav-btn" data-page="analytics" title="Analytics">
+        <span class="mob-nav-icon"><span class="mdi mdi-chart-line"></span></span>
+        <span class="mob-nav-label">Analytics</span>
+      </button>
+      <button class="mob-nav-btn" data-page="alarms" title="Alarms">
+        <span class="mob-nav-icon"><span class="mdi mdi-bell-alert-outline"></span></span>
+        <span class="mob-nav-label">Alarms</span>
+        <span class="mob-nav-badge" id="mobAlarmBadge" style="display:none">0</span>
+      </button>
+      <button class="mob-nav-btn" data-page="settings" title="Settings">
+        <span class="mob-nav-icon"><span class="mdi mdi-cog-outline"></span></span>
+        <span class="mob-nav-label">Settings</span>
+      </button>
+      <button class="mob-nav-btn" id="mobMoreBtn" title="Open navigation menu" aria-label="Open menu">
+        <span class="mob-nav-icon"><span class="mdi mdi-menu"></span></span>
+        <span class="mob-nav-label">Menu</span>
+      </button>
+    </nav>
+  </body>
 </html>

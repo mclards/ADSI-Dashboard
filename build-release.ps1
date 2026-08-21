@@ -1,4 +1,8 @@
 #!/usr/bin/env pwsh
-Write-Host "Building v2.10.0-beta.2 in isolated PowerShell context..."
-cd 'D:\ADSI-Dashboard'
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+Set-Location -LiteralPath $PSScriptRoot
+$package = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'package.json') -Raw | ConvertFrom-Json
+Write-Host "Building package version $($package.version) in isolated PowerShell context..."
 npm run build:installer
+exit $LASTEXITCODE

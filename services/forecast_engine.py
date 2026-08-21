@@ -26,12 +26,16 @@ import argparse
 import hashlib
 import json
 import logging
+import warnings
 import math
 import os
+import queue
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
+import uuid
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -104,6 +108,8 @@ ARTIFACT_FILE = BASE / "forecast/pv_dayahead_artifacts.joblib"
 WEATHER_BIAS_FILE = BASE / "forecast/pv_weather_bias.joblib"
 SOLCAST_RELIABILITY_FILE = BASE / "forecast/pv_solcast_reliability.joblib"
 FORECAST_SNAPSHOT_DIR = BASE / "forecast/snapshots"
+FORECAST_BASELINE_SNAPSHOT_FILE = BASE / "forecast/baseline_snapshot.json"
+FORECAST_REPLAY_RESULTS_DIR = BASE / "forecast/replay_results"
 ML_TRAIN_STATE_FILE   = BASE / "forecast/ml_train_state.json"
 WEATHER_DIR   = BASE / "weather"
 LOG_FILE      = BASE / "logs/forecast_dayahead.log"
@@ -169,7 +175,7 @@ SQLITE_RETRY_BACKOFF_SEC = 0.35
 DAYAHEAD_GEN_LOCK_DIR = APP_DB_FILE.parent / "locks"
 DAYAHEAD_GEN_LOCK_MAX_AGE_SEC = 300  # 5 min — covers Node's 180 s timeout + slack
 
-for _d in [WEATHER_DIR, MODEL_FILE.parent, FORECAST_SNAPSHOT_DIR, LOG_FILE.parent, APP_DB_FILE.parent, IPCONFIG_FILE.parent, DAYAHEAD_GEN_LOCK_DIR]:
+for _d in [WEATHER_DIR, MODEL_FILE.parent, FORECAST_SNAPSHOT_DIR, FORECAST_REPLAY_RESULTS_DIR, LOG_FILE.parent, APP_DB_FILE.parent, IPCONFIG_FILE.parent, DAYAHEAD_GEN_LOCK_DIR]:
     _d.mkdir(parents=True, exist_ok=True)
 
 def _service_stop_requested() -> bool:
@@ -338,6 +344,35 @@ INTRADAY_MAX_OBS_SLOTS = 36
 INTRADAY_RATIO_CLIP = (0.65, 1.35)
 INTRADAY_RECENT_RATIO_CLIP = (0.55, 1.35)  # upper bound tightened from 1.45 → 1.35 to match global clip
 INTRADAY_BLEND_MAX = 0.72
+# Robust, lead-time-decaying nowcast. The production selector defaults to off;
+# these values are challenger defaults until replay + shadow promotion passes.
+NOWCAST_ALGORITHM_VERSION = "robust_decay_v1"
+NOWCAST_CURRENT_ALGORITHM_VERSION = "current_ratio_v1"
+NOWCAST_MIN_BASELINE_ENERGY = 5.0
+NOWCAST_LOG_RATIO_EPSILON = 0.1
+NOWCAST_HALF_LIFE_MINUTES = 45.0
+NOWCAST_RECENT_MIX = 0.55
+NOWCAST_RATIO_FLOOR = 0.55
+NOWCAST_RATIO_CEILING = 1.50
+NOWCAST_MIN_CAPACITY_COVERAGE = 0.70
+NOWCAST_VOLATILITY_DAMP = 0.85
+NOWCAST_RECENT_SLOTS = 12
+NOWCAST_AUDIT_RETENTION_DAYS = 30
+NOWCAST_VALID_MODES = frozenset({"off", "shadow", "active"})
+NOWCAST_REPLAY_HORIZONS_MIN = (5, 15, 30, 60, 120)
+NOWCAST_EXECUTION_BUDGET_SEC = 30.0
+_nowcast_worker_guard = threading.Lock()
+_nowcast_timed_out_worker: threading.Thread | None = None
+
+class NowcastWorkerQuarantinedError(RuntimeError):
+    """A prior timed-out read-only builder is still draining."""
+
+# Activity artifact v2. Stored for offline ablation; production activity
+# gating continues to use activity_records until the promotion gates pass.
+ACTIVITY_V2_ACTIVATION_FRACTION = 0.0022
+ACTIVITY_V2_DEACTIVATION_FRACTION = 0.0012
+ACTIVITY_V2_SUSTAIN_SLOTS = 3
+ACTIVITY_V2_MIN_DAY_COVERAGE = 0.70
 SOLCAST_MIN_USABLE_SLOTS = 48
 SOLCAST_RELIABILITY_LOOKBACK_DAYS = 30
 SOLCAST_RELIABILITY_MIN_DAYS = 5
@@ -850,6 +885,20 @@ def _merge_slot_series_with_presence(
     if primary_values is None and fallback_values is None:
         return None, None
 
+    def _sanitise_source(values, present):
+        if values is None or present is None:
+            return None, None
+        vals = np.asarray(values, dtype=float).copy()
+        seen = np.asarray(present, dtype=bool).copy()
+        if vals.size != SLOTS_DAY or seen.size != SLOTS_DAY:
+            return None, None
+        seen &= np.isfinite(vals) & (vals >= 0.0)
+        vals = np.where(seen, vals, 0.0)
+        return vals, seen
+
+    primary_values, primary_present = _sanitise_source(primary_values, primary_present)
+    fallback_values, fallback_present = _sanitise_source(fallback_values, fallback_present)
+
     if primary_values is None:
         merged_values = np.array(fallback_values, dtype=float, copy=True)
         merged_present = np.array(fallback_present, dtype=bool, copy=True)
@@ -881,8 +930,6 @@ def _merge_slot_series_with_presence(
         )
         return None, None
 
-    merged_values = np.nan_to_num(merged_values, nan=0.0, posinf=0.0, neginf=0.0)
-    merged_values[merged_values < 0] = 0.0
     return merged_values, merged_present
 
 def clear_forecast_data_cache() -> None:
@@ -900,6 +947,9 @@ def clear_forecast_data_cache() -> None:
     load_intraday_adjusted.cache_clear()
     load_intraday_adjusted_with_presence.cache_clear()
     load_operational_constraint_profile.cache_clear()
+    completed_outage_cache = globals().get("_build_completed_1000h_inverter_outage_mask")
+    if completed_outage_cache is not None and hasattr(completed_outage_cache, "cache_clear"):
+        completed_outage_cache.cache_clear()
 
 def _slice_weather_day(df: pd.DataFrame, day: str) -> pd.DataFrame:
     """Return rows belonging only to YYYY-MM-DD (local naive timestamps)."""
@@ -1499,6 +1549,7 @@ def _reset_forecast_cycle_cache() -> None:
         "load_dayahead",
         "load_actual_loss_adjusted_with_presence",
         "load_actual_loss_adjusted",
+        "_build_completed_1000h_inverter_outage_mask",
     ):
         fn = globals().get(fn_name)
         if fn is not None and hasattr(fn, "cache_clear"):
@@ -1716,6 +1767,23 @@ def interpolate_5min(df: pd.DataFrame, day: str | None = None) -> pd.DataFrame:
             out[col] = _rolling_mean(pd.to_numeric(out[col], errors="coerce").values, 5, center=True)
 
     return out.iloc[:SLOTS_DAY].reset_index(drop=True)
+
+def build_weather_derivative_candidates(w5: pd.DataFrame) -> pd.DataFrame:
+    """Return causal derivative candidates without altering FEATURE_COLS.
+
+    These columns remain experimental until issue-time snapshot coverage and
+    rolling-origin ablation pass. Windows are trailing only; no centered or
+    future weather values are used.
+    """
+    frame = w5.copy() if isinstance(w5, pd.DataFrame) else pd.DataFrame()
+    out = pd.DataFrame(index=range(SLOTS_DAY))
+    cloud = pd.to_numeric(frame.get("cloud", pd.Series(dtype=float)), errors="coerce").reindex(range(SLOTS_DAY)).ffill().fillna(50.0)
+    temp = pd.to_numeric(frame.get("temp", pd.Series(dtype=float)), errors="coerce").reindex(range(SLOTS_DAY)).ffill().fillna(25.0)
+    rad = pd.to_numeric(frame.get("rad", pd.Series(dtype=float)), errors="coerce").reindex(range(SLOTS_DAY)).ffill().fillna(0.0)
+    out["cloud_delta_1h"] = cloud - cloud.shift(12)
+    out["temp_delta_1h"] = temp - temp.shift(12)
+    out["rad_std_30m"] = rad.rolling(window=6, min_periods=1).std(ddof=0)
+    return out.fillna(0.0)
 
 # ============================================================================
 # SOLAR GEOMETRY (precise)
@@ -2807,6 +2875,29 @@ power >= this fraction of the export limit AND physics baseline > cap limit.
 Typical 97% catches soft-clamping behavior while avoiding false positives on
 high-efficiency slots near 100% of rated capacity."""
 
+def _curtailed_mask_from_recorded_basis(
+    actual: np.ndarray,
+    baseline: np.ndarray,
+    *,
+    tolerance: float,
+    export_cap_slot_kwh: float,
+    baseline_multiplier: float = 1.05,
+) -> np.ndarray:
+    """Pure export-curtailment classifier using an issue-time recorded basis."""
+    actual_arr = np.asarray(actual, dtype=float).reshape(-1)
+    baseline_arr = np.asarray(baseline, dtype=float).reshape(-1)
+    tol = float(tolerance)
+    cap_slot = float(export_cap_slot_kwh)
+    multiplier = float(baseline_multiplier)
+    if (
+        actual_arr.size != SLOTS_DAY or baseline_arr.size != SLOTS_DAY
+        or not all(math.isfinite(v) for v in (tol, cap_slot, multiplier))
+        or not 0.0 < tol <= 1.0 or cap_slot <= 0.0 or multiplier <= 1.0
+    ):
+        raise ValueError("invalid recorded export-curtailment basis")
+    return (actual_arr >= tol * cap_slot) & (baseline_arr > cap_slot * multiplier)
+
+
 def curtailed_mask(actual: np.ndarray, baseline: np.ndarray, tol: float = CAP_DISPATCH_TOLERANCE) -> np.ndarray:
     """
     Boolean mask: True where generation was export-capped.
@@ -2822,7 +2913,12 @@ def curtailed_mask(actual: np.ndarray, baseline: np.ndarray, tol: float = CAP_DI
         Boolean mask where (actual >= tol * cap_slot) AND (baseline > 1.05 * cap_slot)
     """
     cap_slot = load_forecast_export_limit_mw() * 1000.0 * SLOT_MIN / 60.0
-    return (actual >= tol * cap_slot) & (baseline > cap_slot * 1.05)
+    return _curtailed_mask_from_recorded_basis(
+        actual,
+        baseline,
+        tolerance=tol,
+        export_cap_slot_kwh=cap_slot,
+    )
 
 # ============================================================================
 # 1000H ALARM-BASED INVERTER OUTAGE MASK (for QA)
@@ -2851,8 +2947,12 @@ def _get_inverter_node_map() -> dict[int, list[int]]:
                 pass
     return result
 
-@lru_cache(maxsize=256)
-def _build_1000h_inverter_outage_mask(day: str) -> np.ndarray:
+def _query_1000h_inverter_outage_mask(
+    day: str,
+    inverter_node_map: dict[int, list[int]],
+    *,
+    strict: bool = False,
+) -> np.ndarray:
     """Build a per-slot boolean mask: True where at least one *entire* inverter
     is down with alarm 1000H (0x1000 = 4096).
 
@@ -2864,7 +2964,11 @@ def _build_1000h_inverter_outage_mask(day: str) -> np.ndarray:
     day_start_ms, day_end_ms = _day_bounds_ms(day)
     if day_start_ms is None or day_end_ms is None:
         return mask
-    inv_node_map = _get_inverter_node_map()
+    inv_node_map = {
+        int(inv): [int(node) for node in nodes]
+        for inv, nodes in (inverter_node_map or {}).items()
+        if nodes
+    }
     if not inv_node_map:
         log.warning("1000H mask: no inverter node mapping from ipconfig — skipping outage detection")
         return mask
@@ -2908,6 +3012,8 @@ def _build_1000h_inverter_outage_mask(day: str) -> np.ndarray:
             log.warning("1000H mask: readings query failed [%s]: %s", db_path, e)
 
     if query_ok == 0 and db_paths:
+        if strict:
+            raise RuntimeError(f"1000H alarm basis unavailable for {day}")
         log.error("1000H mask: ALL %d db paths failed for %s — returning empty mask (no outage assumed)", len(db_paths), day)
 
     if not slot_alarm:
@@ -2931,6 +3037,35 @@ def _build_1000h_inverter_outage_mask(day: str) -> np.ndarray:
     if down_count > 0:
         log.info("1000H outage mask for %s: %d/%d slots with full-inverter outage", day, down_count, SLOTS_DAY)
     return mask
+
+
+@lru_cache(maxsize=256)
+def _build_completed_1000h_inverter_outage_mask(day: str) -> np.ndarray:
+    """Cache only completed dates; their alarm rows are immutable in normal use."""
+    return _query_1000h_inverter_outage_mask(day, _get_inverter_node_map())
+
+
+def _build_1000h_inverter_outage_mask(
+    day: str,
+    inverter_node_map: dict[int, list[int]] | None = None,
+) -> np.ndarray:
+    """Return a fresh live/future mask or a cached completed-day mask.
+
+    Current and future dates are deliberately never cached: a day-ahead
+    issuance can inspect tomorrow before any alarms exist, and current-day
+    readings arrive between every intraday cycle.  An explicitly supplied
+    topology is an immutable replay/scoring basis and is always queried fresh.
+    """
+    day_s = str(day)
+    if inverter_node_map is not None:
+        return _query_1000h_inverter_outage_mask(day_s, inverter_node_map)
+    try:
+        target = datetime.strptime(day_s, "%Y-%m-%d").date()
+    except Exception:
+        return np.zeros(SLOTS_DAY, dtype=bool)
+    if target < datetime.now(_TZ_UTC8).date():
+        return _build_completed_1000h_inverter_outage_mask(day_s).copy()
+    return _query_1000h_inverter_outage_mask(day_s, _get_inverter_node_map())
 
 # ============================================================================
 # OPERATIONAL CONSTRAINTS (manual stops vs plant-cap curtailment)
@@ -3241,7 +3376,7 @@ def _query_energy_5min_loss_adjusted(
     if not db_path.exists():
         return {}
     sql = """
-        SELECT ts, inverter, COALESCE(kwh_inc, 0) AS kwh_inc
+        SELECT ts, inverter, kwh_inc
           FROM energy_5min
          WHERE ts >= ? AND ts < ?
          ORDER BY ts ASC
@@ -3258,7 +3393,15 @@ def _query_energy_5min_loss_adjusted(
                         continue
                     inv_key = str(inverter)
                     loss_frac = loss_factors.get(inv_key, 0.0)
-                    adjusted = _coerce_non_negative_float(kwh_inc) * (1.0 - loss_frac)
+                    value = _coerce_optional_non_negative_float(kwh_inc)
+                    if value is None:
+                        # Retain invalidity until the presence merge so the
+                        # slot cannot masquerade as a measured zero.
+                        out[ts_i] = float("nan")
+                        continue
+                    if not math.isfinite(out.get(ts_i, 0.0)):
+                        continue
+                    adjusted = value * (1.0 - loss_frac)
                     out[ts_i] = out.get(ts_i, 0.0) + adjusted
             return out
         except Exception as e:
@@ -3276,12 +3419,128 @@ def _query_energy_5min_loss_adjusted(
             break
     return out
 
+def _query_energy_5min_by_inverter(
+    db_path: Path,
+    day_start_ms: int,
+    day_end_ms: int,
+) -> dict[tuple[int, int], float]:
+    """Return {(timestamp_ms, inverter_id): kWh} from PAC-integrated energy.
+
+    Rows are presence evidence even when kWh is zero. No communication-status
+    fields or device kWh registers participate in this query.
+    """
+    if not db_path.exists():
+        return {}
+    sql = """
+        SELECT ts, inverter, SUM(COALESCE(kwh_inc, 0))
+          FROM energy_5min
+         WHERE ts >= ? AND ts < ?
+         GROUP BY ts, inverter
+         ORDER BY ts ASC, inverter ASC
+    """
+    out: dict[tuple[int, int], float] = {}
+    for attempt in range(1, SQLITE_RETRY_ATTEMPTS + 1):
+        try:
+            with _open_sqlite(db_path, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
+                conn.execute("PRAGMA query_only = ON")
+                for ts, inverter, kwh_inc in conn.execute(
+                    sql, (int(day_start_ms), int(day_end_ms))
+                ).fetchall():
+                    ts_i = int(ts or 0)
+                    inv_i = int(inverter or 0)
+                    if ts_i > 0 and inv_i > 0:
+                        out[(ts_i, inv_i)] = _coerce_non_negative_float(kwh_inc)
+            return out
+        except Exception as e:
+            if attempt < SQLITE_RETRY_ATTEMPTS and _is_retryable_sqlite_error(e):
+                _sleep_sqlite_retry(attempt)
+                continue
+            if "no such table" not in str(e).lower():
+                log.warning("Per-inverter energy load failed [%s]: %s", db_path, e)
+            return {}
+    return out
+
+def _load_inverter_energy_for_day(day: str) -> dict[int, np.ndarray]:
+    """Merge hot/archive PAC-integrated energy into per-inverter slot arrays."""
+    day_start_ms, day_end_ms = _day_bounds_ms(day)
+    if day_start_ms is None or day_end_ms is None:
+        return {}
+    merged = _query_energy_5min_by_inverter(APP_DB_FILE, day_start_ms, day_end_ms)
+    for month_key in _archive_month_keys_for_range(day_start_ms, day_end_ms):
+        archive_path = ARCHIVE_DIR / f"{month_key}.db"
+        for key, value in _query_energy_5min_by_inverter(
+            archive_path, day_start_ms, day_end_ms
+        ).items():
+            if key not in merged or (merged[key] <= 0 < value):
+                merged[key] = value
+    slot_ms = SLOT_MIN * 60 * 1000
+    out: dict[int, np.ndarray] = {}
+    for (ts, inverter), value in merged.items():
+        slot = int((int(ts) - int(day_start_ms)) // slot_ms)
+        if 0 <= slot < SLOTS_DAY:
+            out.setdefault(int(inverter), np.zeros(SLOTS_DAY, dtype=float))[slot] += float(value)
+    return out
+
+def _load_energy_reporting_coverage(
+    day: str,
+    capacity_by_inverter_kw: dict[int, float] | None = None,
+) -> np.ndarray:
+    """Fraction of configured inverter capacity represented per 5-min slot.
+
+    Capacity representation is inferred from PAC-integration rows, not the
+    `online` communication flag. Inverters are weighted by configured node
+    count so a partially configured unit cannot have disproportionate weight.
+    """
+    if capacity_by_inverter_kw is None:
+        inv_map = _get_inverter_node_map()
+        if not inv_map:
+            return np.zeros(SLOTS_DAY, dtype=float)
+        capacities = {
+            int(inv): max(1, len(nodes)) * float(NODE_KW_DEPENDABLE)
+            for inv, nodes in inv_map.items()
+        }
+    else:
+        capacities = {}
+        for inverter, capacity in capacity_by_inverter_kw.items():
+            inv = int(inverter)
+            cap = float(capacity)
+            if inv <= 0 or not math.isfinite(cap) or cap <= 0.0:
+                raise ValueError("invalid issue-time reporting-capacity basis")
+            capacities[inv] = cap
+        if not capacities:
+            raise ValueError("empty issue-time reporting-capacity basis")
+    total_capacity = float(sum(capacities.values()))
+    if total_capacity <= 0:
+        return np.zeros(SLOTS_DAY, dtype=float)
+    coverage = np.zeros(SLOTS_DAY, dtype=float)
+    # Derive slot-specific presence directly from rows so zero-energy readings
+    # count as reported without treating an inverter's entire day as present.
+    day_start_ms, day_end_ms = _day_bounds_ms(day)
+    if day_start_ms is None or day_end_ms is None:
+        return np.zeros(SLOTS_DAY, dtype=float)
+    raw = _query_energy_5min_by_inverter(APP_DB_FILE, day_start_ms, day_end_ms)
+    for month_key in _archive_month_keys_for_range(day_start_ms, day_end_ms):
+        raw.update(_query_energy_5min_by_inverter(
+            ARCHIVE_DIR / f"{month_key}.db", day_start_ms, day_end_ms
+        ))
+    coverage[:] = 0.0
+    slot_ms = SLOT_MIN * 60 * 1000
+    represented: dict[int, set[int]] = {}
+    for ts, inv in raw.keys():
+        slot = int((int(ts) - int(day_start_ms)) // slot_ms)
+        if 0 <= slot < SLOTS_DAY and int(inv) in capacities:
+            represented.setdefault(slot, set()).add(int(inv))
+    for slot, inverters in represented.items():
+        coverage[slot] = sum(capacities[i] for i in inverters) / total_capacity
+    return np.clip(coverage, 0.0, 1.0)
+
 def _query_energy_5min_totals(db_path: Path, day_start_ms: int, day_end_ms: int) -> dict[int, float]:
     """Raw plant-level 5-min energy totals -- no loss adjustment."""
     if not db_path.exists():
         return {}
     sql = """
-        SELECT ts, SUM(COALESCE(kwh_inc, 0)) AS kwh_inc
+        SELECT ts, SUM(kwh_inc) AS kwh_inc, COUNT(*) AS row_count,
+               COUNT(kwh_inc) AS value_count
           FROM energy_5min
          WHERE ts >= ? AND ts < ?
          GROUP BY ts
@@ -3293,11 +3552,16 @@ def _query_energy_5min_totals(db_path: Path, day_start_ms: int, day_end_ms: int)
             with _open_sqlite(db_path, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
                 conn.execute("PRAGMA query_only = ON")
                 cur = conn.execute(sql, (int(day_start_ms), int(day_end_ms)))
-                for ts, kwh_inc in cur.fetchall():
+                for ts, kwh_inc, row_count, value_count in cur.fetchall():
                     ts_i = int(ts or 0)
                     if ts_i <= 0:
                         continue
-                    out[ts_i] = _coerce_non_negative_float(kwh_inc)
+                    value = _coerce_optional_non_negative_float(kwh_inc)
+                    out[ts_i] = (
+                        float(value)
+                        if value is not None and int(row_count or 0) == int(value_count or 0)
+                        else float("nan")
+                    )
             return out
         except Exception as e:
             if attempt < SQLITE_RETRY_ATTEMPTS and _is_retryable_sqlite_error(e):
@@ -3755,7 +4019,7 @@ def _load_actual_from_appdata(day: str) -> tuple[np.ndarray | None, np.ndarray |
             prev = merged.get(ts, None)
             if prev is None:
                 merged[ts] = kwh_inc
-            elif prev <= 0 < kwh_inc:
+            elif (not math.isfinite(float(prev))) or prev <= 0 < kwh_inc:
                 merged[ts] = kwh_inc
 
     if not merged:
@@ -3767,8 +4031,10 @@ def _load_actual_from_appdata(day: str) -> tuple[np.ndarray | None, np.ndarray |
     for ts in sorted(merged.keys()):
         slot = int((int(ts) - day_start_ms) // slot_ms)
         if 0 <= slot < SLOTS_DAY:
-            out[slot] += _coerce_non_negative_float(merged[ts])
-            present[slot] = True
+            value = _coerce_optional_non_negative_float(merged[ts])
+            if value is not None:
+                out[slot] += value
+                present[slot] = True
     return out, present
 
 def _load_actual_from_legacy_context(day: str) -> tuple[np.ndarray | None, np.ndarray | None]:
@@ -3786,12 +4052,14 @@ def _load_actual_from_legacy_context(day: str) -> tuple[np.ndarray | None, np.nd
         if slot is None:
             slot = _default_legacy_slot(i, total_rows)
         if 0 <= slot < SLOTS_DAY:
-            out[slot] = _coerce_non_negative_float(r.get("kWh_inc", r.get("kwh_inc", 0)))
-            present[slot] = True
+            value = _coerce_optional_non_negative_float(r.get("kWh_inc", r.get("kwh_inc")))
+            if value is not None:
+                out[slot] = value
+                present[slot] = True
     return (out, present) if present.any() else (None, None)
 
 @lru_cache(maxsize=256)
-def load_actual_with_presence(day: str) -> tuple[np.ndarray | None, np.ndarray | None]:
+def load_actual_with_presence(day: str, min_solar_slots: int = MIN_HISTORY_SOLAR_SLOTS) -> tuple[np.ndarray | None, np.ndarray | None]:
     db_actual, db_present = _load_actual_from_appdata(day)
     legacy_actual, legacy_present = _load_actual_from_legacy_context(day)
     return _merge_slot_series_with_presence(
@@ -3801,12 +4069,12 @@ def load_actual_with_presence(day: str) -> tuple[np.ndarray | None, np.ndarray |
         db_present,
         legacy_actual,
         legacy_present,
-        MIN_HISTORY_SOLAR_SLOTS,
+        min_solar_slots,
     )
 
 @lru_cache(maxsize=256)
-def load_actual(day: str) -> np.ndarray | None:
-    values, _ = load_actual_with_presence(day)
+def load_actual(day: str, min_solar_slots: int = MIN_HISTORY_SOLAR_SLOTS) -> np.ndarray | None:
+    values, _ = load_actual_with_presence(day, min_solar_slots)
     return values
 
 # ---------------------------------------------------------------------------
@@ -3850,7 +4118,7 @@ def _load_actual_loss_adjusted_from_appdata(
             prev = merged.get(ts, None)
             if prev is None:
                 merged[ts] = kwh_inc
-            elif prev <= 0 < kwh_inc:
+            elif (not math.isfinite(float(prev))) or prev <= 0 < kwh_inc:
                 merged[ts] = kwh_inc
 
     if not merged:
@@ -3862,18 +4130,20 @@ def _load_actual_loss_adjusted_from_appdata(
     for ts in sorted(merged.keys()):
         slot = int((int(ts) - day_start_ms) // slot_ms)
         if 0 <= slot < SLOTS_DAY:
-            out[slot] += _coerce_non_negative_float(merged[ts])
-            present[slot] = True
+            value = _coerce_optional_non_negative_float(merged[ts])
+            if value is not None:
+                out[slot] += value
+                present[slot] = True
     return out, present
 
 # Cache lifetime equals subprocess lifetime — safe in the current spawn model.
 # If the engine is ever converted to a long-running daemon this cache must be
 # time-bounded or invalidated on each generation run to avoid stale actuals.
 @lru_cache(maxsize=256)
-def load_actual_loss_adjusted_with_presence(day: str) -> tuple[np.ndarray | None, np.ndarray | None]:
+def load_actual_loss_adjusted_with_presence(day: str, min_solar_slots: int = MIN_HISTORY_SOLAR_SLOTS) -> tuple[np.ndarray | None, np.ndarray | None]:
     """Loss-adjusted (values, presence) pair for forecast-engine consumers."""
     if not _has_nonzero_losses():
-        return load_actual_with_presence(day)
+        return load_actual_with_presence(day, min_solar_slots)
 
     loss_factors = _get_loss_factors()
     db_actual, db_present = _load_actual_loss_adjusted_from_appdata(day, loss_factors)
@@ -3885,17 +4155,17 @@ def load_actual_loss_adjusted_with_presence(day: str) -> tuple[np.ndarray | None
         db_present,
         legacy_actual,
         legacy_present,
-        MIN_HISTORY_SOLAR_SLOTS,
+        min_solar_slots,
     )
 
 # See note on load_actual_loss_adjusted_with_presence regarding daemon-mode staleness.
 @lru_cache(maxsize=256)
-def load_actual_loss_adjusted(day: str) -> np.ndarray | None:
+def load_actual_loss_adjusted(day: str, min_solar_slots: int = MIN_HISTORY_SOLAR_SLOTS) -> np.ndarray | None:
     """Loss-adjusted 5-min actual for forecast training / day-ahead / QA.
 
     Falls back to raw load_actual() when configured losses are all zero.
     """
-    values, _ = load_actual_loss_adjusted_with_presence(day)
+    values, _ = load_actual_loss_adjusted_with_presence(day, min_solar_slots)
     return values
 
 def _load_dayahead_from_db(day: str) -> tuple[np.ndarray | None, np.ndarray | None]:
@@ -3919,8 +4189,10 @@ def _load_dayahead_from_db(day: str) -> tuple[np.ndarray | None, np.ndarray | No
                 for slot, kwh_inc in cur.fetchall():
                     slot_i = int(slot or 0)
                     if 0 <= slot_i < SLOTS_DAY:
-                        out[slot_i] = _coerce_non_negative_float(kwh_inc)
-                        present[slot_i] = True
+                        value = _coerce_optional_non_negative_float(kwh_inc)
+                        if value is not None:
+                            out[slot_i] = value
+                            present[slot_i] = True
             return (out, present) if present.any() else (None, None)
         except Exception as e:
             if attempt < SQLITE_RETRY_ATTEMPTS and _is_retryable_sqlite_error(e):
@@ -3935,6 +4207,209 @@ def _load_dayahead_from_db(day: str) -> tuple[np.ndarray | None, np.ndarray | No
                 continue
             log.warning("DB day-ahead load failed [%s]: %s", day, e)
             return None, None
+
+_IMMUTABLE_ISSUANCE_COLUMNS = {
+    "issuance_id", "date", "generated_ts", "source", "expected_slot_count",
+    "basis_checksum", "weather_snapshot_json", "weather_snapshot_sha256",
+    "constraint_snapshot_json", "constraint_snapshot_sha256", "model_sha256",
+    "artifact_sha256", "base_run_audit_id", "created_by",
+}
+_IMMUTABLE_SLOT_COLUMNS = {
+    "date", "issuance_id", "generated_ts", "slot", "time_hms",
+    "kwh_inc", "kwh_lo", "kwh_hi", "source",
+}
+
+def _sqlite_table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+
+def _ensure_immutable_dayahead_tables(conn: sqlite3.Connection) -> None:
+    """Create the append-only, issuance-grouped replay basis.
+
+    The former table was populated by generic context synchronisation and had
+    neither bands nor provenance.  Such rows cannot be made causal after the
+    fact, so an incompatible legacy table is moved to a recoverable quarantine
+    table rather than assigning it synthetic identity.
+    """
+    old_columns = _sqlite_table_columns(conn, "forecast_dayahead_immutable")
+    if old_columns and not _IMMUTABLE_SLOT_COLUMNS.issubset(old_columns):
+        legacy_name = "forecast_dayahead_immutable_legacy_quarantine"
+        if _sqlite_table_columns(conn, legacy_name):
+            legacy_name = f"{legacy_name}_{int(time.time() * 1000)}"
+        conn.execute(f"ALTER TABLE forecast_dayahead_immutable RENAME TO {legacy_name}")
+        log.warning(
+            "Quarantined non-causal legacy immutable rows in table %s; no provenance was fabricated",
+            legacy_name,
+        )
+
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS forecast_dayahead_issuance (
+            issuance_id TEXT PRIMARY KEY,
+            date TEXT NOT NULL,
+            generated_ts INTEGER NOT NULL,
+            source TEXT NOT NULL DEFAULT 'service',
+            expected_slot_count INTEGER NOT NULL,
+            basis_checksum TEXT NOT NULL,
+            weather_snapshot_json TEXT,
+            weather_snapshot_sha256 TEXT,
+            constraint_snapshot_json TEXT,
+            constraint_snapshot_sha256 TEXT,
+            model_sha256 TEXT,
+            artifact_sha256 TEXT,
+            base_run_audit_id INTEGER,
+            created_by TEXT NOT NULL DEFAULT 'forecast_engine'
+        );
+        CREATE INDEX IF NOT EXISTS idx_fdi_date_generated
+            ON forecast_dayahead_issuance(date, generated_ts DESC);
+        CREATE TABLE IF NOT EXISTS forecast_dayahead_immutable (
+            date TEXT NOT NULL,
+            issuance_id TEXT NOT NULL,
+            generated_ts INTEGER NOT NULL,
+            slot INTEGER NOT NULL,
+            time_hms TEXT NOT NULL,
+            kwh_inc REAL NOT NULL,
+            kwh_lo REAL NOT NULL,
+            kwh_hi REAL NOT NULL,
+            source TEXT NOT NULL DEFAULT 'service',
+            PRIMARY KEY(date, issuance_id, slot),
+            FOREIGN KEY(issuance_id) REFERENCES forecast_dayahead_issuance(issuance_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_fdii_date_generated
+            ON forecast_dayahead_immutable(date, generated_ts DESC);
+    """)
+    issuance_columns = _sqlite_table_columns(conn, "forecast_dayahead_issuance")
+    for definition in (
+        "weather_snapshot_json TEXT", "weather_snapshot_sha256 TEXT",
+        "constraint_snapshot_json TEXT", "constraint_snapshot_sha256 TEXT",
+        "model_sha256 TEXT", "artifact_sha256 TEXT", "base_run_audit_id INTEGER",
+        "created_by TEXT NOT NULL DEFAULT 'forecast_engine'",
+    ):
+        if definition.split()[0] not in issuance_columns:
+            conn.execute(f"ALTER TABLE forecast_dayahead_issuance ADD COLUMN {definition}")
+
+def _canonical_json_sha256(payload) -> tuple[str, str]:
+    encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True, ensure_ascii=True)
+    return encoded, hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+def _immutable_basis_checksum(rows: list[tuple]) -> str:
+    canonical = "\n".join(
+        f"{int(row[0])}|{str(row[1])}|{float(row[2]):.9f}|{float(row[3]):.9f}|{float(row[4]):.9f}"
+        for row in sorted(rows, key=lambda value: int(value[0]))
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+def _load_immutable_dayahead_bundle_from_db(day: str, max_generated_ts: int) -> dict | None:
+    """Load one complete, checksummed issuance at or before an issue time."""
+    if not APP_DB_FILE.exists():
+        return None
+    for attempt in range(1, SQLITE_RETRY_ATTEMPTS + 1):
+        try:
+            with _open_sqlite(APP_DB_FILE, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
+                conn.execute("PRAGMA query_only = ON")
+                if not _IMMUTABLE_ISSUANCE_COLUMNS.issubset(_sqlite_table_columns(conn, "forecast_dayahead_issuance")):
+                    return None
+                if not _IMMUTABLE_SLOT_COLUMNS.issubset(_sqlite_table_columns(conn, "forecast_dayahead_immutable")):
+                    return None
+                issuance = conn.execute(
+                    """
+                    SELECT issuance_id, generated_ts, source, expected_slot_count,
+                           basis_checksum, weather_snapshot_json, weather_snapshot_sha256,
+                           constraint_snapshot_json, constraint_snapshot_sha256,
+                           model_sha256, artifact_sha256, base_run_audit_id, created_by
+                      FROM forecast_dayahead_issuance
+                     WHERE date=? AND generated_ts <= ?
+                     ORDER BY generated_ts DESC, issuance_id DESC LIMIT 1
+                    """,
+                    (str(day), int(max_generated_ts)),
+                ).fetchone()
+                if not issuance:
+                    return None
+                issuance_id = str(issuance[0])
+                rows = conn.execute(
+                    """
+                    SELECT slot, time_hms, kwh_inc, kwh_lo, kwh_hi
+                      FROM forecast_dayahead_immutable
+                     WHERE date=? AND issuance_id=?
+                     ORDER BY slot ASC
+                    """,
+                    (str(day), issuance_id),
+                ).fetchall()
+
+            expected_count = int(issuance[3] or 0)
+            expected_slots = list(range(SOLAR_START_SLOT, SOLAR_END_SLOT))
+            actual_slots = [int(row[0]) for row in rows]
+            if expected_count != SOLAR_SLOTS or len(rows) != expected_count or actual_slots != expected_slots:
+                log.warning("Immutable day-ahead issuance rejected [%s:%s]: incomplete slot coverage", day, issuance_id)
+                return None
+            numeric = np.asarray([[row[2], row[3], row[4]] for row in rows], dtype=float)
+            if (
+                not np.all(np.isfinite(numeric)) or np.any(numeric < 0.0)
+                or np.any(numeric[:, 1] > numeric[:, 0] + 1e-9)
+                or np.any(numeric[:, 0] > numeric[:, 2] + 1e-9)
+                or _immutable_basis_checksum(rows) != str(issuance[4] or "")
+            ):
+                log.warning("Immutable day-ahead issuance rejected [%s:%s]: checksum or bounds invalid", day, issuance_id)
+                return None
+
+            weather_json = str(issuance[5] or "")
+            constraints_json = str(issuance[7] or "")
+            if not weather_json or hashlib.sha256(weather_json.encode("utf-8")).hexdigest() != str(issuance[6] or ""):
+                log.warning("Immutable day-ahead issuance rejected [%s:%s]: weather identity invalid", day, issuance_id)
+                return None
+            if (
+                not constraints_json
+                or hashlib.sha256(constraints_json.encode("utf-8")).hexdigest() != str(issuance[8] or "")
+            ):
+                log.warning("Immutable day-ahead issuance rejected [%s:%s]: constraint identity invalid", day, issuance_id)
+                return None
+            try:
+                weather_snapshot = json.loads(weather_json)
+                constraint_snapshot = json.loads(constraints_json)
+                parsed_constraints = _parse_replay_constraint_snapshot(constraint_snapshot)
+            except Exception:
+                return None
+            recorded_cap = parsed_constraints["slot_cap_kwh"]
+            recorded_blend = parsed_constraints["blend_max"]
+            if (
+                recorded_cap is None or recorded_cap <= 0.0
+                or recorded_blend is None or recorded_blend > 1.0
+                or np.any(numeric > recorded_cap + 1e-9)
+            ):
+                log.warning("Immutable day-ahead issuance rejected [%s:%s]: issue-time cap missing or violated", day, issuance_id)
+                return None
+
+            p50 = _empty_slot_values()
+            lo = _empty_slot_values()
+            hi = _empty_slot_values()
+            present = _empty_slot_presence()
+            for slot, _time_hms, mid, low, high in rows:
+                slot_i = int(slot)
+                p50[slot_i], lo[slot_i], hi[slot_i] = float(mid), float(low), float(high)
+                present[slot_i] = True
+            return {
+                "dayahead": p50, "dayahead_lo": lo, "dayahead_hi": hi,
+                "dayahead_present": present, "weather_snapshot": weather_snapshot,
+                "constraint_snapshot": constraint_snapshot,
+                "issuance_id": issuance_id, "generated_ts": int(issuance[1]),
+                "source": str(issuance[2]), "basis_checksum": str(issuance[4]),
+                "weather_snapshot_sha256": str(issuance[6]),
+                "constraint_snapshot_sha256": str(issuance[8] or "") or None,
+                "model_sha256": issuance[9], "artifact_sha256": issuance[10],
+                "base_run_audit_id": issuance[11], "created_by": issuance[12],
+            }
+        except Exception as e:
+            if attempt < SQLITE_RETRY_ATTEMPTS and _is_retryable_sqlite_error(e):
+                _sleep_sqlite_retry(attempt)
+                continue
+            log.warning("Immutable day-ahead load failed [%s]: %s", day, e)
+            return None
+    return None
+
+def _load_immutable_dayahead_from_db(day: str, max_generated_ts: int) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Backward-compatible value/presence wrapper around the strict loader."""
+    bundle = _load_immutable_dayahead_bundle_from_db(day, max_generated_ts)
+    if not bundle:
+        return None, None
+    return bundle["dayahead"], bundle["dayahead_present"]
 
 def _load_dayahead_bands_from_db(day: str) -> tuple[np.ndarray, np.ndarray]:
     """Return (kwh_lo, kwh_hi) slot arrays for a stored day-ahead forecast.
@@ -3982,8 +4457,10 @@ def _load_dayahead_from_legacy(day: str) -> tuple[np.ndarray | None, np.ndarray 
         if slot is None:
             slot = _default_legacy_slot(i, total_rows)
         if 0 <= slot < SLOTS_DAY:
-            out[slot] = _coerce_non_negative_float(p.get("kWh_inc", p.get("kwh_inc", 0)))
-            present[slot] = True
+            value = _coerce_optional_non_negative_float(p.get("kWh_inc", p.get("kwh_inc")))
+            if value is not None:
+                out[slot] = value
+                present[slot] = True
     return (out, present) if present.any() else (None, None)
 
 # See note on load_actual_loss_adjusted_with_presence regarding daemon-mode staleness.
@@ -6319,6 +6796,136 @@ def collect_history_days(
     log.info("History basis accepted: %d day(s)", len(history))
     return history
 
+def _sustained_activity_mask(
+    values: np.ndarray,
+    capacity_slot_kwh: float,
+    activation_fraction: float = ACTIVITY_V2_ACTIVATION_FRACTION,
+    deactivation_fraction: float = ACTIVITY_V2_DEACTIVATION_FRACTION,
+    sustain_slots: int = ACTIVITY_V2_SUSTAIN_SLOTS,
+) -> np.ndarray:
+    """Energy-derived activity with sustained activation/deactivation hysteresis."""
+    arr = np.clip(np.asarray(values, dtype=float), 0.0, None)
+    out = np.zeros(SLOTS_DAY, dtype=bool)
+    if arr.size != SLOTS_DAY or capacity_slot_kwh <= 0:
+        return out
+    on_threshold = max(0.05, float(capacity_slot_kwh) * float(activation_fraction))
+    off_threshold = max(0.02, float(capacity_slot_kwh) * float(deactivation_fraction))
+    sustain = max(1, int(sustain_slots))
+    active = False
+    above_run = 0
+    below_run = 0
+    for slot in range(SOLAR_START_SLOT, SOLAR_END_SLOT):
+        value = float(arr[slot])
+        if not active:
+            above_run = above_run + 1 if value >= on_threshold else 0
+            if above_run >= sustain:
+                active = True
+                start = slot - sustain + 1
+                out[start:slot + 1] = True
+                below_run = 0
+        else:
+            out[slot] = True
+            below_run = below_run + 1 if value < off_threshold else 0
+            if below_run >= sustain:
+                start = slot - sustain + 1
+                out[start:slot + 1] = False
+                active = False
+                above_run = 0
+    return out
+
+def _build_capacity_weighted_activity_profiles(
+    history_days: list[dict],
+) -> tuple[dict, dict[str, int]]:
+    """Build artifact-v2 activity profiles from per-inverter integrated energy.
+
+    The profile is intentionally artifact-only until rolling-origin ablation
+    promotes it. Every input date comes from the supplied historical basis and
+    is therefore strictly earlier than the caller's forecast target.
+    """
+    inv_map = _get_inverter_node_map()
+    capacities = {
+        int(inv): max(1, len(nodes)) * float(NODE_KW_DEPENDABLE)
+        for inv, nodes in inv_map.items()
+    }
+    total_capacity = float(sum(capacities.values()))
+    rejection_reasons: dict[str, int] = {}
+    accepted_profiles: list[np.ndarray] = []
+    per_inverter_profiles: dict[int, list[np.ndarray]] = {}
+
+    def reject(reason: str) -> None:
+        rejection_reasons[reason] = int(rejection_reasons.get(reason, 0)) + 1
+
+    if total_capacity <= 0:
+        return {}, {"missing_ipconfig_capacity": max(1, len(history_days))}
+
+    for sample in history_days:
+        day = str(sample.get("day") or "")
+        if not day:
+            reject("missing_day")
+            continue
+        per_inv = _load_inverter_energy_for_day(day)
+        represented = [inv for inv in capacities if inv in per_inv]
+        coverage = _load_energy_reporting_coverage(day)
+        if np.mean(coverage[SOLAR_START_SLOT:SOLAR_END_SLOT]) < ACTIVITY_V2_MIN_DAY_COVERAGE:
+            reject("insufficient_capacity_coverage")
+            continue
+        cap_dispatch = np.asarray(sample.get("cap_dispatch_mask", np.zeros(SLOTS_DAY)), dtype=bool).copy()
+        outage = np.asarray(sample.get("inverter_outage_mask", np.zeros(SLOTS_DAY)), dtype=bool).copy()
+        if np.any(cap_dispatch[SOLAR_START_SLOT:SOLAR_END_SLOT]):
+            reject("cap_dispatch_day")
+            continue
+        if np.any(outage[SOLAR_START_SLOT:SOLAR_END_SLOT]):
+            reject("confirmed_outage_day")
+            continue
+
+        weighted = np.zeros(SLOTS_DAY, dtype=float)
+        for inv in represented:
+            capacity_kw = float(capacities[inv])
+            activity = _sustained_activity_mask(
+                per_inv[inv], capacity_kw * SLOT_HOURS
+            )
+            weighted += activity.astype(float) * capacity_kw
+            per_inverter_profiles.setdefault(inv, []).append(activity.astype(float))
+
+        valid_slots = coverage >= ACTIVITY_V2_MIN_DAY_COVERAGE
+        day_profile = np.clip(weighted / total_capacity, 0.0, 1.0)
+        day_profile = np.where(valid_slots, day_profile, np.nan)
+        accepted_profiles.append(day_profile)
+
+    if not accepted_profiles:
+        return {}, rejection_reasons
+    matrix = np.vstack(accepted_profiles)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        default_profile = np.nanmedian(matrix, axis=0)
+        uncertainty = float(np.nanmean(np.nanstd(matrix[:, SOLAR_START_SLOT:SOLAR_END_SLOT], axis=0)))
+
+    if np.isnan(default_profile[SOLAR_START_SLOT:SOLAR_END_SLOT]).any():
+        rejection_reasons["nan_cascaded_profile"] = 1
+        return {}, rejection_reasons
+
+    per_inverter = {}
+    for inv, rows in per_inverter_profiles.items():
+        inv_matrix = np.vstack(rows)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            inv_profile = np.nanmedian(inv_matrix, axis=0)
+            inv_uncertainty = float(np.nanmean(np.nanstd(inv_matrix, axis=0)))
+        per_inverter[str(inv)] = {
+            "active_capacity_fraction": inv_profile,
+            "support_count": int(inv_matrix.shape[0]),
+            "uncertainty": inv_uncertainty,
+        }
+    return {
+        "default": {
+            "active_capacity_fraction": default_profile,
+            "support_count": int(matrix.shape[0]),
+            "uncertainty": uncertainty,
+        },
+        "per_inverter": per_inverter,
+    }, rejection_reasons
+
 def build_forecast_artifacts(history_days: list[dict]) -> dict:
     """Build derived artifacts for activity gating.
 
@@ -6356,29 +6963,114 @@ def build_forecast_artifacts(history_days: list[dict]) -> dict:
                 "last_slot": int(last_slot),
             })
 
+    capacity_profiles, rejection_reasons = _build_capacity_weighted_activity_profiles(history_days)
+    history_dates = sorted(str(s.get("day")) for s in history_days if s.get("day"))
     return {
+        "schema_version": 2,
         "created_ts": int(time.time()),
+        "training_cutoff_date": history_dates[-1] if history_dates else None,
         "training_basis": "actual archived weather + cleaned actual generation",
         "lookback_days": int(SHAPE_LOOKBACK_DAYS),
         "history_days": int(len(history_days)),
+        "accepted_days": int((capacity_profiles.get("default") or {}).get("support_count", 0)),
+        "rejected_days": int(sum(rejection_reasons.values())),
+        "rejection_reasons": rejection_reasons,
         "activity_records": activity_records,
+        "capacity_weighted_profiles": capacity_profiles,
     }
 
-def save_forecast_artifacts(artifact: dict) -> bool:
+def _validate_forecast_artifact(artifact: dict, target_date: date | None = None) -> tuple[bool, str | None]:
+    if not isinstance(artifact, dict):
+        return False, "not_a_dict"
+    schema_version = artifact.get("schema_version", 1)
+    if type(schema_version) is not int:
+        return False, "invalid_schema_version"
+    if schema_version not in (1, 2):
+        return False, "unsupported_schema_version"
+    if schema_version == 1:
+        records = artifact.get("activity_records", [])
+        return (True, None) if isinstance(records, list) else (False, "invalid_activity_records")
+
+    cutoff_raw = artifact.get("training_cutoff_date")
     try:
+        cutoff = datetime.strptime(str(cutoff_raw), "%Y-%m-%d").date()
+    except Exception:
+        return False, "invalid_training_cutoff_date"
+    if target_date is not None and cutoff >= target_date:
+        return False, "training_cutoff_not_before_target"
+    profiles = artifact.get("capacity_weighted_profiles")
+    if not isinstance(profiles, dict) or not isinstance(profiles.get("default"), dict):
+        return False, "missing_default_capacity_profile"
+
+    def _validate_profile(profile: dict, label: str) -> tuple[bool, str | None]:
+        try:
+            support = int(profile.get("support_count", 0))
+            values = np.asarray(profile.get("active_capacity_fraction"), dtype=float).reshape(-1)
+            uncertainty = float(profile.get("uncertainty", 0.0))
+        except Exception:
+            return False, f"invalid_{label}_profile"
+        if support <= 0:
+            return False, f"invalid_{label}_support"
+        if values.size != SLOTS_DAY or not np.all(np.isfinite(values)):
+            return False, f"invalid_{label}_shape"
+        if np.any(values < 0.0) or np.any(values > 1.0) or not math.isfinite(uncertainty) or uncertainty < 0.0:
+            return False, f"invalid_{label}_bounds"
+        return True, None
+
+    valid, reason = _validate_profile(profiles["default"], "default")
+    if not valid:
+        return valid, reason
+    per_inverter = profiles.get("per_inverter", {})
+    if not isinstance(per_inverter, dict):
+        return False, "invalid_per_inverter_profiles"
+    for inverter, profile in per_inverter.items():
+        if not isinstance(profile, dict):
+            return False, f"invalid_inverter_{inverter}_profile"
+        valid, reason = _validate_profile(profile, f"inverter_{inverter}")
+        if not valid:
+            return valid, reason
+    if "activity_records" in artifact and not isinstance(artifact.get("activity_records"), list):
+        return False, "invalid_activity_records"
+    return True, None
+
+def save_forecast_artifacts(artifact: dict) -> bool:
+    temp_file: Path | None = None
+    try:
+        valid, reason = _validate_forecast_artifact(artifact, target_date=datetime.now(_TZ_UTC8).date())
+        if not valid:
+            raise ValueError(f"invalid artifact: {reason}")
         ARTIFACT_FILE.parent.mkdir(parents=True, exist_ok=True)
-        dump(artifact, ARTIFACT_FILE)
+        temp_file = ARTIFACT_FILE.with_name(f".{ARTIFACT_FILE.name}.{uuid.uuid4().hex}.tmp")
+        dump(artifact, temp_file)
+
+        # Re-open and fully validate the serialised representation before an
+        # atomic replacement.  A unique temp name makes concurrent rebuilds
+        # independent and the finally block guarantees cleanup on any failure.
+        test_load = load(temp_file)
+        valid, reason = _validate_forecast_artifact(test_load, target_date=datetime.now(_TZ_UTC8).date())
+        if not valid:
+            raise ValueError(f"serialised artifact failed validation: {reason}")
+        os.replace(temp_file, ARTIFACT_FILE)
         return True
     except Exception as e:
         log.error("Artifact save failed %s: %s", ARTIFACT_FILE, e)
         return False
+    finally:
+        if temp_file is not None:
+            try:
+                temp_file.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 def load_forecast_artifacts(today: date | None = None, allow_build: bool = False) -> dict | None:
     if ARTIFACT_FILE.exists():
         try:
             data = load(ARTIFACT_FILE)
             if isinstance(data, dict):
-                return data
+                valid, reason = _validate_forecast_artifact(data, target_date=today)
+                if valid:
+                    return data
+                log.warning("Forecast artifact rejected [%s]: %s", ARTIFACT_FILE, reason)
         except Exception as e:
             log.warning("Artifact load failed %s: %s", ARTIFACT_FILE, e)
 
@@ -6392,8 +7084,17 @@ def load_forecast_artifacts(today: date | None = None, allow_build: bool = False
         if not history_days:
             return None
         artifact = build_forecast_artifacts(history_days)
-        save_forecast_artifacts(artifact)
-        return artifact
+        if not save_forecast_artifacts(artifact):
+            return None
+        try:
+            persisted = load(ARTIFACT_FILE)
+            valid, reason = _validate_forecast_artifact(persisted, target_date=today)
+            if isinstance(persisted, dict) and valid:
+                return persisted
+            log.warning("Rebuilt forecast artifact failed persisted validation: %s", reason)
+        except Exception as exc:
+            log.warning("Rebuilt forecast artifact reload failed: %s", exc)
+        return None
 
     return None
 
@@ -9852,14 +10553,24 @@ def _ensure_forecast_table(conn: sqlite3.Connection, table_name: str) -> None:
             kwh_hi     REAL DEFAULT 0,
             source     TEXT DEFAULT 'service',
             updated_ts INTEGER NOT NULL,
+            series_run_id TEXT,
             PRIMARY KEY(date, slot)
         )
         """
     )
+    try:
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN series_run_id TEXT")
+    except sqlite3.OperationalError:
+        pass
     conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{index_prefix}_ts ON {table_name}(ts)")
     conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{index_prefix}_date_ts ON {table_name}(date, ts)")
 
-def _write_forecast_db(key: str, day: str, series: list[dict]) -> bool:
+def _write_forecast_db(
+    key: str,
+    day: str,
+    series: list[dict],
+    updated_ts: int | None = None,
+) -> bool:
     """
     Persist day-ahead slots to SQLite so forecast data is unified with AppData DB.
     Keeps file write path for compatibility while DB is now the source of truth.
@@ -9877,6 +10588,7 @@ def _write_forecast_db(key: str, day: str, series: list[dict]) -> bool:
         return False
 
     rows = []
+    write_ts = int(updated_ts if updated_ts is not None else time.time() * 1000)
     for rec in series:
         t = str(rec.get("time", "")).strip()
         try:
@@ -9897,7 +10609,8 @@ def _write_forecast_db(key: str, day: str, series: list[dict]) -> bool:
                 float(rec.get("kWh_lo", rec.get("kwh_lo", 0)) or 0.0),
                 float(rec.get("kWh_hi", rec.get("kwh_hi", 0)) or 0.0),
                 "service",
-                int(time.time() * 1000),
+                write_ts,
+                rec.get("series_run_id"),
             )
         )
 
@@ -9910,8 +10623,8 @@ def _write_forecast_db(key: str, day: str, series: list[dict]) -> bool:
                 cur.executemany(
                     f"""
                     INSERT INTO {table_name}
-                    (date, ts, slot, time_hms, kwh_inc, kwh_lo, kwh_hi, source, updated_ts)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (date, ts, slot, time_hms, kwh_inc, kwh_lo, kwh_hi, source, updated_ts, series_run_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(date, slot) DO UPDATE SET
                         ts=excluded.ts,
                         time_hms=excluded.time_hms,
@@ -9919,7 +10632,8 @@ def _write_forecast_db(key: str, day: str, series: list[dict]) -> bool:
                         kwh_lo=excluded.kwh_lo,
                         kwh_hi=excluded.kwh_hi,
                         source=excluded.source,
-                        updated_ts=excluded.updated_ts
+                        updated_ts=excluded.updated_ts,
+                        series_run_id=excluded.series_run_id
                     """,
                     rows,
                 )
@@ -10145,11 +10859,249 @@ def _write_forecast_run_audit_from_python(
             return None
     return None
 
-def write_forecast(key: str, day: str, series: list[dict]) -> bool:
+def _constraint_snapshot_for_replay(day_s: str) -> dict:
+    _, constraint_meta = build_operational_constraint_mask(day_s)
+    cap_dispatch = np.asarray(
+        constraint_meta.get("cap_dispatch_mask", np.zeros(SLOTS_DAY)), dtype=bool
+    )
+    manual = np.asarray(
+        constraint_meta.get("manual_constraint_mask", np.zeros(SLOTS_DAY)), dtype=bool
+    )
+    outage = np.asarray(_build_1000h_inverter_outage_mask(day_s), dtype=bool)
+    for name, arr in (("cap_dispatch", cap_dispatch), ("manual", manual), ("outage", outage)):
+        if arr.size != SLOTS_DAY:
+            raise ValueError(f"{name} constraint mask has {arr.size} slots, expected {SLOTS_DAY}")
+    blend_override = _setting_float_or_none("forecastIntradayBlendMax", 0.0, 1.0)
+    inverter_node_map = _get_inverter_node_map()
+    reporting_capacity_kw = {
+        str(int(inverter)): float(max(1, len(nodes)) * NODE_KW_DEPENDABLE)
+        for inverter, nodes in sorted(inverter_node_map.items())
+        if nodes
+    }
+    if not reporting_capacity_kw:
+        raise ValueError("cannot capture replay basis without inverter topology")
+    physical_profile = plant_capacity_profile()
+    export_limit_mw = float(load_forecast_export_limit_mw())
+    export_cap_slot_kwh = export_limit_mw * 1000.0 * SLOT_MIN / 60.0
+    return {
+        "schema_version": 2,
+        "captured_ts": int(time.time() * 1000),
+        "slot_cap_kwh": float(slot_cap_kwh(False)),
+        "cap_dispatch_mask": cap_dispatch.astype(np.uint8).tolist(),
+        "manual_constraint_mask": manual.astype(np.uint8).tolist(),
+        "outage_mask": outage.astype(np.uint8).tolist(),
+        "constraint_event_count": int(constraint_meta.get("event_count", 0) or 0),
+        "export_curtailment": {
+            "tolerance": float(CAP_DISPATCH_TOLERANCE),
+            "export_limit_mw": export_limit_mw,
+            "export_cap_slot_kwh": export_cap_slot_kwh,
+            "baseline_multiplier": 1.05,
+        },
+        "capacity_basis": {
+            "inverter_node_map": {
+                str(int(inverter)): [int(node) for node in nodes]
+                for inverter, nodes in sorted(inverter_node_map.items())
+            },
+            "reporting_capacity_kw": reporting_capacity_kw,
+            "total_reporting_capacity_kw": float(sum(reporting_capacity_kw.values())),
+            "node_kw_dependable": float(NODE_KW_DEPENDABLE),
+            "plant_max_kw": float(physical_profile.get("max_kw", 0.0)),
+            "plant_dependable_kw": float(physical_profile.get("dependable_kw", 0.0)),
+        },
+        "nowcast_config": {
+            "forecastIntradayBlendMax": float(
+                INTRADAY_BLEND_MAX if blend_override is None else blend_override
+            ),
+        },
+    }
+
+
+def _parse_replay_constraint_snapshot(snapshot: dict) -> dict:
+    """Validate and normalise every causal setting/topology replay depends on."""
+    if not isinstance(snapshot, dict) or type(snapshot.get("schema_version")) is not int:
+        raise ValueError("invalid constraint snapshot schema")
+    if snapshot.get("schema_version") != 2:
+        raise ValueError("unsupported constraint snapshot schema")
+    slot_cap = float(snapshot.get("slot_cap_kwh"))
+    blend_max = float((snapshot.get("nowcast_config") or {}).get("forecastIntradayBlendMax"))
+    if not math.isfinite(slot_cap) or slot_cap <= 0.0:
+        raise ValueError("invalid physical slot cap")
+    if not math.isfinite(blend_max) or not 0.0 <= blend_max <= 1.0:
+        raise ValueError("invalid issue-time blend setting")
+
+    masks = {
+        "cap_dispatch_mask": _normalise_slot_mask(snapshot.get("cap_dispatch_mask")),
+        "manual_constraint_mask": _normalise_slot_mask(snapshot.get("manual_constraint_mask")),
+        "outage_mask": _normalise_slot_mask(snapshot.get("outage_mask")),
+    }
+    export = snapshot.get("export_curtailment")
+    if not isinstance(export, dict):
+        raise ValueError("missing export-curtailment basis")
+    tolerance = float(export.get("tolerance"))
+    export_limit_mw = float(export.get("export_limit_mw"))
+    export_cap_slot = float(export.get("export_cap_slot_kwh"))
+    baseline_multiplier = float(export.get("baseline_multiplier"))
+    expected_export_slot = export_limit_mw * 1000.0 * SLOT_MIN / 60.0
+    if (
+        not all(math.isfinite(v) for v in (tolerance, export_limit_mw, export_cap_slot, baseline_multiplier))
+        or not 0.0 < tolerance <= 1.0 or export_limit_mw <= 0.0
+        or export_cap_slot <= 0.0 or baseline_multiplier <= 1.0
+        or not math.isclose(export_cap_slot, expected_export_slot, rel_tol=1e-9, abs_tol=1e-9)
+    ):
+        raise ValueError("invalid export-curtailment basis")
+
+    basis = snapshot.get("capacity_basis")
+    if not isinstance(basis, dict):
+        raise ValueError("missing capacity/topology basis")
+    raw_node_map = basis.get("inverter_node_map")
+    raw_capacities = basis.get("reporting_capacity_kw")
+    if not isinstance(raw_node_map, dict) or not isinstance(raw_capacities, dict):
+        raise ValueError("invalid capacity/topology basis")
+    node_map: dict[int, list[int]] = {}
+    capacities: dict[int, float] = {}
+    for raw_inv, raw_nodes in raw_node_map.items():
+        inv = int(raw_inv)
+        nodes = _sanitize_units(raw_nodes)
+        if inv <= 0 or not nodes or len(nodes) != len(raw_nodes):
+            raise ValueError("invalid inverter topology")
+        node_map[inv] = nodes
+    for raw_inv, raw_capacity in raw_capacities.items():
+        inv = int(raw_inv)
+        capacity = float(raw_capacity)
+        if inv <= 0 or not math.isfinite(capacity) or capacity <= 0.0:
+            raise ValueError("invalid reporting capacity")
+        capacities[inv] = capacity
+    if not node_map or set(node_map) != set(capacities):
+        raise ValueError("topology and reporting capacity disagree")
+    total_capacity = float(basis.get("total_reporting_capacity_kw"))
+    plant_max_kw = float(basis.get("plant_max_kw"))
+    plant_dependable_kw = float(basis.get("plant_dependable_kw"))
+    if (
+        not all(math.isfinite(v) and v > 0.0 for v in (total_capacity, plant_max_kw, plant_dependable_kw))
+        or not math.isclose(total_capacity, sum(capacities.values()), rel_tol=1e-9, abs_tol=1e-6)
+        or not math.isclose(slot_cap, plant_max_kw * SLOT_MIN / 60.0, rel_tol=1e-9, abs_tol=1e-6)
+    ):
+        raise ValueError("inconsistent capacity basis")
+    return {
+        **masks,
+        "slot_cap_kwh": slot_cap,
+        "blend_max": blend_max,
+        "export_curtailment": {
+            "tolerance": tolerance,
+            "export_limit_mw": export_limit_mw,
+            "export_cap_slot_kwh": export_cap_slot,
+            "baseline_multiplier": baseline_multiplier,
+        },
+        "inverter_node_map": node_map,
+        "reporting_capacity_kw": capacities,
+    }
+
+def _capture_immutable_dayahead_issuance(
+    day_s: str,
+    series: list[dict],
+    weather_snapshot: dict,
+    *,
+    base_run_audit_id: int | None = None,
+    source: str = "service",
+    constraint_snapshot: dict | None = None,
+) -> str | None:
+    """Append one complete causal replay issuance after weather/audit success."""
+    if not isinstance(weather_snapshot, dict) or str(weather_snapshot.get("day") or "") != str(day_s):
+        log.warning("Immutable day-ahead capture skipped [%s]: exact weather snapshot unavailable", day_s)
+        return None
+    try:
+        constraints = constraint_snapshot if constraint_snapshot is not None else _constraint_snapshot_for_replay(day_s)
+        parsed_constraints = _parse_replay_constraint_snapshot(constraints)
+    except Exception as exc:
+        log.warning("Immutable day-ahead capture rejected [%s]: invalid causal constraint basis: %s", day_s, exc)
+        return None
+
+    parsed_rows: list[tuple[int, str, float, float, float]] = []
+    seen_slots: set[int] = set()
+    cap = float(parsed_constraints["slot_cap_kwh"])
+    for rec in series or []:
+        if not isinstance(rec, dict):
+            return None
+        time_hms = str(rec.get("time") or rec.get("time_hms") or "")
+        slot = _parse_slot_from_time_text(day_s, time_hms)
+        mid = _coerce_optional_non_negative_float(rec.get("kWh_inc", rec.get("kwh_inc")))
+        low = _coerce_optional_non_negative_float(rec.get("kWh_lo", rec.get("kwh_lo")))
+        high = _coerce_optional_non_negative_float(rec.get("kWh_hi", rec.get("kwh_hi")))
+        if (
+            slot is None or slot in seen_slots or mid is None or low is None or high is None
+            or not (SOLAR_START_SLOT <= slot < SOLAR_END_SLOT)
+            or low > mid + 1e-9 or mid > high + 1e-9 or high > cap + 1e-9
+        ):
+            log.warning("Immutable day-ahead capture rejected [%s]: invalid slot/band", day_s)
+            return None
+        seen_slots.add(slot)
+        parsed_rows.append((int(slot), time_hms, float(mid), float(low), float(high)))
+    if seen_slots != set(range(SOLAR_START_SLOT, SOLAR_END_SLOT)):
+        log.warning("Immutable day-ahead capture rejected [%s]: incomplete solar slot set", day_s)
+        return None
+
+    try:
+        weather_json, weather_sha = _canonical_json_sha256(weather_snapshot)
+        constraint_json, constraint_sha = _canonical_json_sha256(constraints)
+        checksum = _immutable_basis_checksum(parsed_rows)
+        generated_ts = int(time.time() * 1000)
+        issuance_id = f"DI-{generated_ts}-{uuid.uuid4().hex[:10]}"
+        model_sha = _file_sha256(MODEL_BUNDLE_FILE) if MODEL_BUNDLE_FILE.exists() else None
+        artifact_sha = _file_sha256(ARTIFACT_FILE) if ARTIFACT_FILE.exists() else None
+        with _open_sqlite(APP_DB_FILE, SQLITE_WRITE_TIMEOUT_SEC, readonly=False) as conn:
+            _ensure_immutable_dayahead_tables(conn)
+            conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                INSERT INTO forecast_dayahead_issuance(
+                    issuance_id, date, generated_ts, source, expected_slot_count,
+                    basis_checksum, weather_snapshot_json, weather_snapshot_sha256,
+                    constraint_snapshot_json, constraint_snapshot_sha256,
+                    model_sha256, artifact_sha256, base_run_audit_id, created_by
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    issuance_id, str(day_s), generated_ts, str(source or "service"),
+                    len(parsed_rows), checksum, weather_json, weather_sha,
+                    constraint_json, constraint_sha, model_sha, artifact_sha,
+                    int(base_run_audit_id) if base_run_audit_id is not None else None,
+                    "forecast_engine",
+                ),
+            )
+            conn.executemany(
+                """
+                INSERT INTO forecast_dayahead_immutable(
+                    date, issuance_id, generated_ts, slot, time_hms,
+                    kwh_inc, kwh_lo, kwh_hi, source
+                ) VALUES(?,?,?,?,?,?,?,?,?)
+                """,
+                [
+                    (str(day_s), issuance_id, generated_ts, slot, time_hms, mid, low, high, str(source or "service"))
+                    for slot, time_hms, mid, low, high in parsed_rows
+                ],
+            )
+            conn.commit()
+        return issuance_id
+    except Exception as exc:
+        log.warning("Immutable day-ahead capture failed [%s]: %s", day_s, exc)
+        return None
+
+def write_forecast(
+    key: str,
+    day: str,
+    series: list[dict],
+    *,
+    updated_ts: int | None = None,
+) -> bool:
     ctx = _load_json(FORECAST_CTX)
     ctx.setdefault(key, {})[day] = series
     ok_file = _save_json(FORECAST_CTX, ctx)
-    ok_db = _write_forecast_db(key, day, series)
+    ok_db = (
+        _write_forecast_db(key, day, series)
+        if updated_ts is None
+        else _write_forecast_db(key, day, series, updated_ts=updated_ts)
+    )
     if ok_file:
         log.info("Wrote %s[%s] %d slots", key, day, len(series))
     if ok_db and not ok_file:
@@ -10170,38 +11122,245 @@ def load_forecast_weather_for_day(day: str) -> pd.DataFrame | None:
     source = "forecast" if not _is_past_day(day) else "archive"
     return fetch_weather(day, source=source)
 
-def build_intraday_adjusted_forecast(day: date) -> tuple[list[dict] | None, dict]:
-    day_s = day.isoformat()
-    dayahead, _ = load_dayahead_with_presence(day_s)
-    actual, actual_present = load_actual_loss_adjusted_with_presence(day_s)
+def _weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
+    """Robust weighted median with finite-value and positive-weight guards."""
+    vals = np.asarray(values, dtype=float).reshape(-1)
+    wts = np.asarray(weights, dtype=float).reshape(-1)
+    valid = np.isfinite(vals) & np.isfinite(wts) & (wts > 0)
+    vals = vals[valid]
+    wts = wts[valid]
+    if vals.size == 0:
+        raise ValueError("weighted median requires at least one finite value")
+    order = np.argsort(vals, kind="stable")
+    vals = vals[order]
+    wts = wts[order]
+    cumulative = np.cumsum(wts)
+    idx = int(np.searchsorted(cumulative, cumulative[-1] / 2.0, side="left"))
+    return float(vals[min(idx, vals.size - 1)])
+
+def _nowcast_short_weight(lead_minutes: float, half_life_minutes: float = NOWCAST_HALF_LIFE_MINUTES) -> float:
+    half_life = max(float(half_life_minutes), 1.0)
+    return float(math.exp(-math.log(2.0) * max(0.0, float(lead_minutes)) / half_life))
+
+def _intraday_cutoff_slot(actual_present: np.ndarray, cutoff_slot: int | None) -> int:
+    if cutoff_slot is not None:
+        return int(np.clip(int(cutoff_slot), 0, SLOTS_DAY - 1))
+    present = np.where(np.asarray(actual_present, dtype=bool))[0]
+    return int(present[-1]) if present.size else -1
+
+def _load_intraday_inputs(day_s: str) -> dict:
+    dayahead, dayahead_present = load_dayahead_with_presence(day_s)
+    actual, actual_present = load_actual_loss_adjusted_with_presence(day_s, min_solar_slots=0)
     _, constraint_meta = build_operational_constraint_mask(day_s)
-    # Use 1000H alarm-based outage mask instead of stale audit_log operational_mask
-    inverter_outage_mask = _build_1000h_inverter_outage_mask(day_s)
-    cap_dispatch_mask = np.asarray(constraint_meta.get("cap_dispatch_mask"), dtype=bool)
-    operational_mask = inverter_outage_mask | cap_dispatch_mask
+    outage = _build_1000h_inverter_outage_mask(day_s).copy()
+    cap_dispatch = np.asarray(
+        constraint_meta.get("cap_dispatch_mask", np.zeros(SLOTS_DAY)), dtype=bool
+    )
+    manual_constraint = np.asarray(
+        constraint_meta.get("manual_constraint_mask", np.zeros(SLOTS_DAY)), dtype=bool
+    )
+    if cap_dispatch.size != SLOTS_DAY:
+        cap_dispatch = np.resize(cap_dispatch, SLOTS_DAY).astype(bool)
+    if manual_constraint.size != SLOTS_DAY:
+        manual_constraint = np.resize(manual_constraint, SLOTS_DAY).astype(bool)
+    return {
+        "dayahead": None if dayahead is None else np.asarray(dayahead, dtype=float),
+        "dayahead_present": dayahead_present,
+        "actual": None if actual is None else np.asarray(actual, dtype=float),
+        "actual_present": actual_present,
+        "outage_mask": np.asarray(outage, dtype=bool),
+        "cap_dispatch_mask": cap_dispatch,
+        "constraint_meta": constraint_meta,
+    }
+
+def _intraday_weather_frame(day_s: str) -> pd.DataFrame:
+    weather_hourly = load_forecast_weather_for_day(day_s)
+    if weather_hourly is not None and not weather_hourly.empty:
+        return interpolate_5min(weather_hourly, day_s)
+    return pd.DataFrame({
+        "cloud": np.zeros(SLOTS_DAY), "cloud_low": np.zeros(SLOTS_DAY),
+        "cloud_mid": np.zeros(SLOTS_DAY), "cloud_high": np.zeros(SLOTS_DAY),
+        "rad": np.zeros(SLOTS_DAY), "rh": np.zeros(SLOTS_DAY),
+        "temp": np.zeros(SLOTS_DAY), "wind": np.zeros(SLOTS_DAY),
+        "precip": np.zeros(SLOTS_DAY), "cape": np.zeros(SLOTS_DAY),
+    })
+
+def _normalise_slot_mask(value, default: bool = False) -> np.ndarray:
+    if value is None:
+        return np.full(SLOTS_DAY, bool(default), dtype=bool)
+    arr = np.asarray(value, dtype=bool).reshape(-1)
+    if arr.size != SLOTS_DAY:
+        raise ValueError(f"slot mask has {arr.size} values, expected {SLOTS_DAY}")
+    return arr.copy()
+
+def _prepare_nowcast_inputs(inputs: dict) -> tuple[dict | None, dict]:
+    """Validate observation presence and physical bounds without fabricating zeros."""
+    diagnostics = {
+        "excluded_invalid_actual_slots": 0,
+        "excluded_over_cap_actual_slots": 0,
+        "invalid_dayahead_slots": 0,
+    }
+    if not isinstance(inputs, dict) or inputs.get("dayahead") is None or inputs.get("actual") is None:
+        return None, diagnostics
+    try:
+        dayahead_raw = np.asarray(inputs["dayahead"], dtype=float).reshape(-1)
+        actual_raw = np.asarray(inputs["actual"], dtype=float).reshape(-1)
+        if dayahead_raw.size != SLOTS_DAY or actual_raw.size != SLOTS_DAY:
+            return None, diagnostics
+        requested_cap = inputs.get("slot_cap_kwh")
+        cap = float(requested_cap) if requested_cap is not None else float(slot_cap_kwh(False))
+        if not math.isfinite(cap) or cap <= 0.0:
+            return None, diagnostics
+        dayahead_present = _normalise_slot_mask(
+            inputs.get("dayahead_present"), default=True
+        )
+        actual_present = _normalise_slot_mask(inputs.get("actual_present"), default=False)
+        outage = _normalise_slot_mask(inputs.get("outage_mask"), default=False)
+        cap_dispatch = _normalise_slot_mask(inputs.get("cap_dispatch_mask"), default=False)
+        manual_constraint = _normalise_slot_mask(
+            inputs.get("manual_constraint_mask"), default=False
+        )
+        export_curtailment = (
+            _normalise_slot_mask(inputs.get("export_curtailment_mask"), default=False)
+            if "export_curtailment_mask" in inputs else None
+        )
+    except Exception:
+        return None, diagnostics
+
+    dayahead_valid = (
+        np.isfinite(dayahead_raw) & (dayahead_raw >= 0.0) & (dayahead_raw <= cap + 1e-9)
+    )
+    invalid_da = dayahead_present & (~dayahead_valid)
+    diagnostics["invalid_dayahead_slots"] = int(np.count_nonzero(invalid_da))
+    dayahead_present &= dayahead_valid
+    # A nowcast must have one complete physical baseline over the solar window.
+    if not np.all(dayahead_present[SOLAR_START_SLOT:SOLAR_END_SLOT]):
+        return None, diagnostics
+
+    finite_non_negative = np.isfinite(actual_raw) & (actual_raw >= 0.0)
+    over_cap = finite_non_negative & (actual_raw > cap + 1e-9)
+    diagnostics["excluded_invalid_actual_slots"] = int(
+        np.count_nonzero(actual_present & (~finite_non_negative))
+    )
+    diagnostics["excluded_over_cap_actual_slots"] = int(
+        np.count_nonzero(actual_present & over_cap)
+    )
+    actual_present &= finite_non_negative & (~over_cap)
+    return {
+        **inputs,
+        "dayahead": np.where(dayahead_present, dayahead_raw, 0.0),
+        "dayahead_present": dayahead_present,
+        "actual": np.where(actual_present, actual_raw, 0.0),
+        "actual_present": actual_present,
+        "outage_mask": outage,
+        "cap_dispatch_mask": cap_dispatch,
+        "manual_constraint_mask": manual_constraint,
+        "export_curtailment_mask": export_curtailment,
+        "slot_cap_kwh": cap,
+    }, diagnostics
+
+def _validate_nowcast_output(
+    values: np.ndarray,
+    lo: np.ndarray,
+    hi: np.ndarray,
+    meta: dict,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """Enforce the common finite/cap/P10<=P50<=P90 output contract."""
+    try:
+        mid = np.asarray(values, dtype=float).reshape(-1).copy()
+        low = np.asarray(lo, dtype=float).reshape(-1).copy()
+        high = np.asarray(hi, dtype=float).reshape(-1).copy()
+        if mid.size != SLOTS_DAY or low.size != SLOTS_DAY or high.size != SLOTS_DAY:
+            raise ValueError("wrong slot count")
+        if not (np.all(np.isfinite(mid)) and np.all(np.isfinite(low)) and np.all(np.isfinite(high))):
+            raise ValueError("non-finite output")
+        cap = float(meta.get("slot_cap_kwh") or slot_cap_kwh(False))
+        corrections = int(np.count_nonzero(
+            (mid < 0.0) | (mid > cap) | (low < 0.0) | (low > mid)
+            | (high < mid) | (high > cap)
+        ))
+        mid = np.clip(mid, 0.0, cap)
+        low = np.clip(low, 0.0, mid)
+        high = np.clip(high, mid, cap)
+        mid[:SOLAR_START_SLOT] = low[:SOLAR_START_SLOT] = high[:SOLAR_START_SLOT] = 0.0
+        mid[SOLAR_END_SLOT:] = low[SOLAR_END_SLOT:] = high[SOLAR_END_SLOT:] = 0.0
+        meta["output_validation_corrections"] = corrections
+        return mid, low, high
+    except Exception as exc:
+        meta["fallback_reason"] = f"invalid_band_or_series:{type(exc).__name__}"
+        meta["run_status"] = "failed"
+        return None
+
+def _weather_frame_from_issuance_snapshot(day_s: str, snapshot: dict) -> pd.DataFrame | None:
+    if not isinstance(snapshot, dict) or str(snapshot.get("day") or "") != str(day_s):
+        return None
+    records = list(snapshot.get("applied_hourly") or snapshot.get("raw_hourly") or [])
+    hourly = _weather_records_to_frame(records, day_s)
+    if hourly.empty:
+        return None
+    frame = interpolate_5min(hourly, day_s)
+    return frame if len(frame) == SLOTS_DAY else None
+
+def _build_current_intraday_adjusted_forecast(
+    day: date,
+    cutoff_slot: int | None = None,
+    input_bundle: dict | None = None,
+) -> tuple[list[dict] | None, dict]:
+    """Original ratio-space algorithm retained as champion and rollback path."""
+    day_s = day.isoformat()
+    raw_inputs = input_bundle if input_bundle is not None else _load_intraday_inputs(day_s)
+    inputs, input_diagnostics = _prepare_nowcast_inputs(raw_inputs)
+    if inputs is None:
+        return None, {
+            "day": day_s,
+            "algorithm_version": NOWCAST_CURRENT_ALGORITHM_VERSION,
+            "execution_mode": "off",
+            "run_status": "skipped",
+            "fallback_reason": "invalid_or_incomplete_inputs",
+            **input_diagnostics,
+        }
+    dayahead = inputs["dayahead"]
+    actual = inputs["actual"]
+    actual_present = inputs["actual_present"]
+    inverter_outage_mask = inputs["outage_mask"]
+    cap_dispatch_mask = inputs["cap_dispatch_mask"]
+    manual_constraint_mask = inputs["manual_constraint_mask"]
+    operational_mask = inverter_outage_mask | cap_dispatch_mask | manual_constraint_mask
     meta = {
         "day": day_s,
+        "algorithm_version": NOWCAST_CURRENT_ALGORITHM_VERSION,
+        "execution_mode": "off",
         "observed_slots": 0,
         "last_observed_slot": None,
         "global_ratio": 1.0,
         "recent_ratio": 1.0,
         "strength": 0.0,
         "constraint_mode": "none",
+        "run_status": "skipped",
+        "slot_cap_kwh": float(inputs["slot_cap_kwh"]),
+        **input_diagnostics,
     }
     if dayahead is None or actual is None or actual_present is None:
+        meta["fallback_reason"] = "missing_dayahead_or_actual"
         return None, meta
 
-    actual_present_arr = np.asarray(actual_present, dtype=bool)
+    dayahead = np.asarray(dayahead, dtype=float)
+    actual = np.asarray(actual, dtype=float)
+    actual_present_arr = np.array(actual_present, dtype=bool, copy=True)
+    cutoff = _intraday_cutoff_slot(actual_present_arr, cutoff_slot)
+    visible = np.arange(SLOTS_DAY) <= cutoff
+    actual_present_arr &= visible
     unconstrained_mask = actual_present_arr & (~operational_mask)
     cap_free_mask = actual_present_arr & (~cap_dispatch_mask)
     fallback_mask = actual_present_arr.copy()
 
-    try:
-        _actual_f = np.asarray(actual, dtype=float)
-        _dayahead_f = np.asarray(dayahead, dtype=float)
-        export_curtailed = curtailed_mask(_actual_f, _dayahead_f)
-    except Exception:
-        export_curtailed = np.zeros(len(actual_present_arr), dtype=bool)
+    if inputs.get("export_curtailment_mask") is not None:
+        export_curtailed = inputs["export_curtailment_mask"]
+    else:
+        try:
+            export_curtailed = curtailed_mask(actual, dayahead)
+        except Exception:
+            export_curtailed = np.zeros(len(actual_present_arr), dtype=bool)
     unconstrained_mask = unconstrained_mask & (~export_curtailed)
 
     def solar_slots(mask: np.ndarray) -> np.ndarray:
@@ -10218,64 +11377,62 @@ def build_intraday_adjusted_forecast(day: date) -> tuple[list[dict] | None, dict
     if solar_obs.size < INTRADAY_MIN_OBS_SLOTS:
         meta["observed_slots"] = int(solar_obs.size)
         meta["constraint_mode"] = constraint_mode
+        meta["fallback_reason"] = "insufficient_observed_slots"
         return None, meta
 
     observed_slots = solar_obs[-min(int(solar_obs.size), INTRADAY_MAX_OBS_SLOTS):]
     last_observed_slot = int(observed_slots[-1])
     obs_mask = np.zeros(SLOTS_DAY, dtype=bool)
     obs_mask[observed_slots] = True
-    adjusted = np.asarray(dayahead, dtype=float).copy()
-    adjusted[actual_present_arr] = np.asarray(actual, dtype=float)[actual_present_arr]
+    adjusted = dayahead.copy()
+    adjusted[actual_present_arr] = actual[actual_present_arr]
 
-    dayahead_obs_total = float(np.asarray(dayahead, dtype=float)[obs_mask].sum())
-    actual_obs_total = float(np.asarray(actual, dtype=float)[obs_mask].sum())
+    dayahead_obs_total = float(dayahead[obs_mask].sum())
+    actual_obs_total = float(actual[obs_mask].sum())
     global_ratio = float(np.clip(actual_obs_total / max(dayahead_obs_total, 1.0), INTRADAY_RATIO_CLIP[0], INTRADAY_RATIO_CLIP[1]))
 
     recent_slots = observed_slots[-12:]
     recent_mask = np.zeros(SLOTS_DAY, dtype=bool)
     recent_mask[recent_slots] = True
-    dayahead_recent_total = float(np.asarray(dayahead, dtype=float)[recent_mask].sum())
-    actual_recent_total = float(np.asarray(actual, dtype=float)[recent_mask].sum())
+    dayahead_recent_total = float(dayahead[recent_mask].sum())
+    actual_recent_total = float(actual[recent_mask].sum())
     recent_ratio = float(np.clip(actual_recent_total / max(dayahead_recent_total, 1.0), INTRADAY_RECENT_RATIO_CLIP[0], INTRADAY_RECENT_RATIO_CLIP[1]))
     # Operator override (option A): `forecastIntradayBlendMax` caps how strongly
     # intraday observed-vs-dayahead corrections are blended in; unset = engine default.
-    _blend_max_ovr = _setting_float_or_none("forecastIntradayBlendMax", 0.0, 1.0)
-    _blend_max = INTRADAY_BLEND_MAX if _blend_max_ovr is None else _blend_max_ovr
+    if input_bundle is not None and inputs.get("blend_max") is not None:
+        _blend_max = float(np.clip(float(inputs["blend_max"]), 0.0, 1.0))
+    else:
+        _blend_max_ovr = _setting_float_or_none("forecastIntradayBlendMax", 0.0, 1.0)
+        _blend_max = INTRADAY_BLEND_MAX if _blend_max_ovr is None else _blend_max_ovr
     strength = float(min(_blend_max, 0.24 + 0.02 * len(observed_slots)))
 
-    cap_slot = slot_cap_kwh(False)
-    for step, slot in enumerate(range(last_observed_slot + 1, SOLAR_END_SLOT)):
+    cap_slot = float(inputs["slot_cap_kwh"])
+    for step, slot in enumerate(range(cutoff + 1, SOLAR_END_SLOT)):
         fade = min(1.0, step / 24.0)
         target_ratio = (1.0 - fade) * recent_ratio + fade * global_ratio
         factor = 1.0 + strength * (target_ratio - 1.0)
-        adjusted[slot] = float(np.clip(np.asarray(dayahead, dtype=float)[slot] * factor, 0.0, cap_slot))
+        adjusted[slot] = float(np.clip(dayahead[slot] * factor, 0.0, cap_slot))
 
-    for slot in range(max(SOLAR_START_SLOT + 1, last_observed_slot + 1), SOLAR_END_SLOT):
+    for slot in range(max(SOLAR_START_SLOT + 1, cutoff + 1), SOLAR_END_SLOT):
         upper = adjusted[slot - 1] + 320.0
         lower = max(0.0, adjusted[slot - 1] - 320.0)
-        adjusted[slot] = float(np.clip(adjusted[slot], lower, upper))
+        adjusted[slot] = float(np.clip(adjusted[slot], lower, min(cap_slot, upper)))
 
     adjusted[:SOLAR_START_SLOT] = 0.0
     adjusted[SOLAR_END_SLOT:] = 0.0
 
-    weather_hourly = load_forecast_weather_for_day(day_s)
-    if weather_hourly is not None and not weather_hourly.empty:
-        w5 = interpolate_5min(weather_hourly, day_s)
-    else:
-        w5 = pd.DataFrame({
-            "cloud": np.zeros(SLOTS_DAY),
-            "cloud_low": np.zeros(SLOTS_DAY),
-            "cloud_mid": np.zeros(SLOTS_DAY),
-            "cloud_high": np.zeros(SLOTS_DAY),
-            "rad": np.zeros(SLOTS_DAY),
-            "rh": np.zeros(SLOTS_DAY),
-            "temp": np.zeros(SLOTS_DAY),
-            "wind": np.zeros(SLOTS_DAY),
-            "precip": np.zeros(SLOTS_DAY),
-            "cape": np.zeros(SLOTS_DAY),
-        })
+    w5 = inputs.get("weather_frame") if input_bundle is not None else None
+    if not isinstance(w5, pd.DataFrame):
+        w5 = _intraday_weather_frame(day_s)
     lo, hi = confidence_bands(adjusted, w5, day_s)
+    for slot in range(SOLAR_START_SLOT, SOLAR_END_SLOT):
+        lo[slot] = float(np.clip(lo[slot], 0.0, adjusted[slot]))
+        hi[slot] = float(np.clip(hi[slot], adjusted[slot], cap_slot))
 
+    validated = _validate_nowcast_output(adjusted, lo, hi, meta)
+    if validated is None:
+        return None, meta
+    adjusted, lo, hi = validated
     meta.update({
         "observed_slots": int(len(observed_slots)),
         "last_observed_slot": last_observed_slot,
@@ -10283,27 +11440,968 @@ def build_intraday_adjusted_forecast(day: date) -> tuple[list[dict] | None, dict
         "recent_ratio": recent_ratio,
         "strength": strength,
         "constraint_mode": constraint_mode,
+        "cutoff_slot": cutoff,
         "cap_dispatch_slots": int(np.count_nonzero(cap_dispatch_mask[SOLAR_START_SLOT:SOLAR_END_SLOT])),
         "operational_slots": int(np.count_nonzero(operational_mask[SOLAR_START_SLOT:SOLAR_END_SLOT])),
+        "run_status": "success",
     })
     return to_ui_series(adjusted, lo, hi, day_s), meta
 
-def run_intraday_adjusted(day: date) -> bool:
-    series, meta = build_intraday_adjusted_forecast(day)
+def _build_robust_intraday_nowcast(
+    day: date,
+    cutoff_slot: int | None = None,
+    input_bundle: dict | None = None,
+) -> tuple[list[dict] | None, dict]:
+    """Leakage-safe robust log-ratio nowcast challenger."""
     day_s = day.isoformat()
+    raw_inputs = input_bundle if input_bundle is not None else _load_intraday_inputs(day_s)
+    inputs, input_diagnostics = _prepare_nowcast_inputs(raw_inputs)
+    if inputs is None:
+        return None, {
+            "day": day_s,
+            "algorithm_version": NOWCAST_ALGORITHM_VERSION,
+            "execution_mode": "shadow",
+            "actual_source": "pac_loss_adjusted",
+            "run_status": "skipped",
+            "fallback_reason": "invalid_or_incomplete_inputs",
+            **input_diagnostics,
+        }
+    dayahead = inputs["dayahead"]
+    actual = inputs["actual"]
+    actual_present = inputs["actual_present"]
+    outage_mask = inputs["outage_mask"]
+    cap_dispatch_mask = inputs["cap_dispatch_mask"]
+    manual_constraint_mask = inputs["manual_constraint_mask"]
+    meta = {
+        "day": day_s,
+        "algorithm_version": NOWCAST_ALGORITHM_VERSION,
+        "execution_mode": "shadow",
+        "actual_source": "pac_loss_adjusted",
+        "eligible_slots": 0,
+        "observed_slots": 0,
+        "cutoff_slot": None,
+        "last_observed_slot": None,
+        "recent_log_ratio": None,
+        "session_log_ratio": None,
+        "strength": 0.0,
+        "half_life_minutes": NOWCAST_HALF_LIFE_MINUTES,
+        "constraint_mode": "strict_unconstrained",
+        "run_status": "fallback",
+        "fallback_reason": None,
+        "slot_cap_kwh": float(inputs["slot_cap_kwh"]),
+        **input_diagnostics,
+    }
+    if dayahead is None or actual is None or actual_present is None:
+        meta["fallback_reason"] = "missing_dayahead_or_actual"
+        return None, meta
+
+    dayahead = np.asarray(dayahead, dtype=float)
+    actual = np.asarray(actual, dtype=float)
+    present = np.array(actual_present, dtype=bool, copy=True)
+    cutoff = _intraday_cutoff_slot(present, cutoff_slot)
+    visible = np.arange(SLOTS_DAY) <= cutoff
+    present &= visible
+    meta["cutoff_slot"] = cutoff
+    meta["observed_slots"] = int(np.count_nonzero(present[SOLAR_START_SLOT:SOLAR_END_SLOT]))
+
+    if inputs.get("export_curtailment_mask") is not None:
+        export_curtailed = inputs["export_curtailment_mask"]
+    else:
+        try:
+            export_curtailed = curtailed_mask(actual, dayahead)
+        except Exception:
+            export_curtailed = np.zeros(SLOTS_DAY, dtype=bool)
+    capacity_coverage = inputs.get("capacity_coverage") if input_bundle is not None else None
+    if capacity_coverage is None:
+        capacity_coverage = _load_energy_reporting_coverage(day_s)
+    capacity_coverage = np.asarray(capacity_coverage, dtype=float).reshape(-1)
+    if capacity_coverage.size != SLOTS_DAY:
+        capacity_coverage = np.zeros(SLOTS_DAY, dtype=float)
+    capacity_coverage = np.where(np.isfinite(capacity_coverage), np.clip(capacity_coverage, 0.0, 1.0), 0.0)
+    solar = (np.arange(SLOTS_DAY) >= SOLAR_START_SLOT) & (np.arange(SLOTS_DAY) < SOLAR_END_SLOT)
+    baseline_quality = dayahead >= NOWCAST_MIN_BASELINE_ENERGY
+    capacity_quality = capacity_coverage >= NOWCAST_MIN_CAPACITY_COVERAGE
+    eligible_mask = (
+        present & solar & baseline_quality & capacity_quality
+        & (~cap_dispatch_mask) & (~manual_constraint_mask)
+        & (~outage_mask) & (~export_curtailed)
+    )
+    eligible_slots = np.where(eligible_mask)[0]
+    if eligible_slots.size > INTRADAY_MAX_OBS_SLOTS:
+        eligible_slots = eligible_slots[-INTRADAY_MAX_OBS_SLOTS:]
+    meta.update({
+        "eligible_slots": int(eligible_slots.size),
+        "excluded_cap_slots": int(np.count_nonzero(present & cap_dispatch_mask & solar)),
+        "excluded_manual_slots": int(np.count_nonzero(present & manual_constraint_mask & solar)),
+        "excluded_outage_slots": int(np.count_nonzero(present & outage_mask & solar)),
+        "excluded_curtailed_slots": int(np.count_nonzero(present & export_curtailed & solar)),
+        "excluded_quality_slots": int(np.count_nonzero(present & solar & (~baseline_quality | ~capacity_quality))),
+        "capacity_coverage_mean": float(np.mean(capacity_coverage[eligible_slots])) if eligible_slots.size else 0.0,
+    })
+
+    adjusted = dayahead.copy()
+    adjusted[present] = actual[present]
+    factors = np.ones(SLOTS_DAY, dtype=float)
+    fallback_reason = None
+    if eligible_slots.size < INTRADAY_MIN_OBS_SLOTS:
+        fallback_reason = "insufficient_eligible_slots"
+    else:
+        try:
+            session_slots = eligible_slots[-INTRADAY_MAX_OBS_SLOTS:]
+            recent_slots = session_slots[-NOWCAST_RECENT_SLOTS:]
+            log_ratios = np.log(
+                np.maximum(actual[session_slots], NOWCAST_LOG_RATIO_EPSILON)
+                / np.maximum(dayahead[session_slots], NOWCAST_LOG_RATIO_EPSILON)
+            )
+            session_weights = np.exp(np.linspace(-1.6, 0.0, session_slots.size))
+            recent_values = log_ratios[-recent_slots.size:]
+            recent_weights = np.exp(np.linspace(-1.8, 0.0, recent_slots.size))
+            session_bias = _weighted_median(log_ratios, session_weights)
+            recent_bias = _weighted_median(recent_values, recent_weights)
+            volatility = float(np.std(recent_values)) if recent_values.size > 1 else 0.0
+            count_conf = float(np.clip(session_slots.size / 18.0, 0.0, 1.0))
+            energy_conf = 0.65 + 0.35 * float(np.clip(np.median(dayahead[session_slots]) / 40.0, 0.0, 1.0))
+            coverage_mean = float(np.mean(capacity_coverage[session_slots]))
+            coverage_conf = 0.70 + 0.30 * float(np.clip(
+                (coverage_mean - NOWCAST_MIN_CAPACITY_COVERAGE)
+                / max(1.0 - NOWCAST_MIN_CAPACITY_COVERAGE, 1e-6), 0.0, 1.0
+            ))
+            volatility_conf = NOWCAST_VOLATILITY_DAMP if volatility >= 0.35 else float(np.clip(1.0 - 0.35 * volatility, NOWCAST_VOLATILITY_DAMP, 1.0))
+            if input_bundle is not None and inputs.get("blend_max") is not None:
+                blend_max = float(np.clip(float(inputs["blend_max"]), 0.0, 1.0))
+            else:
+                blend_override = _setting_float_or_none("forecastIntradayBlendMax", 0.0, 1.0)
+                blend_max = INTRADAY_BLEND_MAX if blend_override is None else blend_override
+            strength = float(np.clip(
+                blend_max * count_conf * energy_conf * coverage_conf * volatility_conf,
+                0.0, blend_max,
+            ))
+            last_observed_slot = int(session_slots[-1])
+            cap_slot = float(inputs["slot_cap_kwh"])
+            for slot in range(cutoff + 1, SOLAR_END_SLOT):
+                lead_minutes = float((slot - cutoff) * SLOT_MIN)
+                short_weight = _nowcast_short_weight(lead_minutes)
+                # The complete correction fades toward the immutable day-ahead
+                # baseline. Keeping a permanent session component would make
+                # the half-life claim false and over-correct the late horizon.
+                bias = strength * short_weight * (
+                    (1.0 - NOWCAST_RECENT_MIX) * session_bias
+                    + NOWCAST_RECENT_MIX * recent_bias
+                )
+                factor = float(np.clip(math.exp(bias), NOWCAST_RATIO_FLOOR, NOWCAST_RATIO_CEILING))
+                factors[slot] = factor
+                adjusted[slot] = float(np.clip(dayahead[slot] * factor, 0.0, cap_slot))
+            for slot in range(max(SOLAR_START_SLOT + 1, cutoff + 1), SOLAR_END_SLOT):
+                adjusted[slot] = float(np.clip(
+                    adjusted[slot], max(0.0, adjusted[slot - 1] - 320.0), min(cap_slot, adjusted[slot - 1] + 320.0)
+                ))
+            meta.update({
+                "last_observed_slot": last_observed_slot,
+                "recent_log_ratio": float(recent_bias),
+                "session_log_ratio": float(session_bias),
+                "recent_ratio": float(math.exp(recent_bias)),
+                "global_ratio": float(math.exp(session_bias)),
+                "ratio_volatility": volatility,
+                "strength": strength,
+                "run_status": "success",
+            })
+        except Exception as exc:
+            fallback_reason = f"calculation_error:{type(exc).__name__}"
+
+    if fallback_reason:
+        meta["fallback_reason"] = fallback_reason
+        meta["run_status"] = "fallback"
+    adjusted[:SOLAR_START_SLOT] = 0.0
+    adjusted[SOLAR_END_SLOT:] = 0.0
+    cap_slot = float(inputs["slot_cap_kwh"])
+    w5 = inputs.get("weather_frame") if input_bundle is not None else None
+    if not isinstance(w5, pd.DataFrame):
+        w5 = _intraday_weather_frame(day_s)
+    base_lo = inputs.get("dayahead_lo") if input_bundle is not None else None
+    base_hi = inputs.get("dayahead_hi") if input_bundle is not None else None
+    if base_lo is None or base_hi is None:
+        base_lo, base_hi = _load_dayahead_bands_from_db(day_s)
+    base_lo = np.nan_to_num(base_lo, nan=0.0, posinf=0.0, neginf=0.0)
+    base_hi = np.nan_to_num(base_hi, nan=0.0, posinf=0.0, neginf=0.0)
+    if not np.any(base_hi > base_lo):
+        base_lo, base_hi = confidence_bands(dayahead, w5, day_s)
+        base_lo = np.nan_to_num(base_lo, nan=0.0, posinf=0.0, neginf=0.0)
+        base_hi = np.nan_to_num(base_hi, nan=0.0, posinf=0.0, neginf=0.0)
+    lo = np.zeros(SLOTS_DAY, dtype=float)
+    hi = np.zeros(SLOTS_DAY, dtype=float)
+    last_obs = int(meta.get("last_observed_slot") if meta.get("last_observed_slot") is not None else cutoff)
+    for slot in range(SOLAR_START_SLOT, SOLAR_END_SLOT):
+        if present[slot]:
+            lo[slot] = hi[slot] = adjusted[slot]
+            continue
+        lead_minutes = max(0.0, float((slot - last_obs) * SLOT_MIN))
+        horizon_uncertainty = 0.02 * (1.0 + lead_minutes / 120.0)
+        factor = factors[slot]
+        lo[slot] = float(np.clip(base_lo[slot] * factor * (1.0 - horizon_uncertainty), 0.0, cap_slot))
+        hi[slot] = float(np.clip(base_hi[slot] * factor * (1.0 + horizon_uncertainty), 0.0, cap_slot))
+        lo[slot] = float(np.clip(lo[slot], 0.0, adjusted[slot]))
+        hi[slot] = float(np.clip(hi[slot], adjusted[slot], cap_slot))
+    validated = _validate_nowcast_output(adjusted, lo, hi, meta)
+    if validated is None:
+        return None, meta
+    adjusted, lo, hi = validated
+    meta.update({
+        "dayahead_total_kwh": float(np.sum(dayahead[SOLAR_START_SLOT:SOLAR_END_SLOT])),
+        "nowcast_total_kwh": float(np.sum(adjusted[SOLAR_START_SLOT:SOLAR_END_SLOT])),
+    })
+    return to_ui_series(adjusted, lo, hi, day_s), meta
+
+def _run_with_deadline(func, args: tuple, deadline_monotonic: float):
+    """Run a read-only builder without ever waiting beyond the global deadline.
+
+    A daemon worker is intentional here: Python threads cannot be force-killed,
+    but these builders perform no writes, the result queue is isolated, and a
+    timed-out worker cannot keep the process alive or consume the fallback's
+    budget.  This avoids ThreadPoolExecutor.shutdown(wait=True), which made the
+    former 30-second timeout illusory.
+    """
+    global _nowcast_timed_out_worker
+    with _nowcast_worker_guard:
+        if _nowcast_timed_out_worker is not None:
+            if _nowcast_timed_out_worker.is_alive():
+                raise NowcastWorkerQuarantinedError(
+                    "prior timed-out nowcast worker is still draining"
+                )
+            _nowcast_timed_out_worker = None
+
+    remaining = float(deadline_monotonic) - time.monotonic()
+    if remaining <= 0.0:
+        raise TimeoutError(f"{getattr(func, '__name__', 'builder')} exceeded global deadline")
+    result_queue: queue.Queue = queue.Queue(maxsize=1)
+
+    def _worker() -> None:
+        global _nowcast_timed_out_worker
+        try:
+            result_queue.put((True, func(*args)), block=False)
+        except BaseException as exc:  # propagate builder failures to caller
+            try:
+                result_queue.put((False, exc), block=False)
+            except queue.Full:
+                pass
+        finally:
+            current = threading.current_thread()
+            with _nowcast_worker_guard:
+                if _nowcast_timed_out_worker is current:
+                    _nowcast_timed_out_worker = None
+
+    worker = threading.Thread(
+        target=_worker,
+        name=f"nowcast-{getattr(func, '__name__', 'builder')}",
+        daemon=True,
+    )
+    worker.start()
+    try:
+        succeeded, value = result_queue.get(timeout=max(0.0, remaining))
+    except queue.Empty as exc:
+        with _nowcast_worker_guard:
+            _nowcast_timed_out_worker = worker
+        raise TimeoutError(
+            f"{getattr(func, '__name__', 'builder')} exceeded global deadline"
+        ) from exc
+    if succeeded:
+        return value
+    raise value
+
+def build_intraday_adjusted_forecast(
+    day: date,
+    cutoff_slot: int | None = None,
+    mode_override: str | None = None,
+    execution_budget_seconds: float = NOWCAST_EXECUTION_BUDGET_SEC,
+) -> tuple[list[dict] | None, dict]:
+    """Single production entry with off/shadow/active rollout semantics.
+
+    Both implementations apply the operator's ``forecastIntradayBlendMax``
+    cap internally, preserving the established tuning contract.
+    """
+    series_run_id = f"IR-{int(time.time()*1000)}-{uuid.uuid4().hex[:8]}"
+    mode = str(mode_override or _setting_string_or_default(
+        "forecastVirtualNowcastMode", "off", set(NOWCAST_VALID_MODES)
+    )).strip().lower()
+    deadline = time.monotonic() + max(0.001, min(float(execution_budget_seconds), NOWCAST_EXECUTION_BUDGET_SEC))
+
+    def _finalize(s, m):
+        m["series_run_id"] = series_run_id
+        m["configured_mode"] = mode
+        if s:
+            for row in s:
+                row["series_run_id"] = series_run_id
+        return s, m
+
+    def _failure_meta(algorithm: str, stage: str, exc: Exception) -> dict:
+        timed_out = isinstance(exc, TimeoutError)
+        quarantined = isinstance(exc, NowcastWorkerQuarantinedError)
+        return {
+            "day": day.isoformat(),
+            "algorithm_version": algorithm,
+            "run_status": "failed",
+            "fallback_reason": f"{stage}_{'worker_quarantined' if quarantined else ('timeout' if timed_out else 'exception')}:{type(exc).__name__}",
+        }
+
+    if mode == "off":
+        try:
+            series, meta = _run_with_deadline(
+                _build_current_intraday_adjusted_forecast, (day, cutoff_slot), deadline
+            )
+        except Exception as exc:
+            series = None
+            meta = _failure_meta(NOWCAST_CURRENT_ALGORITHM_VERSION, "champion", exc)
+        meta["execution_mode"] = "off"
+        meta["run_status"] = "success" if series else str(meta.get("run_status") or "skipped")
+        meta["challenger_status"] = "skipped"
+        meta["authoritative_algorithm"] = NOWCAST_CURRENT_ALGORITHM_VERSION
+        return _finalize(series, meta)
+
+    try:
+        challenger_series, challenger_meta = _run_with_deadline(
+            _build_robust_intraday_nowcast, (day, cutoff_slot), deadline
+        )
+    except Exception as exc:
+        challenger_series = None
+        challenger_meta = _failure_meta(NOWCAST_ALGORITHM_VERSION, "challenger", exc)
+
+    challenger_meta["execution_mode"] = mode
+    challenger_outcome = str(challenger_meta.get("run_status") or "failed")
+    if mode == "shadow":
+        try:
+            current_series, current_meta = _run_with_deadline(
+                _build_current_intraday_adjusted_forecast, (day, cutoff_slot), deadline
+            )
+        except Exception as exc:
+            current_series = None
+            current_meta = _failure_meta(NOWCAST_CURRENT_ALGORITHM_VERSION, "champion", exc)
+        challenger_meta["authoritative_algorithm"] = NOWCAST_CURRENT_ALGORITHM_VERSION
+        challenger_meta["challenger_would_write"] = bool(challenger_series and challenger_outcome == "success")
+        challenger_meta["current_meta"] = current_meta
+        if challenger_series and challenger_outcome == "success":
+            cutoff_slot_val = challenger_meta.get("cutoff_slot")
+            if cutoff_slot_val is not None:
+                checkpoints = {}
+                for lead_min in [5, 15, 30, 60, 120]:
+                    target_slot = cutoff_slot_val + math.ceil(lead_min / SLOT_MIN)
+                    target_idx = target_slot - SOLAR_START_SLOT
+                    if 0 <= target_idx < len(challenger_series):
+                        row = challenger_series[target_idx]
+                        checkpoints[str(lead_min)] = {
+                            "slot": target_slot,
+                            "time": row["time"],
+                            "p10_kwh": row["kWh_lo"],
+                            "p50_kwh": row["kWh_inc"],
+                            "p90_kwh": row["kWh_hi"]
+                        }
+                cutoff_idx = cutoff_slot_val - SOLAR_START_SLOT
+                if cutoff_idx >= -1:
+                    future_rows = challenger_series[max(0, cutoff_idx + 1):]
+                    checkpoints["remaining_day"] = {
+                        "p10_kwh": round(sum(r["kWh_lo"] for r in future_rows), 6),
+                        "p50_kwh": round(sum(r["kWh_inc"] for r in future_rows), 6),
+                        "p90_kwh": round(sum(r["kWh_hi"] for r in future_rows), 6)
+                    }
+                challenger_meta["checkpoints"] = checkpoints
+        challenger_meta["challenger_status"] = challenger_outcome
+        challenger_meta["run_status"] = "success" if current_series else "failed"
+        return _finalize(current_series, challenger_meta)
+
+    if challenger_series and challenger_meta.get("run_status") == "success":
+        challenger_meta["authoritative_algorithm"] = NOWCAST_ALGORITHM_VERSION
+        challenger_meta["challenger_status"] = "success"
+        return _finalize(challenger_series, challenger_meta)
+
+    try:
+        current_series, current_meta = _run_with_deadline(
+            _build_current_intraday_adjusted_forecast, (day, cutoff_slot), deadline
+        )
+    except Exception as exc:
+        current_series = None
+        current_meta = _failure_meta(NOWCAST_CURRENT_ALGORITHM_VERSION, "champion", exc)
+    challenger_meta["authoritative_algorithm"] = NOWCAST_CURRENT_ALGORITHM_VERSION
+    challenger_meta["current_meta"] = current_meta
+    challenger_meta["run_status"] = "success" if current_series else "failed"
+    challenger_meta["fallback_used"] = bool(current_series)
+    challenger_meta["challenger_status"] = challenger_outcome
+    return _finalize(current_series, challenger_meta)
+
+def _ensure_intraday_audit_table(conn: sqlite3.Connection) -> None:
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS forecast_intraday_run_audit (
+            id INTEGER PRIMARY KEY,
+            target_date TEXT NOT NULL,
+            generated_ts INTEGER NOT NULL,
+            cutoff_slot INTEGER NOT NULL,
+            base_run_audit_id INTEGER,
+            base_forecast_updated_ts INTEGER,
+            algorithm_version TEXT NOT NULL,
+            execution_mode TEXT NOT NULL DEFAULT 'active',
+            actual_source TEXT NOT NULL DEFAULT 'pac_loss_adjusted',
+            eligible_slots INTEGER NOT NULL DEFAULT 0,
+            excluded_cap_slots INTEGER NOT NULL DEFAULT 0,
+            excluded_outage_slots INTEGER NOT NULL DEFAULT 0,
+            excluded_quality_slots INTEGER NOT NULL DEFAULT 0,
+            excluded_curtailed_slots INTEGER NOT NULL DEFAULT 0,
+            recent_log_ratio REAL,
+            session_log_ratio REAL,
+            strength REAL,
+            half_life_minutes REAL,
+            dayahead_total_kwh REAL,
+            nowcast_total_kwh REAL,
+            constraint_mode TEXT,
+            run_status TEXT NOT NULL DEFAULT 'success',
+            notes_json TEXT,
+            series_run_id TEXT,
+            output_updated_ts INTEGER,
+            authoritative_algorithm TEXT,
+            challenger_status TEXT,
+            authoritative_write_status TEXT,
+            configured_mode TEXT,
+            prior_series_preserved INTEGER,
+            UNIQUE(target_date, generated_ts)
+        );
+        CREATE INDEX IF NOT EXISTS idx_fira_date_ts
+            ON forecast_intraday_run_audit(target_date, generated_ts DESC);
+        CREATE INDEX IF NOT EXISTS idx_fira_status
+            ON forecast_intraday_run_audit(target_date, run_status);
+    """)
+    for col in [
+        "series_run_id TEXT",
+        "output_updated_ts INTEGER",
+        "authoritative_algorithm TEXT",
+        "challenger_status TEXT",
+        "authoritative_write_status TEXT",
+        "configured_mode TEXT",
+        "prior_series_preserved INTEGER"
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE forecast_intraday_run_audit ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass
+
+def _insert_intraday_run_audit_row(
+    conn: sqlite3.Connection,
+    day_s: str,
+    meta: dict,
+    *,
+    generated_ts: int | None = None,
+) -> int:
+    """Insert one audit row on the caller's transaction."""
+    audit_ts = int(generated_ts if generated_ts is not None else time.time() * 1000)
+    notes = {
+        "fallback_reason": meta.get("fallback_reason"),
+        "authoritative_algorithm": meta.get("authoritative_algorithm"),
+        "challenger_would_write": meta.get("challenger_would_write"),
+        "capacity_coverage_mean": meta.get("capacity_coverage_mean"),
+        "ratio_volatility": meta.get("ratio_volatility"),
+        "excluded_manual_slots": meta.get("excluded_manual_slots"),
+        "checkpoints": meta.get("checkpoints"),
+    }
+    base_row = None
+    if _sqlite_table_columns(conn, "forecast_run_audit"):
+        base_row = conn.execute(
+            """SELECT id FROM forecast_run_audit
+                 WHERE target_date=? AND run_status='success'
+                 ORDER BY is_authoritative_runtime DESC, generated_ts DESC LIMIT 1""",
+            (str(day_s),),
+        ).fetchone()
+    forecast_row = None
+    if _sqlite_table_columns(conn, "forecast_dayahead"):
+        forecast_row = conn.execute(
+            "SELECT MAX(updated_ts) FROM forecast_dayahead WHERE date=?",
+            (str(day_s),),
+        ).fetchone()
+    cur = conn.execute(
+                    """
+                    INSERT INTO forecast_intraday_run_audit(
+                        target_date, generated_ts, cutoff_slot,
+                        base_run_audit_id, base_forecast_updated_ts,
+                        algorithm_version, execution_mode, actual_source,
+                        eligible_slots, excluded_cap_slots, excluded_outage_slots,
+                        excluded_quality_slots, excluded_curtailed_slots,
+                        recent_log_ratio, session_log_ratio, strength,
+                        half_life_minutes, dayahead_total_kwh, nowcast_total_kwh,
+                        constraint_mode, run_status, notes_json,
+                        series_run_id, output_updated_ts, authoritative_algorithm,
+                        challenger_status, authoritative_write_status, configured_mode,
+                        prior_series_preserved
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        str(day_s), audit_ts, int(meta.get("cutoff_slot") or 0),
+                        int(base_row[0]) if base_row else None,
+                        int(forecast_row[0]) if forecast_row and forecast_row[0] is not None else None,
+                        str(meta.get("algorithm_version") or NOWCAST_ALGORITHM_VERSION),
+                        str(meta.get("execution_mode") or "active"),
+                        "pac_loss_adjusted",
+                        int(meta.get("eligible_slots", meta.get("observed_slots", 0)) or 0),
+                        int(meta.get("excluded_cap_slots", 0) or 0),
+                        int(meta.get("excluded_outage_slots", 0) or 0),
+                        int(meta.get("excluded_quality_slots", 0) or 0),
+                        int(meta.get("excluded_curtailed_slots", 0) or 0),
+                        float(meta["recent_log_ratio"]) if meta.get("recent_log_ratio") is not None else None,
+                        float(meta["session_log_ratio"]) if meta.get("session_log_ratio") is not None else None,
+                        float(meta.get("strength", 0.0) or 0.0),
+                        float(meta.get("half_life_minutes", NOWCAST_HALF_LIFE_MINUTES) or NOWCAST_HALF_LIFE_MINUTES),
+                        float(meta.get("dayahead_total_kwh", 0.0) or 0.0),
+                        float(meta.get("nowcast_total_kwh", 0.0) or 0.0),
+                        str(meta.get("constraint_mode") or "strict_unconstrained"),
+                        str(meta.get("run_status") or "unknown"),
+                        json.dumps(notes, separators=(",", ":"), sort_keys=True),
+                        meta.get("series_run_id"),
+                        meta.get("output_updated_ts"),
+                        meta.get("authoritative_algorithm"),
+                        meta.get("challenger_status"),
+                        meta.get("authoritative_write_status"),
+                        meta.get("configured_mode"),
+                        meta.get("prior_series_preserved"),
+                    ),
+    )
+    return int(cur.lastrowid)
+
+
+def _write_intraday_run_audit(day_s: str, meta: dict) -> int | None:
+    """Persist bounded nowcast diagnostics without touching day-ahead audit authority."""
+    if _read_operation_mode() != "gateway":
+        log.warning("Intraday audit write blocked in remote mode for %s", day_s)
+        return None
+    for attempt in range(1, SQLITE_RETRY_ATTEMPTS + 1):
+        try:
+            with _open_sqlite(APP_DB_FILE, SQLITE_WRITE_TIMEOUT_SEC, readonly=False) as conn:
+                _ensure_intraday_audit_table(conn)
+                audit_id = _insert_intraday_run_audit_row(conn, day_s, meta)
+                conn.commit()
+                return audit_id
+        except Exception as e:
+            if attempt < SQLITE_RETRY_ATTEMPTS and _is_retryable_sqlite_error(e):
+                _sleep_sqlite_retry(attempt)
+                continue
+            log.warning("Intraday audit write failed for %s: %s", day_s, e)
+            return None
+    return None
+
+
+def _prepare_intraday_forecast_rows(
+    day_s: str,
+    series: list[dict],
+    updated_ts: int,
+) -> list[tuple]:
+    """Validate a complete authoritative solar-window row batch before SQL."""
+    day_dt = datetime.fromisoformat(day_s)
+    expected_slots = set(range(SOLAR_START_SLOT, SOLAR_END_SLOT))
+    rows: list[tuple] = []
+    seen: set[int] = set()
+    series_ids: set[str] = set()
+    for rec in series or []:
+        if not isinstance(rec, dict):
+            raise ValueError("invalid intraday row")
+        time_hms = str(rec.get("time") or rec.get("time_hms") or "").strip()
+        slot = _parse_slot_from_time_text(day_s, time_hms)
+        mid = float(rec.get("kWh_inc", rec.get("kwh_inc")))
+        low = float(rec.get("kWh_lo", rec.get("kwh_lo")))
+        high = float(rec.get("kWh_hi", rec.get("kwh_hi")))
+        series_id = str(rec.get("series_run_id") or "").strip()
+        if (
+            slot is None or slot in seen or slot not in expected_slots or not series_id
+            or not all(math.isfinite(v) for v in (mid, low, high))
+            or not 0.0 <= low <= mid <= high
+        ):
+            raise ValueError("invalid intraday slot/band/provenance")
+        hh, mm, ss = [int(value) for value in time_hms.split(":")]
+        ts = int(datetime(day_dt.year, day_dt.month, day_dt.day, hh, mm, ss).timestamp() * 1000)
+        seen.add(slot)
+        series_ids.add(series_id)
+        rows.append((
+            str(day_s), ts, int(slot), f"{hh:02d}:{mm:02d}:{ss:02d}",
+            mid, low, high, "service", int(updated_ts), series_id,
+        ))
+    if seen != expected_slots or len(series_ids) != 1:
+        raise ValueError("intraday batch is incomplete or mixes series identities")
+    return sorted(rows, key=lambda row: int(row[2]))
+
+
+def _write_intraday_series_and_success_audit_atomic(
+    day_s: str,
+    series: list[dict],
+    meta: dict,
+    *,
+    updated_ts: int,
+) -> bool:
+    """Commit the authoritative row batch and its success audit together."""
+    if _read_operation_mode() != "gateway":
+        log.warning("Intraday authoritative write blocked in remote mode for %s", day_s)
+        return False
+    try:
+        rows = _prepare_intraday_forecast_rows(day_s, series, int(updated_ts))
+        series_id = str(rows[0][9])
+        if series_id != str(meta.get("series_run_id") or ""):
+            raise ValueError("audit/series provenance mismatch")
+    except Exception as exc:
+        log.warning("Intraday authoritative batch rejected for %s: %s", day_s, exc)
+        return False
+
+    for attempt in range(1, SQLITE_RETRY_ATTEMPTS + 1):
+        try:
+            with _open_sqlite(APP_DB_FILE, SQLITE_WRITE_TIMEOUT_SEC, readonly=False) as conn:
+                _ensure_forecast_table(conn, "forecast_intraday_adjusted")
+                _ensure_intraday_audit_table(conn)
+                conn.commit()
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute("DELETE FROM forecast_intraday_adjusted WHERE date=?", (str(day_s),))
+                conn.executemany(
+                    """
+                    INSERT INTO forecast_intraday_adjusted(
+                        date, ts, slot, time_hms, kwh_inc, kwh_lo, kwh_hi,
+                        source, updated_ts, series_run_id
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    rows,
+                )
+                _insert_intraday_run_audit_row(
+                    conn, day_s, meta, generated_ts=int(updated_ts)
+                )
+                conn.commit()
+            clear_forecast_data_cache()
+            # JSON is a legacy compatibility mirror, never the authority.  Its
+            # failure cannot invalidate an already atomic SQLite commit.
+            context = _load_json(FORECAST_CTX)
+            context.setdefault("PacEnergy_IntradayAdjusted", {})[day_s] = series
+            if not _save_json(FORECAST_CTX, context):
+                log.warning("Legacy intraday JSON mirror failed for %s", day_s)
+            return True
+        except Exception as exc:
+            if attempt < SQLITE_RETRY_ATTEMPTS and _is_retryable_sqlite_error(exc):
+                _sleep_sqlite_retry(attempt)
+                continue
+            log.warning("Atomic intraday series/audit write failed for %s: %s", day_s, exc)
+            return False
+    return False
+
+def score_completed_shadow_checkpoints(target_date: date, persist: bool = True) -> dict:
+    """Score exact stored shadow checkpoints against completed, masked truth.
+
+    No forecast is regenerated.  This distinction is essential: checkpoint
+    evidence evaluates what was actually recorded at issue time, including its
+    original bands and immutable day-ahead/constraint identity.
+    """
+    day_s = target_date.isoformat()
+    actual, actual_present = load_actual_loss_adjusted_with_presence(day_s, min_solar_slots=0)
+    if actual is None or actual_present is None:
+        return {"target_date": day_s, "status": "skipped_missing_actual", "audits_scored": 0}
+    actual_arr = np.asarray(actual, dtype=float).reshape(-1)
+    present = _normalise_slot_mask(actual_present)
+    if actual_arr.size != SLOTS_DAY:
+        return {"target_date": day_s, "status": "skipped_invalid_actual", "audits_scored": 0}
+
+    try:
+        _, truth_meta = build_operational_constraint_mask(day_s)
+        truth_cap = _normalise_slot_mask(truth_meta.get("cap_dispatch_mask"))
+        truth_manual = _normalise_slot_mask(truth_meta.get("manual_constraint_mask"))
+    except Exception as exc:
+        return {
+            "target_date": day_s,
+            "status": "failed_constraint_masks",
+            "error": type(exc).__name__,
+            "audits_scored": 0,
+        }
+
+    if not APP_DB_FILE.exists():
+        return {"target_date": day_s, "status": "skipped_missing_audits", "audits_scored": 0}
+    scored_count = 0
+    skipped_count = 0
+    already_scored_count = 0
+    try:
+        with _open_sqlite(APP_DB_FILE, SQLITE_WRITE_TIMEOUT_SEC, readonly=not persist) as conn:
+            if persist:
+                _ensure_intraday_audit_table(conn)
+            columns = _sqlite_table_columns(conn, "forecast_intraday_run_audit")
+            if not columns:
+                return {"target_date": day_s, "status": "skipped_missing_audits", "audits_scored": 0}
+            rows = conn.execute(
+                """
+                SELECT id, generated_ts, cutoff_slot, notes_json
+                  FROM forecast_intraday_run_audit
+                 WHERE target_date=? AND execution_mode='shadow'
+                 ORDER BY generated_ts ASC
+                """,
+                (day_s,),
+            ).fetchall()
+            for audit_id, generated_ts, cutoff_slot, notes_json in rows:
+                try:
+                    notes = json.loads(notes_json or "{}")
+                except Exception:
+                    skipped_count += 1
+                    continue
+                checkpoints = notes.get("checkpoints")
+                prior_scores = notes.get("checkpoint_scores")
+                if (
+                    isinstance(prior_scores, dict)
+                    and prior_scores.get("score_schema_version") == 2
+                    and prior_scores.get("status") == "scored"
+                ):
+                    already_scored_count += 1
+                    continue
+                if not isinstance(checkpoints, dict):
+                    scores = {
+                        "score_schema_version": 2,
+                        "status": "skipped_missing_stored_checkpoints",
+                        "scored_slot_count": 0,
+                    }
+                    notes["checkpoint_scores"] = scores
+                    if persist:
+                        conn.execute(
+                            "UPDATE forecast_intraday_run_audit SET notes_json=? WHERE id=?",
+                            (json.dumps(notes, separators=(",", ":"), sort_keys=True), int(audit_id)),
+                        )
+                    skipped_count += 1
+                    continue
+                immutable = _load_immutable_dayahead_bundle_from_db(day_s, int(generated_ts))
+                if not immutable:
+                    scores = {
+                        "score_schema_version": 2,
+                        "status": "skipped_missing_immutable_basis",
+                        "scored_slot_count": 0,
+                    }
+                else:
+                    try:
+                        parsed = _parse_replay_constraint_snapshot(
+                            immutable.get("constraint_snapshot") or {}
+                        )
+                        issue_cap = parsed["cap_dispatch_mask"]
+                        issue_manual = parsed["manual_constraint_mask"]
+                        issue_outage = parsed["outage_mask"]
+                        recorded_cap = parsed["slot_cap_kwh"]
+                        # Completed truth uses historical alarms with the stored
+                        # issue-time topology, never today's ipconfig.
+                        truth_outage = _query_1000h_inverter_outage_mask(
+                            day_s, parsed["inverter_node_map"], strict=True
+                        )
+                        export_basis = parsed["export_curtailment"]
+                        export_curtailed = _curtailed_mask_from_recorded_basis(
+                            actual_arr,
+                            immutable["dayahead"],
+                            tolerance=export_basis["tolerance"],
+                            export_cap_slot_kwh=export_basis["export_cap_slot_kwh"],
+                            baseline_multiplier=export_basis["baseline_multiplier"],
+                        )
+                        constraint_mask = (
+                            truth_cap | truth_manual | truth_outage | issue_cap
+                            | issue_manual | issue_outage | export_curtailed
+                        )
+                    except Exception as exc:
+                        scores = {
+                            "score_schema_version": 2,
+                            "status": "skipped_invalid_constraint_basis",
+                            "error": type(exc).__name__,
+                            "scored_slot_count": 0,
+                        }
+                    else:
+                        valid_truth = (
+                            present & np.isfinite(actual_arr) & (actual_arr >= 0.0)
+                            & (actual_arr <= recorded_cap + 1e-9)
+                        )
+                        scoring_mask = valid_truth & (~constraint_mask)
+                        required_horizons = {
+                            str(minutes): int(cutoff_slot) + int(math.ceil(minutes / SLOT_MIN))
+                            for minutes in NOWCAST_REPLAY_HORIZONS_MIN
+                            if int(cutoff_slot) + int(math.ceil(minutes / SLOT_MIN)) < SOLAR_END_SLOT
+                        }
+                        invalid_reason = None
+                        for horizon, expected_slot in required_horizons.items():
+                            checkpoint = checkpoints.get(horizon)
+                            try:
+                                values = tuple(float(checkpoint[key]) for key in ("p10_kwh", "p50_kwh", "p90_kwh"))
+                                slot = int(checkpoint.get("slot"))
+                            except Exception:
+                                invalid_reason = f"missing_or_invalid_horizon_{horizon}"
+                                break
+                            if slot != expected_slot:
+                                invalid_reason = f"misbound_horizon_{horizon}"
+                                break
+                            if (
+                                not all(math.isfinite(value) for value in values)
+                                or not 0.0 <= values[0] <= values[1] <= values[2] <= recorded_cap + 1e-9
+                            ):
+                                invalid_reason = f"invalid_horizon_band_{horizon}"
+                                break
+
+                        start = int(cutoff_slot) + 1
+                        remaining_slots = np.arange(start, SOLAR_END_SLOT, dtype=int)
+                        remaining_checkpoint = checkpoints.get("remaining_day")
+                        try:
+                            remaining_values = tuple(
+                                float(remaining_checkpoint[key])
+                                for key in ("p10_kwh", "p50_kwh", "p90_kwh")
+                            )
+                        except Exception:
+                            remaining_values = ()
+                        remaining_cap = recorded_cap * int(remaining_slots.size)
+                        if invalid_reason is None and (
+                            not remaining_values
+                            or not all(math.isfinite(value) for value in remaining_values)
+                            or not 0.0 <= remaining_values[0] <= remaining_values[1] <= remaining_values[2] <= remaining_cap + 1e-9
+                        ):
+                            invalid_reason = "invalid_remaining_day_band"
+
+                        if invalid_reason:
+                            scores = {
+                                "score_schema_version": 2,
+                                "status": "skipped_invalid_stored_checkpoints",
+                                "skip_reason": invalid_reason,
+                                "scored_slot_count": 0,
+                            }
+                        else:
+                            scores = {
+                                "score_schema_version": 2,
+                                "status": "scored",
+                                "truth_source": "pac_loss_adjusted",
+                                "basis_checksum": immutable.get("basis_checksum"),
+                                "issuance_id": immutable.get("issuance_id"),
+                                "constraint_masked_slot_count": int(np.count_nonzero(constraint_mask)),
+                                "horizons": {},
+                            }
+                            total_scored = 0
+                            for horizon, slot in required_horizons.items():
+                                checkpoint = checkpoints[horizon]
+                                p10, p50, p90 = (
+                                    float(checkpoint["p10_kwh"]),
+                                    float(checkpoint["p50_kwh"]),
+                                    float(checkpoint["p90_kwh"]),
+                                )
+                                item = {"target_slot": slot, "support_slot_count": 1, "scored_slot_count": 0}
+                                if not scoring_mask[slot]:
+                                    item.update(status="skipped", skip_reason="truth_missing_or_constrained")
+                                else:
+                                    truth = float(actual_arr[slot])
+                                    item.update(
+                                        status="scored", scored_slot_count=1, actual_kwh=truth,
+                                        absolute_error_kwh=abs(p50 - truth),
+                                        squared_error_kwh2=(p50 - truth) ** 2,
+                                        interval_covered=bool(p10 <= truth <= p90),
+                                    )
+                                    total_scored += 1
+                                scores["horizons"][horizon] = item
+
+                            remaining_valid = (
+                                remaining_slots[scoring_mask[remaining_slots]]
+                                if remaining_slots.size else remaining_slots
+                            )
+                            remaining_score = {
+                                "support_slot_count": int(remaining_slots.size),
+                                "scored_slot_count": int(remaining_valid.size),
+                            }
+                            if remaining_valid.size != remaining_slots.size or remaining_slots.size == 0:
+                                remaining_score.update(status="skipped", skip_reason="incomplete_or_constrained_truth")
+                            else:
+                                actual_total = float(np.sum(actual_arr[remaining_slots]))
+                                p10_total, p50_total, p90_total = remaining_values
+                                remaining_score.update(
+                                    status="scored", actual_kwh=actual_total,
+                                    absolute_error_kwh=abs(p50_total - actual_total),
+                                    ape_pct=abs(p50_total - actual_total) / max(actual_total, 0.1) * 100.0,
+                                    interval_covered=bool(p10_total <= actual_total <= p90_total),
+                                )
+                            scores["remaining_day"] = remaining_score
+                            scores["scored_slot_count"] = total_scored
+                            if total_scored == 0 and remaining_score.get("status") != "scored":
+                                scores["status"] = "skipped_no_valid_truth"
+
+                notes["checkpoint_scores"] = scores
+                if persist:
+                    conn.execute(
+                        "UPDATE forecast_intraday_run_audit SET notes_json=? WHERE id=?",
+                        (json.dumps(notes, separators=(",", ":"), sort_keys=True), int(audit_id)),
+                    )
+                scored_count += int(scores.get("status") == "scored")
+                skipped_count += int(scores.get("status") != "scored")
+            if persist:
+                conn.commit()
+    except Exception as exc:
+        log.warning("Shadow checkpoint scoring failed [%s]: %s", day_s, exc)
+        return {"target_date": day_s, "status": "failed", "error": type(exc).__name__, "audits_scored": scored_count}
+    return {
+        "target_date": day_s,
+        "status": "complete" if (scored_count or already_scored_count) else "skipped_no_scorable_audits",
+        "audits_scored": scored_count,
+        "audits_already_scored": already_scored_count,
+        "audits_skipped": skipped_count,
+    }
+
+
+def _score_shadow_checkpoint_backlog(
+    reference_date: date,
+    completed_dates: set[str],
+    *,
+    lookback_days: int = 14,
+) -> list[dict]:
+    """Retry incomplete completed days; remember only genuinely complete days."""
+    outcomes: list[dict] = []
+    for offset in range(max(1, int(lookback_days)), 0, -1):
+        target = reference_date - timedelta(days=offset)
+        key = target.isoformat()
+        if key in completed_dates:
+            continue
+        result = score_completed_shadow_checkpoints(target, persist=True)
+        outcomes.append(result)
+        if result.get("status") == "complete":
+            completed_dates.add(key)
+    return outcomes
+
+def _forecast_series_exists(table_name: str, day_s: str) -> bool:
+    if table_name not in {"forecast_dayahead", "forecast_intraday_adjusted"} or not APP_DB_FILE.exists():
+        return False
+    try:
+        with _open_sqlite(APP_DB_FILE, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
+            row = conn.execute(
+                f"SELECT 1 FROM {table_name} WHERE date=? LIMIT 1", (str(day_s),)
+            ).fetchone()
+            return bool(row)
+    except Exception:
+        return False
+
+def run_intraday_adjusted(day: date) -> bool:
+    day_s = day.isoformat()
+    had_prior_series = _forecast_series_exists("forecast_intraday_adjusted", day_s)
+    series, meta = build_intraday_adjusted_forecast(day)
     if not series:
         log.info(
             "Intraday-adjusted skipped [%s] - observed_slots=%d",
             day_s,
             int(meta.get("observed_slots", 0)),
         )
+        if str(meta.get("run_status") or "") not in {"failed", "timeout"}:
+            meta["run_status"] = "skipped"
+        meta["authoritative_write_status"] = "preserved" if had_prior_series else "no_output"
+        meta["prior_series_preserved"] = int(had_prior_series)
+        meta.pop("output_updated_ts", None)
+        if str(meta.get("execution_mode")) in {"shadow", "active", "off"}:
+            _write_intraday_run_audit(day_s, meta)
         return False
-    ok = write_forecast("PacEnergy_IntradayAdjusted", day_s, series)
+    output_updated_ts = int(time.time() * 1000)
+    meta["run_status"] = "success"
+    meta["authoritative_write_status"] = "success"
+    meta["prior_series_preserved"] = 0
+    meta["output_updated_ts"] = output_updated_ts
+    ok = _write_intraday_series_and_success_audit_atomic(
+        day_s, series, meta, updated_ts=output_updated_ts
+    )
+    if not ok:
+        meta["run_status"] = "write_failed"
+        meta["fallback_reason"] = meta.get("fallback_reason") or "series_write_failed"
+        meta["authoritative_write_status"] = "failed"
+        meta["prior_series_preserved"] = int(had_prior_series)
+        meta.pop("output_updated_ts", None)
+    # The success audit is already in the authoritative SQLite transaction.
+    # Only failure outcomes require a separate best-effort audit write.
+    if not ok and str(meta.get("execution_mode")) in {"shadow", "active", "off"}:
+        _write_intraday_run_audit(day_s, meta)
     if ok:
         log.info(
-            "Intraday-adjusted updated [%s] - observed_slots=%d last_slot=%s global_ratio=%.3f recent_ratio=%.3f strength=%.2f",
+            "Intraday-adjusted updated [%s] - mode=%s algo=%s eligible=%d last_slot=%s global_ratio=%.3f recent_ratio=%.3f strength=%.2f",
             day_s,
-            int(meta.get("observed_slots", 0)),
+            str(meta.get("execution_mode", "off")),
+            str(meta.get("authoritative_algorithm", meta.get("algorithm_version", "current"))),
+            int(meta.get("eligible_slots", meta.get("observed_slots", 0))),
             meta.get("last_observed_slot"),
             float(meta.get("global_ratio", 1.0)),
             float(meta.get("recent_ratio", 1.0)),
@@ -11077,8 +13175,9 @@ def run_dayahead(
 
     # 8. Write
     ok = write_forecast("PacEnergy_DayAhead", target_s, series)
+    _snapshot_saved = False
     if ok and weather_source in {"forecast", "snapshot"}:
-        save_forecast_weather_snapshot(
+        _snapshot_saved = save_forecast_weather_snapshot(
             target_s,
             raw_hourly,
             hourly_applied,
@@ -11098,6 +13197,7 @@ def run_dayahead(
             },
         )
 
+    _base_run_audit_id = None
     if ok and write_audit:
         # Build audit enrichment notes (Phase 2 gaps)
         _sc_kwh_snap = np.asarray(solcast_snapshot.get("forecast_kwh", []) if solcast_snapshot else [], dtype=float)
@@ -11152,7 +13252,7 @@ def run_dayahead(
         if "fallback" in (audit_generator_mode or ""):
             _notes_extra["fallback_reason"] = "node_delegation_failed"
 
-        _write_forecast_run_audit_from_python(
+        _base_run_audit_id = _write_forecast_run_audit_from_python(
             target_date=target_s,
             generator_mode=audit_generator_mode or "python_direct",
             weather_source=weather_source,
@@ -11168,6 +13268,24 @@ def run_dayahead(
             solcast_lo_total_kwh=float(np.asarray(solcast_snapshot.get("forecast_lo_kwh", []), dtype=float).sum()) if solcast_snapshot else None,
             solcast_hi_total_kwh=float(np.asarray(solcast_snapshot.get("forecast_hi_kwh", []), dtype=float).sum()) if solcast_snapshot else None,
         )
+
+    # Capture replay evidence only after the exact weather snapshot and any
+    # authoritative Python audit row exist.  A generic mutable-table sync must
+    # never mint an issuance because it cannot recover original issue time.
+    if ok:
+        _issuance_weather = load_forecast_weather_snapshot(target_s) if _snapshot_saved or weather_source == "snapshot" else None
+        if _issuance_weather:
+            _issuance_id = _capture_immutable_dayahead_issuance(
+                target_s,
+                series,
+                _issuance_weather,
+                base_run_audit_id=_base_run_audit_id,
+                source="python_direct",
+            )
+            if not _issuance_id:
+                log.error("Day-ahead written but immutable replay issuance capture failed [%s]", target_s)
+        else:
+            log.warning("Day-ahead written without immutable replay issuance [%s]: exact weather snapshot unavailable", target_s)
 
     return ok
 
@@ -11208,13 +13326,28 @@ def run_manual_generation(dates: list[date]) -> bool:
     forecast_qa(today_ref)
 
     ok_all = True
-    node_reachable = True
+    parent_locked_child = (
+        str(os.environ.get("ADSI_FORECAST_DIRECT_UNDER_PARENT_LOCK", "")).strip() == "1"
+    )
+    node_reachable = not parent_locked_child
 
     for d in dates:
         ok = False
         used_delegation = False
 
-        if node_reachable:
+        if parent_locked_child:
+            # This exact environment contract is set only by Node's generator
+            # child.  Node already owns the cross-process/date lock and creates
+            # the authoritative audit, so delegating or reacquiring here would
+            # deadlock/duplicate the same generation.
+            ok = bool(run_dayahead(
+                d,
+                today_ref,
+                write_audit=False,
+                audit_generator_mode="node_parent_locked_child",
+            ))
+            used_delegation = True
+        elif node_reachable:
             result = _delegate_run_dayahead(d, trigger="manual_cli")
             if result is not None:
                 ok = True
@@ -11420,6 +13553,605 @@ def run_backtest(dates: list[date]) -> bool:
         log.info("Backtest regimes: %s", ", ".join(regime_summary_parts))
     return True
 
+def _git_commit_hash() -> str | None:
+    try:
+        repo_root = Path(__file__).resolve().parent.parent
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo_root,
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        value = str(result.stdout or "").strip()
+        return value if result.returncode == 0 and value else None
+    except Exception:
+        return None
+
+def resolve_forecast_build_identity() -> dict:
+    """Resolve source or frozen identity without trusting stale adjacent JSON."""
+    repo_root = Path(__file__).resolve().parent.parent
+    is_frozen = bool(getattr(sys, "frozen", False) or getattr(sys, "_MEIPASS", None))
+
+    def _valid_hex(value, size: int) -> bool:
+        text = str(value or "").strip().lower()
+        return len(text) == size and all(ch in "0123456789abcdef" for ch in text)
+
+    def _canonical_timestamp_matches(data: dict) -> bool:
+        timestamp = data.get("build_timestamp")
+        recorded_utc = data.get("build_timestamp_utc")
+        if type(timestamp) is not int or timestamp < 0 or type(recorded_utc) is not str:
+            return False
+        try:
+            canonical_utc = datetime.fromtimestamp(
+                timestamp / 1000.0, tz=timezone.utc
+            ).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        except (OverflowError, OSError, ValueError):
+            return False
+        return recorded_utc == canonical_utc
+
+    if is_frozen:
+        roots = []
+        if getattr(sys, "_MEIPASS", None):
+            roots.append(Path(str(sys._MEIPASS)))
+        roots.extend((Path(__file__).resolve().parent, Path(sys.executable).resolve().parent))
+        build_info_path = next(
+            (root / "forecast-build-info.json" for root in roots if (root / "forecast-build-info.json").exists()),
+            None,
+        )
+        try:
+            data = json.loads(build_info_path.read_text(encoding="utf-8")) if build_info_path else {}
+            complete = bool(
+                isinstance(data, dict)
+                and data.get("schema_version") == 1
+                and isinstance(data.get("package_version"), str) and data.get("package_version")
+                and _valid_hex(data.get("git_commit"), 40)
+                and _valid_hex(data.get("source_hash"), 64)
+                and type(data.get("git_dirty")) is bool
+                and type(data.get("git_status_available")) is bool
+                and data.get("build_channel") in {"development", "signed-release"}
+                and data.get("source_path") == "services/forecast_engine.py"
+                and _canonical_timestamp_matches(data)
+                and isinstance(data.get("artifact_compatibility_version"), int)
+                and data.get("artifact_compatibility_version") > 0
+                and data.get("identity_status") == "verified"
+            )
+            promotion = bool(
+                complete and data.get("promotion_eligible") is True
+                and data.get("build_channel") == "signed-release"
+                and data.get("git_status_available") is True and data.get("git_dirty") is False
+                and data.get("release_base_ref_available") is True
+                and data.get("release_base_ref") == "origin/main"
+                and type(data.get("commits_behind_release_base")) is int
+                and data.get("commits_behind_release_base") == 0
+                and data.get("package_version_tag_exists") is False
+                and data.get("release_ready") is True
+            )
+            if complete:
+                return {**data, "promotion_eligible": promotion}
+        except Exception:
+            pass
+        return {
+            "schema_version": 1, "package_version": None, "git_commit": None,
+            "git_dirty": True, "git_status_available": False,
+            "build_timestamp": None, "build_timestamp_utc": None,
+            "source_hash": None, "artifact_compatibility_version": None,
+            "identity_status": "unverified", "promotion_eligible": False,
+        }
+
+    package_version = None
+    try:
+        pkg_file = repo_root / "package.json"
+        if pkg_file.exists():
+            package_version = json.loads(pkg_file.read_text(encoding="utf-8")).get("version")
+    except Exception:
+        pass
+
+    commit = _git_commit_hash()
+    commit = commit.lower() if _valid_hex(commit, 40) else None
+    git_dirty = True
+    git_status_available = False
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all", "--", ".",
+             ":(exclude)services/forecast-build-info.json"],
+            cwd=repo_root, capture_output=True, text=True, timeout=5, check=False,
+        )
+        if result.returncode == 0:
+            git_status_available = True
+            git_dirty = bool(str(result.stdout or "").strip())
+    except Exception:
+        pass
+    source_hash = _file_sha256(Path(__file__).resolve())
+    complete = bool(package_version and commit and _valid_hex(source_hash, 64) and git_status_available)
+    return {
+        "schema_version": 1,
+        "build_channel": "source",
+        "package_version": package_version,
+        "git_commit": commit,
+        "git_dirty": git_dirty,
+        "git_status_available": git_status_available,
+        "build_timestamp": None,
+        "build_timestamp_utc": None,
+        "source_path": "services/forecast_engine.py",
+        "source_hash": source_hash,
+        "artifact_compatibility_version": 1,
+        "identity_status": "verified" if complete else "unverified",
+        # A source checkout is useful for reproducible experiments, but it is
+        # not a signed release artifact.  Only the build wrapper can mint a
+        # promotion-eligible frozen identity after all release gates pass.
+        "promotion_eligible": False,
+    }
+
+def _file_sha256(path: Path) -> str | None:
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except Exception:
+        return None
+
+def build_nowcast_baseline_snapshot(persist: bool = True) -> dict:
+    """Capture reproducible, credential-free nowcast comparison metadata."""
+    identity = resolve_forecast_build_identity()
+    commit = identity.get("git_commit")
+    short_commit = commit[:7] if commit else "unknown"
+    created_ts = int(time.time() * 1000)
+
+    build_date = datetime.now(_TZ_UTC8).date()
+    artifacts = load_forecast_artifacts(today=build_date) or {}
+    artifact_valid, _artifact_reason = _validate_forecast_artifact(
+        artifacts, target_date=build_date
+    ) if artifacts else (False, "missing_artifact")
+    artifact_schema_v2 = bool(
+        artifact_valid and type(artifacts.get("schema_version")) is int
+        and artifacts.get("schema_version") == 2
+    )
+    model_sha256 = _file_sha256(MODEL_BUNDLE_FILE)
+    artifact_sha256 = _file_sha256(ARTIFACT_FILE) if ARTIFACT_FILE.exists() else None
+    baseline_promotion_eligible = bool(
+        identity.get("promotion_eligible") is True
+        and model_sha256 and artifact_sha256 and artifact_schema_v2
+    )
+    reliability = {}
+    if SOLCAST_RELIABILITY_FILE.exists():
+        try:
+            loaded = load(SOLCAST_RELIABILITY_FILE)
+            reliability = loaded if isinstance(loaded, dict) else {}
+        except Exception:
+            reliability = {}
+    regime_counts = {}
+    for key, value in (reliability.get("regimes") or {}).items():
+        if isinstance(value, dict):
+            regime_counts[str(key)] = int(value.get("sample_count", value.get("days", 0)) or 0)
+
+    snapshot = {
+        "baseline_id": f"BL-{created_ts}-{short_commit}",
+        "schema_version": 1,
+        "created_ts": created_ts,
+        "package_version": identity.get("package_version"),
+        "git_commit": commit,
+        "identity_status": identity.get("identity_status", "unverified"),
+        "promotion_eligible": baseline_promotion_eligible,
+        "git_dirty": identity.get("git_dirty", True),
+        "git_status_available": identity.get("git_status_available", False),
+        "build_timestamp": identity.get("build_timestamp"),
+        "build_timestamp_utc": identity.get("build_timestamp_utc"),
+        "source_hash": identity.get("source_hash"),
+        "artifact_compatibility_version": identity.get("artifact_compatibility_version"),
+        "model_bundle": {
+            "path": str(MODEL_BUNDLE_FILE),
+            "sha256": model_sha256,
+            "feature_names": list(FEATURE_COLS),
+            "feature_count": int(len(FEATURE_COLS)),
+        },
+        "forecast_artifact": {
+            "path": str(ARTIFACT_FILE),
+            "sha256": artifact_sha256,
+            "schema_version": int(artifacts.get("schema_version", 1) or 1),
+            "created_ts": artifacts.get("created_ts"),
+            "lookback_days": artifacts.get("lookback_days"),
+            "training_cutoff_date": artifacts.get("training_cutoff_date"),
+            "promotion_eligible": artifact_schema_v2,
+            "validation_error": _artifact_reason,
+        },
+        "settings": {
+            "forecastIntradayBlendMax": _setting_float_or_none("forecastIntradayBlendMax", 0.0, 1.0),
+            "forecastVirtualNowcastMode": _setting_string_or_default(
+                "forecastVirtualNowcastMode", "off", set(NOWCAST_VALID_MODES)
+            ),
+        },
+        "current_algorithm": {
+            "min_obs_slots": INTRADAY_MIN_OBS_SLOTS,
+            "max_obs_slots": INTRADAY_MAX_OBS_SLOTS,
+            "ratio_clip": list(INTRADAY_RATIO_CLIP),
+            "recent_ratio_clip": list(INTRADAY_RECENT_RATIO_CLIP),
+            "blend_max": INTRADAY_BLEND_MAX,
+        },
+        "challenger": {
+            "algorithm_version": NOWCAST_ALGORITHM_VERSION,
+            "half_life_minutes": NOWCAST_HALF_LIFE_MINUTES,
+            "recent_mix": NOWCAST_RECENT_MIX,
+            "ratio_floor": NOWCAST_RATIO_FLOOR,
+            "ratio_ceiling": NOWCAST_RATIO_CEILING,
+            "min_capacity_coverage": NOWCAST_MIN_CAPACITY_COVERAGE,
+        },
+        "data_coverage": {
+            "issue_time_weather_snapshot_days": len(list(FORECAST_SNAPSHOT_DIR.glob("*.json"))) if FORECAST_SNAPSHOT_DIR.exists() else 0,
+            "solcast_regime_counts": regime_counts,
+        },
+        "provider_config": {
+            "forecast_provider": _read_setting_value("forecastProvider"),
+            "solcast_access_mode": _read_setting_value("solcastAccessMode"),
+            "credentials_included": False,
+        },
+    }
+    if persist:
+        _save_json(FORECAST_BASELINE_SNAPSHOT_FILE, snapshot)
+    return snapshot
+
+def _series_to_full_array(series: list[dict] | None) -> np.ndarray | None:
+    if not series:
+        return None
+    out = np.zeros(SLOTS_DAY, dtype=float)
+    for idx, row in enumerate(series):
+        slot = _parse_slot_from_time_text("2000-01-01", row.get("time") or row.get("time_hms"))
+        if slot is None:
+            slot = SOLAR_START_SLOT + idx
+        if 0 <= int(slot) < SLOTS_DAY:
+            out[int(slot)] = _coerce_non_negative_float(row.get("kWh_inc", row.get("kwh_inc", 0.0)))
+    return out
+
+def _score_nowcast_variant(
+    forecast: np.ndarray,
+    actual: np.ndarray,
+    actual_present: np.ndarray,
+    cutoff_slot: int,
+    horizons_min: tuple[int, ...],
+) -> dict:
+    forecast_arr = np.asarray(forecast, dtype=float)
+    actual_arr = np.asarray(actual, dtype=float)
+    base_present = (
+        np.asarray(actual_present, dtype=bool)
+        & np.isfinite(actual_arr) & np.isfinite(forecast_arr)
+        & (actual_arr >= 0.0) & (forecast_arr >= 0.0)
+    )
+    metrics: dict[str, float | int | str | None] = {"status": "scored"}
+    for minutes in horizons_min:
+        slots = max(1, int(math.ceil(int(minutes) / SLOT_MIN)))
+        start = int(cutoff_slot) + 1
+        end = min(SOLAR_END_SLOT, start + slots)
+        mask = np.zeros(SLOTS_DAY, dtype=bool)
+        if end > start:
+            mask[start:end] = True
+        support_slots = max(0, end - start)
+        mask &= base_present
+        scored_slots = int(np.count_nonzero(mask))
+        metrics[f"support_slots_{minutes}m"] = int(support_slots)
+        metrics[f"scored_slots_{minutes}m"] = scored_slots
+        metrics[f"coverage_{minutes}m"] = (
+            float(scored_slots / support_slots) if support_slots else 0.0
+        )
+        if not np.any(mask):
+            metrics[f"mae_{minutes}m"] = None
+            metrics[f"wape_{minutes}m"] = None
+            metrics[f"rmse_{minutes}m"] = None
+            continue
+        err = forecast_arr[mask] - actual_arr[mask]
+        metrics[f"mae_{minutes}m"] = float(np.mean(np.abs(err)))
+        metrics[f"wape_{minutes}m"] = float(np.sum(np.abs(err)) / max(np.sum(actual[mask]), 0.1) * 100.0)
+        metrics[f"rmse_{minutes}m"] = float(np.sqrt(np.mean(np.square(err))))
+    remaining = (
+        (np.arange(SLOTS_DAY) > int(cutoff_slot))
+        & (np.arange(SLOTS_DAY) < SOLAR_END_SLOT)
+        & base_present
+    )
+    metrics["remaining_day_support_slots"] = int(max(0, SOLAR_END_SLOT - int(cutoff_slot) - 1))
+    metrics["remaining_day_scored_slots"] = int(np.count_nonzero(remaining))
+    if np.any(remaining):
+        actual_total = float(np.sum(actual[remaining]))
+        forecast_total = float(np.sum(forecast[remaining]))
+        metrics["remaining_day_actual_kwh"] = actual_total
+        metrics["remaining_day_forecast_kwh"] = forecast_total
+        metrics["remaining_day_total_ape_pct"] = float(abs(forecast_total - actual_total) / max(actual_total, 0.1) * 100.0)
+    else:
+        metrics["remaining_day_actual_kwh"] = None
+        metrics["remaining_day_forecast_kwh"] = None
+        metrics["remaining_day_total_ape_pct"] = None
+    if not any(int(metrics.get(f"scored_slots_{minutes}m", 0) or 0) > 0 for minutes in horizons_min):
+        metrics["status"] = "skipped_no_valid_slots"
+    return metrics
+
+def _build_replay_intraday_input_bundle(day_s: str, simulated_issue_ts: int) -> dict:
+    immutable = _load_immutable_dayahead_bundle_from_db(day_s, simulated_issue_ts)
+    if not immutable:
+        raise ValueError(f"missing complete immutable replay basis for {day_s} before {simulated_issue_ts}")
+    weather_frame = _weather_frame_from_issuance_snapshot(
+        day_s, immutable.get("weather_snapshot") or {}
+    )
+    if weather_frame is None:
+        raise ValueError(f"invalid issue-time weather snapshot for {day_s}")
+    try:
+        constraint_snapshot = immutable.get("constraint_snapshot") or {}
+        parsed_constraints = _parse_replay_constraint_snapshot(constraint_snapshot)
+        cap_dispatch = parsed_constraints["cap_dispatch_mask"]
+        manual_constraint = parsed_constraints["manual_constraint_mask"]
+        outage = parsed_constraints["outage_mask"]
+        recorded_cap = parsed_constraints["slot_cap_kwh"]
+        blend_max = parsed_constraints["blend_max"]
+    except Exception as exc:
+        raise ValueError(f"invalid issue-time constraint snapshot for {day_s}") from exc
+    actual, actual_present = load_actual_loss_adjusted_with_presence(day_s, min_solar_slots=0)
+    if actual is None or actual_present is None:
+        raise ValueError(f"missing replay actuals for {day_s}")
+    # Capacity reporting is observation evidence.  Future slots are explicitly
+    # hidden so only rows visible at the simulated issue can influence quality.
+    coverage = np.asarray(
+        _load_energy_reporting_coverage(
+            day_s,
+            capacity_by_inverter_kw=parsed_constraints["reporting_capacity_kw"],
+        ),
+        dtype=float,
+    ).reshape(-1)
+    if coverage.size != SLOTS_DAY:
+        coverage = np.zeros(SLOTS_DAY, dtype=float)
+    issue_slot = int((int(simulated_issue_ts) - int(datetime.fromisoformat(day_s).replace(tzinfo=_TZ_UTC8).timestamp() * 1000)) // (SLOT_MIN * 60 * 1000)) - 1
+    coverage[np.arange(SLOTS_DAY) > issue_slot] = 0.0
+    export_basis = parsed_constraints["export_curtailment"]
+    export_curtailment = _curtailed_mask_from_recorded_basis(
+        np.asarray(actual, dtype=float),
+        np.asarray(immutable["dayahead"], dtype=float),
+        tolerance=export_basis["tolerance"],
+        export_cap_slot_kwh=export_basis["export_cap_slot_kwh"],
+        baseline_multiplier=export_basis["baseline_multiplier"],
+    )
+    return {
+        "dayahead": np.asarray(immutable["dayahead"], dtype=float).copy(),
+        "dayahead_lo": np.asarray(immutable["dayahead_lo"], dtype=float).copy(),
+        "dayahead_hi": np.asarray(immutable["dayahead_hi"], dtype=float).copy(),
+        "dayahead_present": np.asarray(immutable["dayahead_present"], dtype=bool).copy(),
+        "actual": np.asarray(actual, dtype=float).copy(),
+        "actual_present": np.asarray(actual_present, dtype=bool).copy(),
+        "outage_mask": outage,
+        "cap_dispatch_mask": cap_dispatch,
+        "manual_constraint_mask": manual_constraint,
+        "export_curtailment_mask": export_curtailment,
+        "constraint_meta": {"source": "immutable_issue_time", **constraint_snapshot},
+        "slot_cap_kwh": recorded_cap,
+        "blend_max": blend_max,
+        "capacity_coverage": coverage,
+        "weather_frame": weather_frame.copy(deep=True),
+        "replay_provenance": {
+            key: immutable.get(key) for key in (
+                "issuance_id", "generated_ts", "basis_checksum",
+                "weather_snapshot_sha256", "constraint_snapshot_sha256",
+                "model_sha256", "artifact_sha256", "base_run_audit_id", "created_by",
+            )
+        },
+    }
+
+def _load_nowcast_baseline_link() -> dict:
+    if not FORECAST_BASELINE_SNAPSHOT_FILE.exists():
+        return {"baseline_id": None, "baseline_sha256": None, "promotion_eligible": False}
+    try:
+        raw = FORECAST_BASELINE_SNAPSHOT_FILE.read_bytes()
+        payload = json.loads(raw.decode("utf-8"))
+        return {
+            "baseline_id": payload.get("baseline_id"),
+            "baseline_sha256": hashlib.sha256(raw).hexdigest(),
+            "baseline_commit": payload.get("git_commit"),
+            "promotion_eligible": bool(payload.get("promotion_eligible")),
+        }
+    except Exception:
+        return {"baseline_id": None, "baseline_sha256": None, "promotion_eligible": False}
+
+def replay_intraday_nowcast(
+    target_date: date,
+    simulated_cutoff_slot: int,
+    challenger_algo: str = "robust_decay",
+    persist: bool = False,
+    horizons_min: tuple[int, ...] = NOWCAST_REPLAY_HORIZONS_MIN,
+    variants: tuple[str, ...] | None = None,
+) -> dict:
+    """Replay historical issuance without writing live forecast or audit tables."""
+    day_s = target_date.isoformat()
+    cutoff = int(np.clip(int(simulated_cutoff_slot), SOLAR_START_SLOT, SOLAR_END_SLOT - 1))
+    midnight_ts = int(datetime.combine(target_date, datetime.min.time(), _TZ_UTC8).timestamp() * 1000)
+    simulated_issue_ts = midnight_ts + (cutoff + 1) * 300000
+
+    replay_inputs = _build_replay_intraday_input_bundle(day_s, simulated_issue_ts)
+    dayahead = replay_inputs["dayahead"]
+    actual = replay_inputs["actual"]
+    actual_present = replay_inputs["actual_present"]
+    selected = tuple(variants or ("unchanged_dayahead", "current", challenger_algo))
+    arrays: dict[str, np.ndarray] = {"unchanged_dayahead": np.asarray(dayahead, dtype=float).copy()}
+    variant_meta: dict[str, dict] = {}
+    if "current" in selected:
+        current_series, current_meta = _build_current_intraday_adjusted_forecast(
+            target_date, cutoff, input_bundle=replay_inputs
+        )
+        current_arr = _series_to_full_array(current_series)
+        if current_arr is not None:
+            arrays["current"] = current_arr
+        variant_meta["current"] = current_meta
+    if "robust_decay" in selected:
+        robust_series, robust_meta = _build_robust_intraday_nowcast(
+            target_date, cutoff, input_bundle=replay_inputs
+        )
+        robust_arr = _series_to_full_array(robust_series)
+        if robust_arr is not None:
+            arrays["robust_decay"] = robust_arr
+        variant_meta["robust_decay"] = robust_meta
+
+    actual_raw = np.asarray(actual, dtype=float)
+    actual_arr = np.where(np.isfinite(actual_raw), actual_raw, 0.0)
+    dayahead_arr = np.nan_to_num(np.asarray(dayahead, dtype=float), nan=0.0)
+    outage_mask = np.asarray(replay_inputs.get("outage_mask", np.zeros(SLOTS_DAY)), dtype=bool)
+    cap_dispatch_mask = np.asarray(replay_inputs.get("cap_dispatch_mask", np.zeros(SLOTS_DAY)), dtype=bool)
+    manual_constraint_mask = np.asarray(replay_inputs.get("manual_constraint_mask", np.zeros(SLOTS_DAY)), dtype=bool)
+    export_curtailed = np.asarray(replay_inputs.get("export_curtailment_mask", np.zeros(SLOTS_DAY)), dtype=bool)
+
+    recorded_cap = float(replay_inputs["slot_cap_kwh"])
+    present_arr = (
+        np.asarray(actual_present, dtype=bool) & np.isfinite(actual_raw)
+        & (actual_raw >= 0.0) & (actual_raw <= recorded_cap + 1e-9)
+    )
+    scoring_present = (
+        present_arr & (~outage_mask) & (~cap_dispatch_mask)
+        & (~manual_constraint_mask) & (~export_curtailed)
+    )
+
+    # Check if there's any valid scoring slots after the cutoff
+    future_scoring = scoring_present[cutoff + 1:SOLAR_END_SLOT]
+    if not np.any(future_scoring):
+        return {"replay_id": str(uuid.uuid4()), "target_date": day_s, "simulated_cutoff_slot": cutoff, "status": "skipped_no_valid_future_slots"}
+
+    scored = {}
+    for name in selected:
+        arr = arrays.get(name)
+        if arr is None:
+            meta = variant_meta.get(name, {})
+            scored[name] = {
+                "status": "skipped_builder",
+                "skip_reason": meta.get("fallback_reason") or "builder_returned_no_series",
+                **{f"scored_slots_{minutes}m": 0 for minutes in horizons_min},
+            }
+        else:
+            scored[name] = _score_nowcast_variant(
+                arr, actual_arr, scoring_present, cutoff, tuple(horizons_min)
+            )
+    baseline_metrics = scored.get("unchanged_dayahead", {})
+    current_metrics = scored.get("current", {})
+    for name, metrics in scored.items():
+        for minutes in horizons_min:
+            key = f"wape_{minutes}m"
+            value = metrics.get(key)
+            baseline_value = baseline_metrics.get(key)
+            current_value = current_metrics.get(key)
+            metrics[f"improvement_vs_dayahead_{minutes}m_pct"] = (
+                float((baseline_value - value) / baseline_value * 100.0)
+                if value is not None and baseline_value not in (None, 0) else None
+            )
+            metrics[f"improvement_vs_current_{minutes}m_pct"] = (
+                float((current_value - value) / current_value * 100.0)
+                if value is not None and current_value not in (None, 0) else None
+            )
+
+    robust_meta = variant_meta.get("robust_decay", {})
+    baseline_link = _load_nowcast_baseline_link()
+    replay_provenance = replay_inputs.get("replay_provenance") or {}
+    result = {
+        "schema_version": 1,
+        "status": "complete",
+        "replay_id": str(uuid.uuid4()),
+        **baseline_link,
+        "target_date": day_s,
+        "simulated_cutoff_slot": cutoff,
+        "algorithm_version": NOWCAST_ALGORITHM_VERSION,
+        "variants": scored,
+        "variant_meta": variant_meta,
+        "actual_provenance": "pac_loss_adjusted",
+        "constraint_masks": {
+            "cap_dispatch_slots": int(robust_meta.get("excluded_cap_slots", 0) or 0),
+            "outage_slots": int(robust_meta.get("excluded_outage_slots", 0) or 0),
+            "curtailed_slots": int(robust_meta.get("excluded_curtailed_slots", 0) or 0),
+        },
+        "feature_versions": {
+            "FEATURE_COLS_count": len(FEATURE_COLS),
+            "artifact_sha256": replay_provenance.get("artifact_sha256"),
+            "model_sha256": replay_provenance.get("model_sha256"),
+        },
+        "issue_time_basis": replay_provenance,
+        "persisted_to_live_tables": False,
+    }
+    if persist:
+        path = FORECAST_REPLAY_RESULTS_DIR / f"replay_{day_s}_{cutoff}.json"
+        if not _save_json(path, result):
+            raise OSError(f"failed to persist replay result: {path}")
+        result["result_path"] = str(path)
+    return result
+
+
+def _build_replay_aggregate(
+    results: list[dict],
+    variants: tuple[str, ...],
+    horizons: tuple[int, ...],
+    *,
+    skipped_runs: int = 0,
+) -> dict:
+    """Build paired, promotion-safe replay counts and metrics.
+
+    One date with many cutoffs is one eligible day.  A run is eligible only
+    when every requested builder scored every requested horizon and the
+    remaining-day total; skipped builders can never inflate evidence.
+    """
+    def variant_eligible(result: dict, variant: str) -> bool:
+        metrics = (result.get("variants") or {}).get(variant) or {}
+        if metrics.get("status") != "scored":
+            return False
+        if metrics.get("remaining_day_total_ape_pct") is None:
+            return False
+        return all(
+            int(metrics.get(f"scored_slots_{minutes}m", 0) or 0) > 0
+            and metrics.get(f"wape_{minutes}m") is not None
+            for minutes in horizons
+        )
+
+    per_variant_results = {
+        variant: [result for result in results if variant_eligible(result, variant)]
+        for variant in variants
+    }
+    paired = [
+        result for result in results
+        if all(variant_eligible(result, variant) for variant in variants)
+    ]
+    eligible_dates = sorted({str(result.get("target_date")) for result in paired})
+    summary = {
+        "schema_version": 2,
+        "raw_completed_results": int(len(results)),
+        "completed_runs": int(len(paired)),
+        "eligible_runs": int(len(paired)),
+        "eligible_days": int(len(eligible_dates)),
+        "eligible_dates": eligible_dates,
+        "skipped_runs": int(skipped_runs),
+        "excluded_ineligible_runs": int(len(results) - len(paired)),
+        "required_variants": list(variants),
+        "required_horizons_min": [int(value) for value in horizons],
+        "eligible_days_by_variant": {
+            variant: len({str(result.get("target_date")) for result in rows})
+            for variant, rows in per_variant_results.items()
+        },
+        "eligible_runs_by_variant": {
+            variant: len(rows) for variant, rows in per_variant_results.items()
+        },
+        "metrics_by_variant": {},
+    }
+    for variant in variants:
+        metrics: dict[str, float] = {}
+        for minutes in horizons:
+            weight_key = f"scored_slots_{minutes}m"
+            for metric in ("wape", "mae", "rmse"):
+                key = f"{metric}_{minutes}m"
+                values_and_weights = [
+                    (float(result["variants"][variant][key]), int(result["variants"][variant][weight_key]))
+                    for result in paired
+                    if result["variants"][variant].get(key) is not None
+                    and int(result["variants"][variant].get(weight_key, 0) or 0) > 0
+                ]
+                if values_and_weights:
+                    values = np.asarray([item[0] for item in values_and_weights], dtype=float)
+                    weights = np.asarray([item[1] for item in values_and_weights], dtype=float)
+                    metrics[f"weighted_{key}"] = float(np.average(values, weights=weights))
+                    metrics[f"median_{key}"] = float(np.median(values))
+        remaining = [
+            float(result["variants"][variant]["remaining_day_total_ape_pct"])
+            for result in paired
+        ]
+        if remaining:
+            metrics["mean_remaining_day_total_ape_pct"] = float(np.mean(remaining))
+            metrics["median_remaining_day_total_ape_pct"] = float(np.median(remaining))
+        summary["metrics_by_variant"][variant] = metrics
+    return summary
+
 def parse_cli_args():
     parser = argparse.ArgumentParser(
         description="Inverter Dashboard Forecast Service - daemon mode or manual day-ahead generation",
@@ -11472,6 +14204,15 @@ def parse_cli_args():
         metavar="YYYY-MM-DD",
         help="Re-run QA evaluation for a specific date (e.g. after substation meter data entry).",
     )
+    parser.add_argument("--baseline-snapshot", action="store_true", help="Write a credential-free nowcast baseline snapshot and exit.")
+    parser.add_argument("--replay", action="store_true", help="Run leakage-safe intraday replay and exit.")
+    parser.add_argument("--from-date", type=str, metavar="YYYY-MM-DD", help="Replay range start date.")
+    parser.add_argument("--to-date", type=str, metavar="YYYY-MM-DD", help="Replay range end date.")
+    parser.add_argument("--horizons", default="5,15,30,60,120", help="Comma-separated replay horizons in minutes.")
+    parser.add_argument("--variants", default="unchanged_dayahead,current,robust_decay", help="Comma-separated replay variants.")
+    parser.add_argument("--dry-run", action="store_true", help="Evaluate without persisting experiment/artifact output.")
+    parser.add_argument("--rebuild-forecast-artifacts", action="store_true", help="Rebuild schema-v2 activity artifacts and exit.")
+    parser.add_argument("--lookback-days", type=int, default=SHAPE_LOOKBACK_DAYS, help="Artifact rebuild lookback days.")
     return parser.parse_args()
 
 def run_cli_generation(args) -> int:
@@ -11480,9 +14221,97 @@ def run_cli_generation(args) -> int:
             args.generate_date
             or args.generate_range
             or args.generate_days is not None
+            or args.replay
+            or args.rebuild_forecast_artifacts
         ) and _read_operation_mode() == "remote":
-            log.error("Manual forecast generation is disabled in remote mode")
+            log.error("Forecast generation, replay, and artifact rebuild are disabled in remote mode")
             return 2
+
+        if args.baseline_snapshot:
+            snapshot = build_nowcast_baseline_snapshot(persist=not args.dry_run)
+            log.info(
+                "Nowcast baseline captured: version=%s commit=%s features=%d output=%s",
+                snapshot.get("package_version"), snapshot.get("git_commit"),
+                len(snapshot.get("model_bundle", {}).get("feature_names", [])),
+                "dry-run" if args.dry_run else FORECAST_BASELINE_SNAPSHOT_FILE,
+            )
+            return 0
+
+        if args.replay:
+            if not args.from_date or not args.to_date:
+                raise ValueError("--replay requires --from-date and --to-date")
+            start_d = _parse_iso_date_safe(args.from_date)
+            end_d = _parse_iso_date_safe(args.to_date)
+            horizons = tuple(sorted({int(v.strip()) for v in str(args.horizons).split(",") if v.strip()}))
+            if not horizons or any(v <= 0 for v in horizons):
+                raise ValueError("--horizons must contain positive minute values")
+            variants = tuple(dict.fromkeys(v.strip() for v in str(args.variants).split(",") if v.strip()))
+            allowed_variants = {"unchanged_dayahead", "current", "robust_decay"}
+            unknown = set(variants) - allowed_variants
+            if unknown:
+                raise ValueError(f"unimplemented replay variants: {sorted(unknown)}")
+            completed = 0
+            skipped = 0
+            persistence_failed = False
+            all_results = []
+            for replay_day in _iter_days(start_d, end_d):
+                # Hourly issuance points after the six-slot activation floor.
+                first_cutoff = SOLAR_START_SLOT + INTRADAY_MIN_OBS_SLOTS - 1
+                for cutoff in range(first_cutoff, SOLAR_END_SLOT - 1, 12):
+                    try:
+                        res = replay_intraday_nowcast(
+                            replay_day, cutoff, persist=not args.dry_run,
+                            horizons_min=horizons, variants=variants,
+                        )
+                        if res.get("status") == "skipped_no_valid_future_slots":
+                            skipped += 1
+                        else:
+                            all_results.append(res)
+                            completed += 1
+                    except ValueError as exc:
+                        skipped += 1
+                        log.debug("Replay skipped %s cutoff=%d: %s", replay_day, cutoff, exc)
+                    except OSError as exc:
+                        skipped += 1
+                        persistence_failed = True
+                        log.error("Replay persistence failed %s cutoff=%d: %s", replay_day, cutoff, exc)
+
+            summary = _build_replay_aggregate(
+                all_results, variants, horizons, skipped_runs=skipped
+            )
+            if summary["eligible_runs"] > 0 and not args.dry_run:
+                report_path = FORECAST_REPLAY_RESULTS_DIR / f"aggregate_report_{start_d}_{end_d}.json"
+                if not _save_json(report_path, summary):
+                    persistence_failed = True
+                    log.error("Aggregate replay report persistence failed: %s", report_path)
+                else:
+                    log.info("Aggregate report saved to %s", report_path)
+
+            log.info(
+                "Intraday replay complete: raw=%d eligible_runs=%d eligible_days=%d skipped=%d",
+                completed, summary["eligible_runs"], summary["eligible_days"], skipped,
+            )
+            return 0 if summary["eligible_runs"] > 0 and not persistence_failed else 2
+
+        if args.rebuild_forecast_artifacts:
+            lookback = max(1, min(365, int(args.lookback_days)))
+            target = datetime.now(_TZ_UTC8).date()
+            if not _dayahead_gen_lock_acquire(target, owner="artifact_rebuild_cli"):
+                return 2
+            try:
+                reliability = build_solcast_reliability_artifact(target)
+                history = collect_history_days(target, lookback, solcast_reliability=reliability)
+                artifact = build_forecast_artifacts(history)
+                log.info(
+                    "Artifact-v2 coverage: history=%d accepted=%d rejected=%d",
+                    int(artifact.get("history_days", 0)), int(artifact.get("accepted_days", 0)),
+                    int(artifact.get("rejected_days", 0)),
+                )
+                if not args.dry_run and not save_forecast_artifacts(artifact):
+                    return 2
+                return 0
+            finally:
+                _dayahead_gen_lock_release(target)
 
         if args.generate_date:
             day = _parse_iso_date_safe(args.generate_date)
@@ -11624,6 +14453,31 @@ def _setting_bool_or_default(key: str, default: bool) -> bool:
     if raw in ('0', 'false', 'no', 'off'):
         return False
     return default
+
+_INVALID_STRING_SETTING_WARNED: set[tuple[str, str]] = set()
+
+def _setting_string_or_default(key: str, default: str, valid: set[str]) -> str:
+    """Read a string setting fresh; invalid values safely resolve to default."""
+    try:
+        if not APP_DB_FILE.exists():
+            return str(default)
+        with _open_sqlite(APP_DB_FILE, SQLITE_READ_TIMEOUT_SEC, readonly=True) as conn:
+            row = conn.execute(
+                "SELECT value FROM settings WHERE key = ? LIMIT 1", (str(key),)
+            ).fetchone()
+    except Exception:
+        return str(default)
+    raw = str(row[0]).strip().lower() if row and row[0] is not None else ""
+    if not raw:
+        return str(default)
+    allowed = {str(v).strip().lower() for v in valid}
+    if raw in allowed:
+        return raw
+    marker = (str(key), raw)
+    if marker not in _INVALID_STRING_SETTING_WARNED:
+        _INVALID_STRING_SETTING_WARNED.add(marker)
+        log.warning("Invalid forecast setting %s=%r - using %r", key, raw, default)
+    return str(default)
 
 @lru_cache(maxsize=1)
 def load_forecast_export_limit_mw() -> float:
@@ -11824,6 +14678,8 @@ def main() -> None:
 
     last_run_hour = -1   # track which hour we last ran in
     last_intraday_slot_key = ""
+    completed_shadow_score_days: set[str] = set()
+    next_shadow_score_retry_monotonic = 0.0
     _fail_cooldown_until = 0.0       # monotonic time until retry is allowed
     _FAIL_COOLDOWN_BASE = 300        # 5 min base backoff after a failed attempt
     _consecutive_failures = 0
@@ -11843,6 +14699,25 @@ def main() -> None:
             today_s    = today.isoformat()
             now_h      = now.hour
             mono_now   = time.monotonic()
+
+            # Score yesterday's exact stored shadow checkpoints once per
+            # service day.  The scorer never regenerates a forecast and is
+            # therefore safe to run independently of today's rollout mode.
+            if now_h >= 1 and mono_now >= next_shadow_score_retry_monotonic:
+                next_shadow_score_retry_monotonic = mono_now + 15 * 60
+                try:
+                    for score_result in _score_shadow_checkpoint_backlog(
+                        today, completed_shadow_score_days
+                    ):
+                        log.info(
+                            "Completed shadow scoring [%s]: status=%s scored=%d skipped=%d",
+                            score_result.get("target_date"),
+                            score_result.get("status"),
+                            int(score_result.get("audits_scored", 0) or 0),
+                            int(score_result.get("audits_skipped", 0) or 0),
+                        )
+                except Exception as score_exc:
+                    log.warning("Completed shadow backlog scoring crashed: %s", score_exc)
 
             da_today_in_db = _has_forecast_dayahead_in_db(today_s)
             target     = _resolve_service_target_date(today, now_h, da_today_in_db)

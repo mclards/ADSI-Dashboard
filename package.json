@@ -11,6 +11,8 @@
     "rebuild:native:node": "npm rebuild better-sqlite3",
     "rebuild:native:electron": "electron-builder install-app-deps",
     "postinstall": "electron-builder install-app-deps",
+    "build:forecast-service": "python scripts/generate_build_info.py --build-channel development && python -m PyInstaller --noconfirm services/ForecastCoreService.spec && python scripts/generate_build_info.py --check --build-channel development",
+    "check:forecast-build-info": "python scripts/generate_build_info.py --check --build-channel development",
     "build:win": "node scripts/build-installer-signed.js",
     "build:installer": "node scripts/build-installer-signed.js",
     "build:installer:signed": "node scripts/build-installer-signed.js",
@@ -18,7 +20,8 @@
     "codesign:verify": "powershell -ExecutionPolicy Bypass -File scripts/verify-codesign-trust.ps1",
     "smoke": "node scripts/smoke-all.js",
     "smoke:node-only": "node scripts/smoke-all.js --skip-python",
-    "smoke:no-rebuild": "node scripts/smoke-all.js --no-rebuild"
+    "smoke:no-rebuild": "node scripts/smoke-all.js --no-rebuild",
+    "docs:pdf": "node scripts/_gen_userguide_pdf.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1012.0",
@@ -58,6 +61,7 @@
       "drivers/**/*",
       "services/**/*",
       "docs/ADSI-Dashboard-Pricing-Summary.pdf",
+      "docs/ADSI-Dashboard-User-Guide.html",
       "docs/ADSI-Dashboard-User-Guide.pdf",
       "docs/INGECON-SUN-Manager-User-Manual.pdf",
       "docs/IngeconSunPMax-Entire-Modbus-RTU-Registers.pdf",
@@ -71,6 +75,7 @@
       "docs/scadafiles/SCADA-User-manual.pdf",
       "docs/scadafiles/SCADA_operation_manual.pdf",
       "package.json",
+      "!public/user-guide.html",
       "!server/ffmpeg/**",
       "!server/go2rtc/**",
       "!services/dist/**",

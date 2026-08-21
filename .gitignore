@@ -6,6 +6,7 @@ dist/
 release/
 build/*/
 !build/*.nsh
+services/forecast-build-info.json
 
 # Vendor doc archives (too large for GitHub; kept locally)
 docs/*.zip

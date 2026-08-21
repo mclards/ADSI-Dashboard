@@ -89,9 +89,14 @@ npm run build:installer:signed
 
 This wraps `electron-builder` and:
 1. Loads `CSC_LINK` and `CSC_KEY_PASSWORD` from `build/private/codesign.env`
-2. Resolves `CSC_LINK` to an absolute path
-3. Runs `electron-builder --win nsis --x64`
-4. electron-builder calls `signtool` with the PFX, applies SHA-256 signing,
+2. Requires a valid 40-hex thumbprint pin before any build work
+3. Rejects a dirty tree, a HEAD behind `origin/main`, or a package version that
+   already exists as `v<version>` or `<version>` tag
+4. Non-mutatingly verifies the committed full-guide PDF provenance
+5. Generates and verifies signed-release Forecast build identity and rebuilds
+   `dist/ForecastCoreService.exe`
+6. Runs `electron-builder --win nsis --x64`
+7. electron-builder calls `signtool` with the PFX, applies SHA-256 signing,
    and counter-signs with the Sectigo public timestamp authority
 
 All three build commands — `build:win`, `build:installer`, and
@@ -102,11 +107,24 @@ the same safety gates:
    or the PFX path is invalid, the build fails fast with a clear error.
    Shipping an unsigned installer would break auto-update for existing signed
    installs (electron-updater rejects publisher-hash mismatches).
-2. **Gate 2 — post-build signature verification.** After electron-builder
+2. **Gate 2 — mandatory thumbprint pin.** The signed workflow fails before
+   builds if `build/private/codesign-thumbprint.txt` is missing or is not exactly
+   40 hexadecimal characters.
+3. **Gate 3 — release identity and history.** The wrapper records an explicit
+   `signed-release` channel, package, commit, dirty status, canonical timestamp,
+   and Forecast source SHA-256. It rejects a dirty/incomplete identity, a HEAD
+   behind `origin/main`, and an already-tagged package version.
+4. **Gate 4 — documentation provenance.** `npm run docs:pdf -- --check`
+   verifies the complete HTML source plus committed PDF/sidecar hashes, page
+   count, size, and structure without rendering or changing tracked files.
+5. **Gate 5 — Forecast rebuild.** The verified identity is bundled into the
+   one-file service and checked again after rebuilding. A signed installer
+   never silently reuses an old Forecast EXE.
+6. **Gate 6 — post-build signature verification.** After electron-builder
    finishes, the wrapper calls `scripts/verify-signed-installer.ps1` which
    runs `Get-AuthenticodeSignature` and pins the thumbprint to
    `build/private/codesign-thumbprint.txt`.
-3. **Gate 3 — size floor + SHA-512 log.** Rejects implausibly small builds
+7. **Gate 7 — size floor + SHA-512 log.** Rejects implausibly small builds
    (missing Python services, broken extraResources) and logs the SHA-512
    that electron-updater will expect in `latest.yml`.
 
@@ -116,7 +134,11 @@ For dev builds where a signature isn't needed, opt out explicitly:
 ADSI_ALLOW_UNSIGNED=1 npm run build:installer
 ```
 
-This skips Gate 2 (nothing to verify) but still enforces Gate 3.
+This skips the signature-verification gate, but still rebuilds the Forecast
+service and enforces identity freshness plus the installer size/hash gate.
+Unsigned output uses the explicit `development` channel and is always
+`promotion_eligible=false`, even from an otherwise clean tree. It does not
+require network/upstream/tag readiness or full-guide release provenance.
 
 ---
 

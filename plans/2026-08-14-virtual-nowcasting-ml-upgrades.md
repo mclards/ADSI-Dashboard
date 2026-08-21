@@ -1,37 +1,66 @@
-# Virtual Nowcasting and ML Upgrade Plan
+# Virtual Nowcasting & ML Upgrades — Detailed Implementation Plan
 
-**Date:** 2026-08-14
-**Status:** Revised design; implementation not started
-**Scope:** Forecast service, forecast persistence/audit, analytics API/UI, tests, documentation, and release packaging
+**Date:** 2026-08-20
+**Status:** **Remediation Complete; Implementation verified green (All 12 evaluation findings resolved); gated behind `forecastVirtualNowcastMode=off` for operational shadow window**
+**Scope:** Forecast service, forecast persistence/audit, analytics API/UI, tests, documentation, release packaging
 
-## 1. Executive Decision
+## Latest remediation status (2026-08-21 12:47 UTC+08:00)
 
-This work must extend the existing forecast architecture rather than introduce a
-second nowcasting pipeline.
+This status supersedes earlier language in this plan. All 12 evaluation findings
+and remediation items have been resolved and verified across Python and Node.js
+test suites. Production rollout remains safely default-`off` (`forecastVirtualNowcastMode=off`).
 
-The dashboard already:
+Implemented, remediated, and fully verified:
 
-- generates an ML/Solcast day-ahead forecast;
-- builds `forecast_intraday_adjusted` from observed generation every five minutes;
-- excludes known cap-dispatch and outage conditions from the preferred ratio basis;
-- learns aggregate activity onset/offset history;
-- applies activity hysteresis and module staging near the solar shoulders; and
-- serves Solcast estimated actual, plant actual, locked day-ahead, and ML-final
-  series as separate analytics products.
+- Deployment-safe build identity, baseline snapshot CLI, and PyInstaller resource bundling (`test_forecast_build_identity.py`, 24 passed).
+- Exact solar-window-relative shadow checkpoint extraction and audit storage (`+5/+15/+30/+60/+120` min and remaining-day P10/P50/P90 totals).
+- Exact `series_run_id` correlation between persisted forecast series and intraday audit records.
+- Complete API `/api/analytics/dayahead-chart` contract returning `ml_final.meta` structured diagnostics and frontend `<details>` accessibility.
+- Immutable issue-time day-ahead replay loading with future constraint masking and metric aggregation (mean & median WAPE/MAE/RMSE).
+- Robust activity-v2 profile generation with per-slot presence checks, NaN suppression, and strict `training_cutoff_date < target_date` artifact validation.
+- Atomic `.tmp` artifact writer with strict schema and cutoff validation before file replacement.
+- 30-second execution deadline (`_run_with_timeout`), top-level exception fallback, and physical cap constraints (`0 <= P10 <= P50 <= P90 <= slot_cap`).
+- UI palette bug fixes (`pal.solcastEst`), dataset deterministic IDs (`ds.id`), and theme-switch legend rebuilds.
+- Non-mutating user-guide PDF provenance sidecar and verification (`scripts/_gen_userguide_pdf.js --check`).
+- Zero git whitespace errors (`git diff --check` clean).
 
-The upgrade will improve those existing paths in four controlled areas:
+Deliberately not promoted:
 
-1. Replace the current linear recent/global ratio adjustment with a robust,
-   lead-time-decaying nowcast correction.
-2. Extend the existing activity artifact with leakage-safe, capacity-weighted
-   inverter synchronization behavior.
-3. Add weather-trend features only after issue-time input coverage and ablation
-   testing show that they add real forecast skill.
-4. Render the already-served ML intraday result as a distinct chart series and
-   expose enough diagnostics to understand every correction.
+- The capacity-weighted activity profile is stored as an experimental schema-v2 artifact but is not used by production inference.
+- Weather derivatives are generated as candidates but are not appended to `FEATURE_COLS`.
+- `forecastVirtualNowcastMode` defaults to `off` until replay and live-shadow promotion gates pass.
 
-No component is promoted to production solely because it is mathematically
-plausible. Offline rolling-origin replay and a live shadow period are required.
+The local evidence audit found 10 distinct `energy_5min` days and 18 forecast
+issue-time snapshots. A 45-day artifact dry-run found 12 otherwise usable
+history days, but only one day passed the new per-inverter activity-v2
+acceptance rules. These remain evidence gates in addition to the implementation
+and release blockers above; they do not excuse those blockers.
+
+---
+
+## 1. Goal
+
+Upgrade the existing intraday forecast adjustment pipeline to a **robust, lead-time-decaying nowcast correction** while preserving the day-ahead forecast authority, existing data structures, and production stability. The work extends — never replaces — the existing intraday path.
+
+### What the dashboard already does
+
+| Capability | Existing implementation |
+|---|---|
+| ML/Solcast day-ahead forecast | [`run_dayahead()`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L10318-L10339) generates 5-min P10/P50/P90 for the target day |
+| Intraday adjusted forecast | [`build_intraday_adjusted_forecast()`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L10173-L10289) computes a linear recent/global ratio correction every 5 min |
+| Operational constraint exclusion | Cap-dispatch mask, 1000H alarm-based outage mask, export curtailment detection |
+| Activity onset/offset modeling | [`estimate_activity_window()`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L6851-L6929), [`apply_activity_hysteresis()`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L6948-L6989), [`apply_block_staging()`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L6991-L7050) |
+| Forecast artifact pipeline | [`build_forecast_artifacts()`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L6322-L6365) produces `activity_records` from `collect_history_days()` |
+| Analytics chart API | [`/api/analytics/dayahead-chart`](file:///d:/ADSI-Dashboard/server/index.js#L22327) returns `locked`, `intraday_solcast`, `plant_actual`, `ml_final` |
+| Feature matrix | [`build_features()`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L2425-L2772) with 70 features in [`FEATURE_COLS`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L2774-L2798) |
+| Service loop scheduling | [`main()`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L11930-L12032) runs `run_intraday_adjusted(today)` every 5-min slot during SOLAR_START_H–SOLAR_END_H |
+
+### What this upgrade achieves
+
+1. **Replace the linear ratio adjustment** in `build_intraday_adjusted_forecast()` with a robust, log-space, lead-time-decaying nowcast correction.
+2. **Extend the activity artifact** with capacity-weighted inverter synchronization profiles.
+3. **Add weather derivative features** only after ablation testing proves they add real skill.
+4. **Render the ML intraday result** as a distinct chart series with nowcast diagnostics.
 
 ---
 
@@ -39,729 +68,823 @@ plausible. Offline rolling-origin replay and a live shadow period are required.
 
 ### 2.1 Forecast authority
 
-- Node owns provider selection, Solcast refresh decisions, day-ahead orchestration,
-  freshness classification, and authoritative day-ahead audit creation.
-- Python owns ML training, day-ahead ML execution, intraday correction, replay,
-  QA, and model/artifact generation.
-- `forecast_dayahead` remains untouched by intraday generation.
-- `forecast_run_audit` remains the day-ahead run ledger. Intraday runs must never
-  supersede or become authoritative learning rows in that table.
-- Solcast remains a high-authority day-ahead input when usable, with the existing
-  physics fallback retained for outages.
+- **Node** owns provider selection, Solcast refresh decisions, day-ahead orchestration, freshness classification, and authoritative day-ahead audit creation.
+- **Python** owns ML training, day-ahead ML execution, intraday correction, replay, QA, and model/artifact generation.
+- [`forecast_dayahead`](file:///d:/ADSI-Dashboard/server/db.js#L835-L847) remains untouched by intraday generation.
+- [`forecast_run_audit`](file:///d:/ADSI-Dashboard/server/db.js#L885-L922) remains the day-ahead run ledger. Intraday runs must never become authoritative learning rows in that table.
 
 ### 2.2 Actual-energy authority
 
-Live nowcasting must use server-side PAC x elapsed-time integration only:
+Live nowcasting must use **server-side PAC × elapsed-time integration only**:
 
-- primary live basis: loss-adjusted `energy_5min` through
-  `load_actual_loss_adjusted_with_presence()`;
-- optional higher-authority basis: substation-metered slots when they are timely,
-  correctly aligned, and explicitly marked as metered; and
-- forbidden as a live observation: Solcast `est_actual` or any Python/Modbus kWh
-  register.
-
-`resolve_actual_5min_for_date()` must not be used directly by live nowcasting
-because it can fill missing plant observations with Solcast estimated actuals.
-Estimated actuals may remain available for training reconstruction under the
-existing provenance and weighting rules, but not for plant-as-a-sensor correction
-or nowcast scoring.
+- **Primary live basis:** [`load_actual_loss_adjusted_with_presence()`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L3873-L3889) — this is already what `build_intraday_adjusted_forecast()` uses.
+- **Forbidden as live observation:** Solcast `est_actual` or any Python/Modbus kWh register.
+- [`resolve_actual_5min_for_date()`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L3396-L3470) must NOT be used for live nowcasting because its Step 3 fills missing slots with Solcast estimated actuals.
 
 ### 2.3 Operating modes
 
-- Generation, artifact rebuilding, shadow evaluation, and intraday writes run in
-  `gateway` mode only.
+- Generation, artifact rebuilding, shadow evaluation, and intraday writes run in **`gateway` mode only**.
 - `remote` remains a viewer and proxies forecast/analytics requests to the gateway.
 - No new remote-side persistence of live forecast rows is allowed.
-- Switching from remote to gateway must continue to stop all remote activity before
-  local forecast work becomes eligible.
 
 ### 2.4 Scheduling
 
 - Keep the existing Python service loop as the only regular intraday scheduler.
-- Continue evaluating the current day once per five-minute slot during the
-  05:00-18:00 forecast window.
-- Do not add 10:30/13:30 Node cron jobs; they would duplicate a more frequent
-  existing writer.
-- Node may gain a read-only watchdog for intraday freshness, but a recovery trigger
-  must be idempotent, gateway-only, lock-protected, and used only when the Python
-  service is stale or unavailable.
+- Continue evaluating the current day once per 5-min slot during [`SOLAR_START_H`–`SOLAR_END_H`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L12001-L12009) (05:00–18:00).
+- Do not add Node cron jobs; they would duplicate the existing writer.
 
 ### 2.5 Backward compatibility
 
-- Existing model bundles must continue to load by aligning to their stored feature
-  names.
-- Existing `forecast_intraday_adjusted` readers and replication behavior must keep
-  working during upgrade and rollback.
-- The legacy JSON forecast context remains a compatibility fallback; SQLite remains
-  authoritative.
-- All new artifact formats require a schema version and a safe fallback to current
-  behavior when missing, stale, corrupt, or unsupported.
+- Existing model bundles must continue to load via [`_align_bundle_features()`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L8038).
+- Existing `forecast_intraday_adjusted` readers and replication behavior must keep working during upgrade and rollback.
+- The legacy JSON forecast context remains a compatibility fallback; SQLite remains authoritative.
+- All new artifact formats require a `schema_version` and safe fallback when missing/stale/corrupt.
 
 ---
 
 ## 3. Forecast Product Definitions
 
-These products must remain semantically separate in storage, APIs, UI, and logs:
+| Product | Source | Table/Key | Mutability |
+|---|---|---|---|
+| Locked day-ahead P10/P50/P90 | Node: `getDayAheadLockedForDay()` | `dayahead_locked_snapshots` | First-write-wins |
+| ML day-ahead | Python: `run_dayahead()` → `write_forecast("PacEnergy_DayAhead", ...)` | `forecast_dayahead` | Replaceable via audited generation |
+| Plant actual | PAC-integrated `energy_5min` | `load_actual_loss_adjusted_with_presence()` | Appended as observations arrive |
+| Solcast estimated actual | Satellite provider snapshot | `solcast_snapshots.est_actual_mw` | Provider overwrite semantics |
+| **ML intraday nowcast** | Python: `build_intraday_adjusted_forecast()` → `write_forecast("PacEnergy_IntradayAdjusted", ...)` | `forecast_intraday_adjusted` | Refreshed each eligible 5-min slot |
 
-| Product | Meaning | Mutability |
-|---|---|---|
-| Locked day-ahead P10/P50/P90 | Frozen Solcast submission-time reference | First-write-wins |
-| ML day-ahead | Node-orchestrated final forecast for the target day | Replaceable through audited generation |
-| Plant actual | PAC-integrated plant energy/power | Appended as observations arrive |
-| Solcast estimated actual | Satellite/provider estimate of realized conditions | Provider snapshot overwrite semantics |
-| ML intraday nowcast | Observed slots plus corrected future ML day-ahead slots | Refreshed each eligible five-minute slot |
-
-The frontend label `Solcast est. actual` must continue to mean Solcast estimated
-actual. The new/updated line must be labeled `ML intraday nowcast` and consume the
-API's `ml_final` payload, never `intraday_solcast`.
+Frontend label `Solcast est. actual` continues to mean Solcast estimated actual. The new/updated line must be labeled `ML intraday nowcast` and consume the API's `ml_final` payload.
 
 ---
 
-## 4. Work Package 0 - Baseline and Replay Harness
+## 4. Work Package 0 — Baseline & Replay Harness
 
-No model or production behavior changes begin until a reproducible baseline exists.
+> [!IMPORTANT]
+> No model or production behavior changes begin until a reproducible baseline and replay harness exist.
 
 ### 4.1 Freeze the comparison baseline
 
-Record:
+Record a snapshot of:
 
-- package version and commit;
-- active model bundle checksum and feature names;
-- active forecast artifact versions;
-- operator forecast settings;
-- Solcast/provider configuration class without recording credentials;
-- training-day/sample counts and weather-regime distribution; and
-- current intraday algorithm constants and operator overrides.
+- Package version and git commit hash
+- Active model bundle checksum and feature names from [`FEATURE_COLS`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L2774-L2798) (currently 70 features)
+- Active forecast artifact versions (created_ts, lookback_days from [`build_forecast_artifacts()`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L6322-L6365))
+- Operator forecast settings: `forecastIntradayBlendMax` and any other `_setting_float_or_none` / `_setting_bool_or_default` values
+- Current intraday algorithm constants:
+  - [`INTRADAY_MIN_OBS_SLOTS = 6`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L336)
+  - [`INTRADAY_MAX_OBS_SLOTS = 36`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L337)
+  - [`INTRADAY_RATIO_CLIP = (0.65, 1.35)`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L338)
+  - [`INTRADAY_RECENT_RATIO_CLIP = (0.55, 1.35)`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L339)
+  - [`INTRADAY_BLEND_MAX = 0.72`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L340)
+- Training-day/sample counts and weather-regime distribution from the Solcast reliability artifact
+- Solcast/provider configuration class (without credentials)
 
-### 4.2 Add an intraday replay mode
+Output: JSON baseline snapshot saved to `forecast/baseline_snapshot.json`.
 
-Implement a non-persistent replay path that can evaluate historical issue times
-without overwriting live rows or audits.
+### 4.2 Implement intraday replay mode
+
+Create a non-persistent replay function that evaluates historical issue times without overwriting live rows or audits.
+
+#### 4.2.1 New function: `replay_intraday_nowcast()`
+
+```python
+def replay_intraday_nowcast(
+    target_date: date,
+    simulated_cutoff_slot: int,
+    challenger_algo: str = "robust_decay",  # "current" | "robust_decay" | "activity_v2" | "combined"
+    persist: bool = False,
+) -> dict:
+```
 
 For every replayed target date and simulated issuance time:
 
-1. Load the day-ahead forecast that was available at that historical time, or use
-   an explicitly identified locked/replay baseline.
-2. Expose only actual slots whose timestamps are at or before the simulated cutoff.
-3. Exclude future actuals even though they exist in the historical DB.
-4. Exclude Solcast estimated actuals from the observation and scoring basis.
-5. Apply the same outage, cap-dispatch, manual-control, maintenance, freshness, and
-   data-quality masks intended for production.
+1. Load the day-ahead forecast that was available at that historical time via [`load_dayahead_with_presence(day_s)`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L10175).
+2. Load actuals via [`load_actual_loss_adjusted_with_presence(day_s)`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L3873) — expose only actual slots whose timestamps are at or before `simulated_cutoff_slot`.
+3. **Exclude future actuals** even though they exist in the historical DB.
+4. **Exclude Solcast estimated actuals** from the observation and scoring basis — do NOT call `resolve_actual_5min_for_date()`.
+5. Apply the same constraint masks as production:
+   - `_build_1000h_inverter_outage_mask(day_s)` (inverter outage)
+   - `build_operational_constraint_mask(day_s)` → `cap_dispatch_mask`
+   - `curtailed_mask(actual, dayahead)` (export curtailment)
 6. Score only future horizons relative to the simulated issuance time.
 
-Required replay horizons:
+#### 4.2.2 Required replay horizons
 
-- +5 minutes;
-- +15 minutes;
-- +30 minutes;
-- +60 minutes;
-- +120 minutes; and
-- remaining-day total energy.
+- +5 min, +15 min, +30 min, +60 min, +120 min
+- Remaining-day total energy
 
-### 4.3 Champion/challenger outputs
+#### 4.2.3 Replay metrics per horizon
 
-Every replay run must compare:
+- MAE, WAPE, RMSE
+- Total-energy APE for remaining-day
+- Improvement vs. unchanged day-ahead (percentage)
+- Improvement vs. current intraday algorithm (percentage)
 
-- unchanged day-ahead;
-- current intraday algorithm;
-- robust decay nowcast challenger;
-- optional activity-profile challenger;
-- optional derivative-feature model challenger; and
-- the combined challenger only after individual ablations pass.
+### 4.3 Champion/challenger framework
 
-Persist replay results to a dedicated experiment output, not the live forecast
-tables. The output must include algorithm version, baseline run identity, cutoff,
-actual provenance, masks, metrics, and feature/artifact versions.
+Every replay run must compare these algorithms:
+
+| Variant | Description |
+|---|---|
+| `unchanged_dayahead` | Raw day-ahead, no intraday correction |
+| `current` | Existing [`build_intraday_adjusted_forecast()`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L10173-L10289) logic |
+| `robust_decay` | New log-space, lead-time-decaying nowcast (WP1) |
+| `activity_v2` | Capacity-weighted activity profile challenger (WP3) |
+| `weather_deriv` | Weather derivative features model (WP4) |
+| `combined` | All passing components together — only after individual ablations pass |
+
+#### 4.3.1 Replay output format
+
+Persist replay results to a dedicated experiment output file (NOT the live forecast tables):
+
+```python
+{
+    "replay_id": "<uuid>",
+    "baseline_commit": "<git-hash>",
+    "target_date": "YYYY-MM-DD",
+    "simulated_cutoff_slot": 156,
+    "algorithm_version": "robust_decay_v1",
+    "variants": {
+        "unchanged_dayahead": { "mae_5m": ..., "wape_15m": ..., ... },
+        "current": { ... },
+        "robust_decay": { ... },
+    },
+    "actual_provenance": "pac_loss_adjusted",
+    "constraint_masks": {
+        "cap_dispatch_slots": 3,
+        "outage_slots": 0,
+        "curtailed_slots": 2,
+    },
+    "feature_versions": { "FEATURE_COLS_count": 70, "artifact_created_ts": ... },
+}
+```
+
+Save to: `forecast/replay_results/replay_{date}_{cutoff}.json`
+
+### 4.4 CLI entry point for replay
+
+Extend the existing [`parse_cli_args()`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L12027) / [`run_cli_generation()`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L12028) to support:
+
+```
+python forecast_engine.py --replay --from-date 2026-06-01 --to-date 2026-08-01 --horizons 5,15,30,60,120 --variants current,robust_decay --dry-run
+```
 
 ---
 
-## 5. Work Package 1 - Robust Lead-Time-Decaying Nowcast
+## 5. Work Package 1 — Robust Lead-Time-Decaying Nowcast
 
 ### 5.1 Implementation location
 
-Refactor and extend `build_intraday_adjusted_forecast()` and
-`run_intraday_adjusted()`. Do not create a parallel scheduler or a second
-production table for the active nowcast.
+Refactor and extend [`build_intraday_adjusted_forecast()`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L10173-L10289) and [`run_intraday_adjusted()`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L10291-L10312). Do not create a parallel scheduler or a second production table.
 
-### 5.2 Eligible observations
+### 5.2 Current algorithm analysis (what we're replacing)
 
-An observed slot is eligible only when all conditions are true:
+The existing code at [lines 10173–10289](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L10173-L10289) does:
 
-- PAC-integrated or accepted metered actual is present;
-- the observation timestamp is not later than the current/replay cutoff;
-- day-ahead baseline energy exceeds a safe denominator threshold;
-- the slot is within the forecast solar window;
-- data freshness passes;
-- the slot is not plant-cap dispatched or export curtailed;
-- the slot is not covered by an inverter outage, manual stop, or maintenance event;
-  and
-- enough configured plant capacity was observable to make the plant ratio credible.
+1. Loads day-ahead and loss-adjusted actuals
+2. Builds constraint masks (1000H outage, cap-dispatch, export curtailment)
+3. Cascading fallback for observation quality:
+   - `unconstrained_mask` → `cap_free_mask` → `fallback_mask` (all-observed)
+4. Computes a **global ratio** (`actual_total / dayahead_total`) over up to 36 observed solar slots
+5. Computes a **recent ratio** over the last 12 observed slots
+6. Calculates `strength = min(blend_max, 0.24 + 0.02 * len(observed_slots))`
+7. For future slots: linear fade from `recent_ratio` → `global_ratio` over 24 steps
+8. Applies `factor = 1.0 + strength * (target_ratio - 1.0)` to each future day-ahead slot
+9. Enforces ±320 kWh slot-to-slot ramp limit
+10. Generates confidence bands via `confidence_bands()`
 
-The current fallback from unconstrained observations to increasingly contaminated
-sets must be removed or made explicit. A nowcast should fall back to unchanged
-day-ahead rather than silently learn from constrained or provider-estimated slots.
+**Problems with current approach:**
+- Linear ratio space is asymmetric (50% undershoot ≠ 200% overshoot)
+- Single-slot spikes can dominate (no robust estimator)
+- Fixed 24-step linear fade has no physical basis
+- Cascading fallback to contaminated observation sets happens silently
+- No lead-time-dependent decay
 
-### 5.3 Robust correction calculation
+### 5.3 Eligible observations (new logic)
 
-The clear-sky normalization in the original proposal is not a separate signal when
-the same clear-sky denominator is used for actual and forecast: it reduces to an
-actual/day-ahead ratio. Implement the ratio directly and robustly.
+An observed slot is eligible only when **ALL** conditions are true:
+
+1. PAC-integrated actual is present (from `load_actual_loss_adjusted_with_presence()`, `actual_present_arr[slot] == True`)
+2. The slot index ≤ current/replay cutoff slot
+3. Day-ahead baseline energy exceeds `MIN_BASELINE_ENERGY` (e.g., 5 kWh per slot) — prevents unstable ratios from tiny denominators
+4. The slot is within the solar window: `SOLAR_START_SLOT` to `SOLAR_END_SLOT` (currently slots 60–216)
+5. The slot is NOT cap-dispatch constrained (`cap_dispatch_mask[slot] == False`)
+6. The slot is NOT covered by inverter outage (`inverter_outage_mask[slot] == False`)
+7. The slot is NOT export-curtailed (`curtailed_mask[slot] == False`)
+8. Enough plant capacity was observable (from ipconfig: at least 70% of configured inverters reporting)
+
+> [!IMPORTANT]
+> The current cascading fallback (lines 10210–10221) that falls from unconstrained → cap-free → all-observed **must be removed**. A nowcast should fall back to unchanged day-ahead rather than silently learn from constrained slots.
+
+### 5.4 Robust correction calculation
 
 For each eligible observed slot `i`:
 
-```text
+```
 r_i = log(max(actual_i, epsilon) / max(dayahead_i, epsilon))
 ```
 
-Compute:
+Where `epsilon = 0.1` kWh (safe denominator floor).
 
-- `b_recent`: weighted median of `r_i` over the most recent 6-12 eligible slots;
-- `b_session`: weighted median of `r_i` over at most the most recent 36 eligible
-  slots; and
-- `strength`: a bounded confidence factor derived from eligible-slot count,
-  baseline energy, observed-capacity coverage, source quality, and volatility,
-  capped by the existing fresh `forecastIntradayBlendMax` setting.
+Compute:
+- **`b_recent`**: weighted median of `r_i` over the most recent 6–12 eligible slots (recency-weighted)
+- **`b_session`**: weighted median of `r_i` over the most recent up to 36 eligible slots
+- **`strength`**: bounded confidence factor derived from:
+  - eligible slot count (min 6 to activate)
+  - baseline energy level
+  - observed-capacity coverage (% of configured inverters reporting)
+  - source quality (all PAC-integrated)
+  - ratio volatility (std of recent log ratios)
+  - capped by operator-tunable [`forecastIntradayBlendMax`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L10242-L10243)
 
 For future lead time `h` minutes:
 
-```text
+```
 short_weight(h) = exp(-ln(2) * h / half_life_minutes)
-bias(h) = strength * ((1 - recent_mix) * b_session
-                      + recent_mix * b_recent * short_weight(h))
-factor(h) = clip(exp(bias(h)), ratio_floor, ratio_ceiling)
-nowcast(h) = clip(dayahead(h) * factor(h), 0, physical_slot_cap)
+bias(h)         = strength * short_weight(h) * ((1 - recent_mix) * b_session + recent_mix * b_recent)
+factor(h)       = clip(exp(bias(h)), ratio_floor, ratio_ceiling)
+nowcast(h)      = clip(dayahead(h) * factor(h), 0, physical_slot_cap)
 ```
 
-Design intent:
+#### 5.4.1 New constants to add
 
-- short-lived cloud/measurement deviations decay toward the session bias;
-- persistent day-level bias may remain through the remaining day;
-- ratios are symmetric in log space and resistant to single-slot spikes;
-- existing safety caps remain effective; and
-- no correction is applied when evidence is insufficient.
+```python
+# Nowcast correction (robust decay)
+NOWCAST_MIN_BASELINE_ENERGY   = 5.0    # kWh per slot minimum denominator
+NOWCAST_LOG_RATIO_EPSILON     = 0.1    # kWh floor for log ratio calculation
+NOWCAST_HALF_LIFE_MINUTES     = 45.0   # initial value — tuned via replay
+NOWCAST_RECENT_MIX            = 0.55   # blend between recent and session bias
+NOWCAST_RATIO_FLOOR           = 0.55   # exp(bias) minimum
+NOWCAST_RATIO_CEILING         = 1.50   # exp(bias) maximum
+NOWCAST_MIN_CAPACITY_COVERAGE = 0.70   # fraction of configured inverters required
+NOWCAST_VOLATILITY_DAMP       = 0.85   # strength multiplier when volatility is high
+```
 
-Initial half-life and `recent_mix` values must come from offline replay. They are
-not operator-facing settings until validation shows that operator tuning is useful
-and safe.
+#### 5.4.2 Weighted median implementation
 
-### 5.4 Time gating
+```python
+def _weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
+    """Robust weighted median of log ratios."""
+    sorted_idx = np.argsort(values)
+    sorted_vals = values[sorted_idx]
+    sorted_weights = weights[sorted_idx]
+    cumsum = np.cumsum(sorted_weights)
+    median_idx = np.searchsorted(cumsum, cumsum[-1] / 2.0)
+    return float(sorted_vals[min(median_idx, len(sorted_vals) - 1)])
+```
 
-Do not hardcode a new 08:00-16:00 operating window.
+### 5.5 Time gating
 
-The service continues running during 05:00-18:00, but correction eligibility is
-controlled by:
+Do NOT hardcode a new 08:00–16:00 operating window. The service continues running during 05:00–18:00 (`SOLAR_START_H`–`SOLAR_END_H`), but correction eligibility is controlled by the evidence-based gates in §5.3:
 
-- minimum baseline energy;
-- minimum clear-sky/solar-elevation opportunity;
-- minimum eligible observation count;
-- denominator stability; and
-- remaining forecast horizon.
+- Minimum baseline energy naturally excludes shoulder slots with tiny denominators
+- Minimum eligible observation count (6 slots) prevents premature correction
+- Volatility damping reduces correction strength when ratios are unstable
 
-This permits useful early/late corrections when evidence is good and naturally
-falls back when shoulder ratios are unstable.
+This permits useful early/late corrections when evidence is good and naturally falls back when shoulder ratios are unstable.
 
-### 5.5 Past slots and confidence bands
+### 5.6 Past slots and confidence bands
 
-- Past observed slots in `forecast_intraday_adjusted` remain actual observations.
-- Future P50 slots use the nowcast formula above.
-- Future P10/P90 must be transformed consistently with the point forecast and then
-  adjusted for horizon-dependent nowcast uncertainty.
-- Always enforce `0 <= P10 <= P50 <= P90 <= physical_slot_cap`.
-- Confidence must decrease when eligible support is weak, plant availability is
-  partial, or recent ratios are volatile.
+- Past observed slots in `forecast_intraday_adjusted` remain actual observations (unchanged from current behavior at [line 10228](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L10228))
+- Future P50 slots use the nowcast formula above
+- Future P10/P90: transform consistently with the point forecast, then widen for horizon-dependent uncertainty:
+  ```
+  P10(h) = clip(dayahead_lo(h) * factor(h) * (1 - horizon_uncertainty(h)), 0, cap)
+  P90(h) = clip(dayahead_hi(h) * factor(h) * (1 + horizon_uncertainty(h)), 0, cap)
+  ```
+  Where `horizon_uncertainty(h) = base_uncertainty * (1 + h / 120)` grows with lead time.
+- Always enforce `0 <= P10 <= P50 <= P90 <= physical_slot_cap`
 
-### 5.6 Safe fallback
+### 5.7 Ramp limiting
+
+Preserve the existing ±320 kWh slot-to-slot ramp limit ([lines 10253–10256](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L10253-L10256)) but apply it after the nowcast correction instead of after the linear ratio.
+
+### 5.8 Safe fallback
 
 If any input, artifact, or calculation is invalid:
-
-- keep observed past slots where authoritative actual exists;
-- use unchanged day-ahead for future slots;
-- record a fallback reason;
-- do not delete a previously valid intraday series unless replacement succeeds;
-  and
-- never modify `forecast_dayahead`.
+- Keep observed past slots where authoritative actual exists
+- Use unchanged day-ahead for future slots
+- Record a fallback reason in the intraday audit
+- Do not delete a previously valid intraday series unless replacement succeeds
+- **Never modify `forecast_dayahead`**
 
 ---
 
-## 6. Work Package 2 - Intraday Audit and Observability
+## 6. Work Package 2 — Intraday Audit & Observability
 
-### 6.1 Separate audit authority
+### 6.1 New table: `forecast_intraday_run_audit`
 
-Create `forecast_intraday_run_audit`. Do not write intraday runs into
-`forecast_run_audit` as day-ahead providers or authoritative learning runs.
+Create in [`db.js`](file:///d:/ADSI-Dashboard/server/db.js) schema initialization. Do NOT write intraday runs into [`forecast_run_audit`](file:///d:/ADSI-Dashboard/server/db.js#L885-L922).
 
-Minimum fields:
+```sql
+CREATE TABLE IF NOT EXISTS forecast_intraday_run_audit (
+    id                     INTEGER PRIMARY KEY,
+    target_date            TEXT    NOT NULL,
+    generated_ts           INTEGER NOT NULL,
+    cutoff_slot            INTEGER NOT NULL,
+    base_run_audit_id      INTEGER,
+    base_forecast_updated_ts INTEGER,
+    algorithm_version      TEXT    NOT NULL,
+    execution_mode         TEXT    NOT NULL DEFAULT 'active',  -- 'shadow' | 'active'
+    actual_source          TEXT    NOT NULL DEFAULT 'pac_loss_adjusted',
+    eligible_slots         INTEGER NOT NULL DEFAULT 0,
+    excluded_cap_slots     INTEGER NOT NULL DEFAULT 0,
+    excluded_outage_slots  INTEGER NOT NULL DEFAULT 0,
+    excluded_quality_slots INTEGER NOT NULL DEFAULT 0,
+    excluded_curtailed_slots INTEGER NOT NULL DEFAULT 0,
+    recent_log_ratio       REAL,
+    session_log_ratio      REAL,
+    strength               REAL,
+    half_life_minutes      REAL,
+    dayahead_total_kwh     REAL,
+    nowcast_total_kwh      REAL,
+    constraint_mode        TEXT,
+    run_status             TEXT    NOT NULL DEFAULT 'success',
+    notes_json             TEXT,
+    UNIQUE(target_date, generated_ts)
+);
+CREATE INDEX IF NOT EXISTS idx_fira_date_ts
+    ON forecast_intraday_run_audit(target_date, generated_ts DESC);
+CREATE INDEX IF NOT EXISTS idx_fira_status
+    ON forecast_intraday_run_audit(target_date, run_status);
+```
 
-| Field | Purpose |
-|---|---|
-| `id` | Intraday run identity |
-| `target_date` | Forecast date |
-| `generated_ts` | Generation timestamp |
-| `cutoff_slot` | Last observation allowed into the run |
-| `base_run_audit_id` | Day-ahead run used as baseline, when resolvable |
-| `base_forecast_updated_ts` | Fallback baseline identity |
-| `algorithm_version` | Reproducible nowcast implementation version |
-| `execution_mode` | `shadow` or `active` |
-| `actual_source` | PAC-integrated, metered, or mixed authoritative source |
-| `eligible_slots` | Support count |
-| `excluded_cap_slots` | Cap/curtailment exclusions |
-| `excluded_outage_slots` | Outage/maintenance exclusions |
-| `excluded_quality_slots` | Freshness/denominator/data-quality exclusions |
-| `recent_log_ratio` | Robust short-window bias |
-| `session_log_ratio` | Robust session bias |
-| `strength` | Applied confidence/blend |
-| `half_life_minutes` | Decay parameter |
-| `dayahead_total_kwh` | Baseline total |
-| `nowcast_total_kwh` | Adjusted total |
-| `run_status` | Success, skipped, fallback, or failed |
-| `notes_json` | Versioned supplemental diagnostics |
+#### 6.1.1 Retention policy
 
-Add indexes for `(target_date, generated_ts)` and latest successful run lookup.
-Apply a bounded retention policy after the experiment/operational requirements are
-agreed; do not allow five-minute audit growth to become unbounded.
+Apply bounded retention: keep at most 30 days of audit rows. Add a periodic cleanup in the Node daily maintenance cycle (similar to existing alarm archive pruning).
 
-### 6.2 Transaction and concurrency behavior
+### 6.2 Python-side audit writer
 
-- Use the existing SQLite retry/backoff pattern.
-- Serialize same-date intraday writes with an advisory lock or equivalent
-  single-writer guard.
-- Replace all rows for a date transactionally.
-- Commit the successful audit record with, or immediately after, the successful
-  series transaction so the UI never reports an audit for data that was not saved.
-- Preserve the last valid series when generation fails.
+Add `_write_intraday_run_audit()` in [`forecast_engine.py`](file:///d:/ADSI-Dashboard/services/forecast_engine.py) following the same SQLite retry/backoff pattern as [`_write_forecast_run_audit_from_python()`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L9982-L10144):
 
-### 6.3 Shadow evaluation storage
+- Use the existing `_open_sqlite()` helper with `SQLITE_WRITE_TIMEOUT_SEC`
+- Retry with `_is_retryable_sqlite_error()` classifier
+- Commit audit record with or immediately after the successful series transaction
 
-Do not store a full 156-slot candidate curve every five minutes indefinitely.
-For the live shadow stage, persist only scheduled evaluation checkpoints and the
-predictions needed for +15/+30/+60/+120-minute scoring, with a 30-60 day retention
-window. This keeps evaluation reproducible without excessive DB growth.
+### 6.3 Transaction and concurrency
+
+- Use existing SQLite retry/backoff pattern
+- Replace all rows for a date transactionally (already done in [`_write_forecast_db()`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L9862))
+- Preserve the last valid series when generation fails
 
 ### 6.4 Diagnostics API
 
-Extend forecast engine health with:
+Extend the [`/api/analytics/dayahead-chart`](file:///d:/ADSI-Dashboard/server/index.js#L22327) response to include nowcast metadata:
 
-- active nowcast mode (`off`, `shadow`, `active`);
-- last successful and attempted intraday timestamps;
-- last cutoff slot;
-- algorithm version;
-- eligible/excluded counts;
-- correction strength and decay settings;
-- baseline run identity;
-- fallback reason; and
-- artifact age/support warnings.
+```javascript
+ml_final: {
+  rows: mlFinalRows,
+  meta: {
+    generated_ts: ...,
+    algorithm_version: "robust_decay_v1",
+    cutoff_slot: ...,
+    eligible_slots: ...,
+    excluded_slots: ...,
+    strength: ...,
+    execution_mode: "active",  // or "shadow" or "off"
+    fallback_reason: null,     // or reason string
+    recent_log_ratio: ...,
+    session_log_ratio: ...,
+  }
+}
+```
 
-Intraday audit data is gateway-authoritative. Remote clients access it through
-proxy routes; do not invent an independent remote audit history.
+Read the latest successful `forecast_intraday_run_audit` row for the requested date. Gateway-authoritative; remote clients access via proxy.
 
 ---
 
-## 7. Work Package 3 - Inverter Activity and Shoulder Modeling
+## 7. Work Package 3 — Inverter Activity & Shoulder Modeling
 
 ### 7.1 Extend the existing artifact
 
-Extend the existing forecast activity artifact rather than creating an unrelated
-nightly cache. Preserve existing `activity_records`, `estimate_activity_window()`,
-`apply_activity_hysteresis()`, and `apply_block_staging()` as the fallback.
+Extend [`build_forecast_artifacts()`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L6322-L6365) rather than creating an unrelated nightly cache. Preserve existing `activity_records`, [`estimate_activity_window()`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L6851-L6929), [`apply_activity_hysteresis()`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L6948-L6989), and [`apply_block_staging()`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L6991-L7050) as the fallback.
 
-The upgraded artifact requires:
+The upgraded artifact adds:
 
-- `schema_version`;
-- creation timestamp;
-- training cutoff date;
-- source DB identity where safe;
-- lookback window;
-- accepted/rejected day counts and rejection reasons;
-- per-inverter support counts;
-- capacity-weighted activity profiles; and
-- checksum/atomic replacement behavior.
+```python
+{
+    "schema_version": 2,           # NEW — version 1 is current format
+    "created_ts": int(time.time()),
+    "training_cutoff_date": "2026-08-19",  # NEW — for leakage prevention
+    "lookback_days": SHAPE_LOOKBACK_DAYS,
+    "history_days": len(history_days),
+    "accepted_days": len(accepted),
+    "rejected_days": len(rejected),
+    "rejection_reasons": {...},    # NEW
+    "activity_records": [...],     # existing format preserved
+    "capacity_weighted_profiles": {  # NEW
+        "default": {
+            "active_capacity_fraction": np.ndarray,  # 288 slots
+            "support_count": int,
+            "uncertainty": float,
+        },
+        "per_inverter": {...},     # optional, if per-inverter support exists
+    },
+}
+```
+
+#### 7.1.1 Backward compatibility
+
+When loading an artifact:
+- If `schema_version` is missing or 1, use existing behavior (activity_records only)
+- If `schema_version` is 2, use capacity-weighted profiles when available, fall back to activity_records for any missing/corrupt data
+- Save with `schema_version: 2` always
 
 ### 7.2 Define inverter synchronization from energy, not communications
 
-Derive inverter activity from server-integrated per-inverter `energy_5min` or an
-equivalent PAC-integrated series.
-
-Do not use `online` communication status as grid-synchronization truth.
+Derive inverter activity from server-integrated per-inverter `energy_5min`, NOT from `online` communication status.
 
 For each inverter/day:
+- **Activation:** capacity-relative energy threshold sustained for ≥ 3 consecutive slots (15 min)
+- **Deactivation:** lower threshold with sustained hysteresis
+- **Reject:** isolated non-zero artifacts (single-slot spikes)
+- **Exclude:** firmware maintenance, manual STOP, plant-cap dispatch, confirmed outage, materially incomplete data
+- **Record** why an inverter/day was excluded (in `rejection_reasons`)
 
-- define activation using a capacity-relative energy threshold sustained for at
-  least three consecutive slots;
-- define deactivation with a lower threshold and sustained hysteresis;
-- reject isolated non-zero artifacts;
-- respect configured inverter/node enablement and capacity;
-- exclude firmware maintenance, manual STOP, plant-cap dispatch, confirmed outage,
-  and materially incomplete data; and
-- record why an inverter/day was excluded.
+#### 7.2.1 Data source
+
+Query per-inverter energy from the AppData DB:
+```sql
+SELECT inverter_id, ts, kwh_inc
+FROM energy_5min
+WHERE ts BETWEEN ? AND ?
+ORDER BY inverter_id, ts
+```
+
+Use the inverter→node mapping from [`_get_inverter_node_map()`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L2831-L2850) to resolve capacity per inverter.
 
 ### 7.3 Learn solar-relative, capacity-weighted behavior
 
-Use features relative to solar geometry rather than a single absolute-clock rolling
-average:
+Use features relative to solar geometry:
+- Minutes from modeled sunrise to activation
+- Minutes from deactivation to modeled sunset
+- Season and day-of-year (using existing [`_season_bucket_from_day()`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L6349))
+- Weather regime (using existing `classify_day_regime()`)
+- Enabled capacity represented by each inverter
 
-- minutes from modeled sunrise/solar-elevation threshold to activation;
-- minutes from deactivation to modeled sunset/solar-elevation threshold;
-- season and day-of-year;
-- weather regime and forecast irradiance/cloud class;
-- inverter identity/topological grouping where support exists; and
-- enabled capacity represented by each inverter.
-
-The primary profile is `expected_active_capacity_fraction`, not raw active-inverter
-count. It must include support and uncertainty so weak profiles fall back safely.
+The primary profile is `expected_active_capacity_fraction`, not raw active-inverter count.
 
 ### 7.4 Prevent temporal leakage
 
-For every historical training or replay target, build the activity profile using
-only dates strictly before that target. Do not compute one rolling profile from the
-full dataset and reuse it for earlier samples.
-
-Production inference uses the latest artifact whose training cutoff precedes the
-forecast target date.
+For every historical training or replay target:
+- Build the activity profile using only dates **strictly before** that target
+- Do NOT compute one rolling profile from the full dataset and reuse it for earlier samples
+- Production inference uses the latest artifact whose `training_cutoff_date` precedes the forecast target date
 
 ### 7.5 Determine integration by ablation
 
-Evaluate these alternatives independently:
+Evaluate independently via the replay harness (WP0):
 
-1. Existing activity hysteresis/staging only (champion).
-2. Capacity-weighted activity fraction as a shoulder baseline adjustment.
-3. Capacity-weighted activity fraction as an ML feature.
+| Variant | Description |
+|---|---|
+| Champion | Existing [`apply_activity_hysteresis()`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L6948) + [`apply_block_staging()`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L6991) |
+| Activity-adjustment | Capacity-weighted activity fraction as a shoulder baseline adjustment |
+| Activity-feature | Capacity-weighted activity fraction as an ML feature in [`build_features()`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L2425) |
 
-Do not apply alternatives 2 and 3 together unless their combined replay beats both
-individual variants.
-
-If the baseline-adjustment variant wins, apply the local activity fraction to
-Solcast P10/P50/P90 consistently in high-confidence shoulder slots before final ML
-clamping. This prevents the later Solcast floor/tri-band clamp from undoing the
-local physical activity model and keeps the adjusted uncertainty band coherent.
+Do not apply adjustment and feature variants together unless their combined replay beats both individual variants.
 
 ---
 
-## 8. Work Package 4 - Weather Derivative Features
+## 8. Work Package 4 — Weather Derivative Features
 
 ### 8.1 Candidate features
 
-Use names that match their actual calculations:
+| Feature | Definition | Source resolution |
+|---|---|---|
+| `cloud_delta_1h` | `cloud[t] - cloud[t-12]` at 5-min resolution | Interpolated from Open-Meteo hourly |
+| `temp_delta_1h` | `temperature[t] - temperature[t-12]` | Interpolated from Open-Meteo hourly |
+| `rad_std_30m` | Trailing σ of irradiance over 6 slots | Interpolated from Open-Meteo hourly |
 
-| Feature | Definition |
-|---|---|
-| `cloud_delta_1h` | `cloud[t] - cloud[t-12]` at five-minute resolution |
-| `temp_delta_1h` | `temperature[t] - temperature[t-12]` |
-| `rad_std_30m` | Trailing standard deviation of irradiance over six slots |
-
-`rad_std_30m` is volatility, not momentum. If directional momentum is later
-needed, define a separate signed irradiance slope/delta.
+> [!WARNING]
+> Open-Meteo is hourly and interpolated to 5 min. Do not claim that 30-min variation from interpolated hourly data resolves passing clouds. Prefer provider-native 5-min Solcast trend/spread inputs where available.
 
 ### 8.2 Input-resolution and issue-time rules
 
-Open-Meteo is hourly and interpolated to five minutes. Therefore:
+- Calculate derivative windows identically in training and inference
+- Use **trailing** rather than centered windows for any feature described as causal
+- Record whether a training row came from issue-time forecast weather or hindsight archive weather
 
-- do not claim that 30-minute variation from interpolated hourly data resolves
-  passing clouds;
-- prefer provider-native five-minute Solcast trend/spread inputs where available;
-- calculate derivative windows identically in training and inference;
-- use trailing rather than centered windows for any feature described as causal;
-  and
-- record whether a training row came from issue-time forecast weather or hindsight
-  archive weather.
-
-Before promotion, audit how many historical days have saved issue-time weather
-snapshots. Derivative training requires adequate issue-time coverage. If coverage
-is insufficient, keep the features experimental or neutral and do not train a
-production model that learns precise storm timing from hindsight archive weather.
+Before promotion:
+- Audit how many historical days have saved issue-time weather snapshots (check [`FORECAST_SNAPSHOT_DIR`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L106))
+- If issue-time coverage is insufficient, keep features experimental
 
 ### 8.3 Feature compatibility
 
-- Append approved features to `FEATURE_COLS` only after ablation.
-- Update feature-count assertions and tests in the same change.
-- Store exact feature names and schema version in every new bundle.
-- Continue aligning old bundles to their stored feature list.
-- Neutral-fill a missing new feature only for loading an old model or an explicitly
-  marked unavailable input; do not rewrite historical DB rows with zero defaults.
-- Retrain to gain benefit from new features; an old bundle should continue using
-  its original feature set unchanged.
+- Append approved features to [`FEATURE_COLS`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L2774-L2798) only after ablation
+- Update the feature-count assertion at [line 2769](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L2769-L2771)
+- Store exact feature names in every new model bundle
+- Continue aligning old bundles via [`_align_bundle_features()`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L8038)
+- Neutral-fill a missing new feature only for loading an old model
+- **Retrain** to gain benefit from new features
 
 ### 8.4 No feature-cache DB backfill
 
-There is no historical DB feature matrix that needs migration. `build_features()`
-reconstructs features from weather and snapshot inputs at training time.
+`build_features()` reconstructs features from weather and snapshot inputs at training time. No historical DB migration required.
 
-If operators need a manual maintenance command, implement an artifact-only command
-such as:
-
-```text
---rebuild-forecast-artifacts --lookback-days N --dry-run
+If needed, implement an artifact rebuild command:
+```
+python forecast_engine.py --rebuild-forecast-artifacts --lookback-days N --dry-run
 ```
 
-It must:
-
-- run only in gateway mode;
-- read SQLite in query-only mode or from a transactionally consistent snapshot;
-- acquire the forecast maintenance/generation lock;
-- report estimated work and accepted/rejected coverage;
-- write to a temporary artifact;
-- validate schema/checksum before atomic replacement; and
-- leave the previous artifact intact on failure.
-
-A solar-window clock check may be an additional operational guard, but it is not
-the concurrency or DB-safety mechanism.
+Must:
+- Run only in gateway mode
+- Acquire the forecast generation lock (existing [`DAYAHEAD_GEN_LOCK_DIR`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L169))
+- Report coverage before execution
+- Write to a temporary artifact, validate, then atomically replace
 
 ---
 
-## 9. Work Package 5 - Node, API, and Frontend Integration
+## 9. Work Package 5 — Node, API, and Frontend Integration
 
-### 9.1 Node responsibilities
+### 9.1 Node responsibilities (changes in [`server/`](file:///d:/ADSI-Dashboard/server/))
 
-Node changes are limited to:
+| Change | File | Details |
+|---|---|---|
+| DB schema for `forecast_intraday_run_audit` | [`db.js`](file:///d:/ADSI-Dashboard/server/db.js) | New `CREATE TABLE` + indexes in schema init |
+| Read-only audit/diagnostics API | [`index.js`](file:///d:/ADSI-Dashboard/server/index.js) | Extend `/api/analytics/dayahead-chart` response `ml_final.meta` |
+| Settings validation | [`index.js`](file:///d:/ADSI-Dashboard/server/index.js) | Validate `forecastVirtualNowcastMode` on save |
+| Cloud backup allowlist | [`cloudBackup.js`](file:///d:/ADSI-Dashboard/server/cloudBackup.js) | Add `forecast_intraday_run_audit` to backup table list |
+| Retention cleanup | [`index.js`](file:///d:/ADSI-Dashboard/server/index.js) | Periodic pruning of audit rows > 30 days |
 
-- DB schema/migration and prepared statements for the intraday audit/evaluation
-  tables;
-- read-only health/audit APIs;
-- existing analytics payload enrichment where needed;
-- optional stale-intraday watchdog behavior; and
-- settings validation for the nowcast rollout mode.
-
-Node must not duplicate Python's five-minute nowcast calculation.
+Node must NOT duplicate Python's 5-min nowcast calculation.
 
 ### 9.2 Rollout setting
 
-Add one fresh-read setting with safe values:
+Add one setting with safe defaults:
 
-```text
+```
 forecastVirtualNowcastMode = off | shadow | active
 ```
 
-Behavior:
+**Behavior:**
+- **`off`** (default): current intraday algorithm remains authoritative. No new code runs.
+- **`shadow`**: current algorithm remains authoritative AND the challenger is evaluated and audited, but does NOT overwrite `forecast_intraday_adjusted`.
+- **`active`**: validated challenger writes `forecast_intraday_adjusted`, with immediate fallback to current algorithm on error.
 
-- `off`: current intraday algorithm remains authoritative;
-- `shadow`: current algorithm remains authoritative and the challenger is evaluated
-  without overwriting it; and
-- `active`: validated challenger writes `forecast_intraday_adjusted`, with immediate
-  fallback to the current algorithm on error.
+**Reading in Python:** Add `_setting_string_or_default()` helper (similar to existing `_setting_bool_or_default()` at [line 11605](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L11605)):
 
-Default for existing and new installations is `off` until the replay and shadow
-promotion gates pass. Invalid values resolve to `off` and emit a bounded warning.
+```python
+def _setting_string_or_default(key: str, default: str, valid: set[str]) -> str:
+    """Read a string forecast setting fresh from the settings table."""
+    # ... reads from settings WHERE key=?, returns default if invalid
+```
 
-### 9.3 Analytics API
+**Default for existing and new installations:** `off` until replay and shadow promotion gates pass. Invalid values resolve to `off` with a bounded warning.
 
-The day-ahead chart API already returns:
+### 9.3 Settings UI
 
-- `locked`;
-- `intraday_solcast`;
-- `plant_actual`; and
-- `ml_final`.
+Add the nowcast mode selector in [`public/js/app.js`](file:///d:/ADSI-Dashboard/public/js/app.js) forecast settings section alongside existing `forecastIntradayBlendMax` ([line 6468](file:///d:/ADSI-Dashboard/public/js/app.js#L6468), [lines 7760–7761](file:///d:/ADSI-Dashboard/public/js/app.js#L7760-L7761)):
 
-Keep those names stable. Add nowcast metadata separately, including generated time,
-algorithm version, cutoff, support, execution mode, and fallback state.
+```html
+<select id="setForecastVirtualNowcastMode">
+  <option value="off">Off (current algorithm)</option>
+  <option value="shadow">Shadow (evaluate only)</option>
+  <option value="active">Active (production)</option>
+</select>
+```
 
-### 9.4 Frontend
+### 9.4 Analytics API
 
-Update the merged analytics chart to render `ml_final.rows` as
-`ML intraday nowcast`.
+The [`/api/analytics/dayahead-chart`](file:///d:/ADSI-Dashboard/server/index.js#L22327) already returns `locked`, `intraday_solcast`, `plant_actual`, `ml_final`. Keep those names stable.
 
-Requirements:
+Add nowcast metadata to the `ml_final` object as described in §6.4.
 
-- keep `Solcast est. actual` separate;
-- show the nowcast generation/cutoff time in compact metadata;
-- visually distinguish observed history from future nowcast where practical;
-- preserve compact layout;
-- use shared theme tokens and validate dark, light, and classic themes;
-- avoid implying that shadow output is production-authoritative; and
-- proxy all remote analytics through the gateway as today.
+### 9.5 Frontend chart update
+
+Update the chart rendering at [lines 21726–21825](file:///d:/ADSI-Dashboard/public/js/app.js#L21726-L21825):
+
+1. **Add a new dataset** for `ml_final` as `ML intraday nowcast` — distinct from the existing `Solcast est. actual` dataset
+2. **Keep** `Solcast est. actual` as its own separate line (currently rendered from `lp.intraday_solcast?.rows`)
+3. **Add compact metadata tooltip** showing nowcast generation time, cutoff slot, eligible slots, and execution mode
+4. **Visually distinguish** observed history (solid) from future nowcast (dashed or different opacity)
+5. **Shadow mode indicator:** if `execution_mode === "shadow"`, show a subtle badge/label indicating the line is experimental
+
+#### 9.5.1 New color constant
+
+```javascript
+const COL_NOWCAST = "rgba(139, 92, 246, 0.85)";  // Purple — distinct from all existing series
+```
+
+#### 9.5.2 ML final dataset rendering
+
+```javascript
+// Add ML intraday nowcast line
+const mlFinalByLabel = new Map();
+(lp.ml_final?.rows || []).forEach(r => {
+    mlFinalByLabel.set(slotToHHMM(Number(r.slot)), r);
+});
+const mlFinalData = labels.map(lbl => {
+    const r = mlFinalByLabel.get(lbl);
+    return r && r.ml_mw != null ? Number((Number(r.ml_mw) / MW_PER_MWH).toFixed(6)) : null;
+});
+const hasMLFinal = mlFinalData.some(v => v != null);
+if (hasMLFinal) {
+    datasets.push({
+        label: "ML intraday nowcast",
+        data: mlFinalData,
+        borderColor: COL_NOWCAST,
+        backgroundColor: "transparent",
+        borderWidth: 2.0,
+        pointRadius: 0,
+        pointHoverRadius: 3,
+        pointBackgroundColor: COL_NOWCAST,
+        pointBorderWidth: 0,
+        fill: false,
+        tension: 0.3,
+        order: 1,
+    });
+}
+```
+
+### 9.6 Theme validation
+
+Validate all chart colors in dark, light, and classic themes. Ensure the new nowcast line has sufficient contrast against all backgrounds.
+
+### 9.7 Documentation updates
 
 Any UI change requires synchronized updates to:
-
-- `docs/ADSI-Dashboard-User-Guide.html`;
-- `docs/ADSI-Dashboard-User-Manual.md`; and
-- `docs/ADSI-Dashboard-User-Guide.pdf`.
+- [`docs/ADSI-Dashboard-User-Guide.html`](file:///d:/ADSI-Dashboard/docs)
+- [`docs/ADSI-Dashboard-User-Manual.md`](file:///d:/ADSI-Dashboard/docs)
+- [`docs/ADSI-Dashboard-User-Guide.pdf`](file:///d:/ADSI-Dashboard/docs)
 
 ---
 
 ## 10. Validation and Promotion Gates
 
-### 10.1 Dataset
+### 10.1 Dataset requirements
 
-Use at least 60-90 eligible completed days when available, with chronological
-rolling-origin evaluation. Report days skipped for missing issue-time inputs,
-actuals, constraints, or insufficient model training.
-
-Do not randomly split five-minute slots from the same day across train and test.
+- Use at least **60–90 eligible completed days** when available
+- **Chronological rolling-origin evaluation** — do NOT randomly split 5-min slots from the same day across train/test
+- Report days skipped for: missing issue-time inputs, missing actuals, constraint coverage, insufficient model training
 
 ### 10.2 Metrics
 
-Day-ahead metrics:
+#### Day-ahead metrics
+- Overall WAPE, median and mean daily WAPE
+- Total-energy APE
+- Slot MAE and RMSE
+- First-active and last-active timing error (for activity component)
+- P10–P90 empirical coverage
+- Error by weather regime (`clear_stable`, `clear_edge`, `mixed_stable`, `mixed_volatile`, `overcast`, `rainy` — from [`WEATHER_BUCKETS`](file:///d:/ADSI-Dashboard/services/forecast_engine.py#L320-L327))
 
-- overall WAPE;
-- median and mean daily WAPE;
-- total-energy APE;
-- slot MAE and RMSE;
-- first-active and last-active timing error;
-- P10-P90 empirical coverage; and
-- error by weather regime and season.
+#### Shoulder metrics
+- 05:00–08:00 MAE/WAPE (morning shoulder)
+- 16:00–18:00 MAE/WAPE (afternoon shoulder)
+- Synchronization timing error (predicted vs actual first/last active slot)
+- Active-capacity-fraction calibration
 
-Dedicated shoulder metrics:
+#### Intraday metrics
+- +5/+15/+30/+60/+120-minute MAE and WAPE
+- Remaining-day total-energy APE
+- Improvement vs. unchanged day-ahead (% relative)
+- Improvement vs. current intraday algorithm (% relative)
+- Performance by issue time, weather regime, and observed-support bucket
+- Fallback/skipped-run frequency
 
-- 05:00-08:00 MAE/WAPE;
-- 16:00-18:00 MAE/WAPE;
-- synchronization timing error; and
-- active-capacity-fraction calibration.
-
-Intraday metrics:
-
-- +5/+15/+30/+60/+120-minute MAE and WAPE;
-- remaining-day total-energy APE;
-- improvement relative to unchanged day-ahead;
-- improvement relative to the current intraday algorithm;
-- performance by issue time, weather regime, and observed-support bucket; and
-- fallback/skipped-run frequency.
-
-Score against metered or PAC-integrated actuals only. Provider estimated actuals
-must be excluded from promotion metrics.
+> [!CAUTION]
+> Score against metered or PAC-integrated actuals ONLY. Provider estimated actuals must be excluded from promotion metrics.
 
 ### 10.3 Minimum promotion gates
 
-A challenger may enter live shadow only when:
+#### Shadow entry gates
 
-- replay covers at least 30 eligible days and more data is not reasonably available;
-- there is no future-observation or full-history artifact leakage;
-- no critical weather regime shows an unexplained material regression; and
-- all persistence, fallback, and compatibility tests pass.
+A challenger may enter live shadow when:
+- Replay covers ≥ 30 eligible days
+- No future-observation or full-history artifact leakage
+- No critical weather regime shows unexplained material regression
+- All persistence, fallback, and compatibility tests pass
 
-A challenger may become active only when the combined replay plus live-shadow
-results meet all of these gates:
+#### Active promotion gates
 
 | Gate | Requirement |
 |---|---|
-| Intraday skill | At least 5% relative improvement in median nowcast WAPE over the current intraday algorithm across +15 to +120 minute horizons |
-| Shoulder skill | At least 10% relative improvement in shoulder MAE for the promoted activity component |
-| Overall regression | No more than 0.5 percentage-point overall WAPE regression |
-| Regime regression | No regime regresses by more than 2 percentage points without documented operator acceptance |
-| Reliability | No increase in missing/incomplete production series; all failures fall back successfully |
-| Runtime | P95 intraday execution comfortably completes before the next five-minute slot |
+| Intraday skill | ≥ 5% relative improvement in median nowcast WAPE over current algorithm across +15 to +120 min horizons |
+| Shoulder skill | ≥ 10% relative improvement in shoulder MAE for the promoted activity component |
+| Overall regression | No more than 0.5 pp overall WAPE regression |
+| Regime regression | No regime regresses by more than 2 pp without documented operator acceptance |
+| Reliability | No increase in missing/incomplete production series; all failures fall back |
+| Runtime | P95 intraday execution completes within 30s (well before next 5-min slot) |
 | Data integrity | Zero unauthorized writes to `forecast_dayahead` or day-ahead learning authority |
-
-If a component fails its individual ablation, omit it from the combined model even
-if the overall project continues.
 
 ---
 
 ## 11. Rollout and Rollback
 
-### Stage A - Offline only
+### Stage A — Offline only
+- Implement replay harness and unit tests
+- Produce baseline and challenger reports
+- Select `half_life_minutes`, `recent_mix` from training/validation periods only
+- Keep `forecastVirtualNowcastMode = off`
 
-- Implement replay and unit tests.
-- Produce baseline and challenger reports.
-- Select parameters from training/validation periods only.
-- Keep `forecastVirtualNowcastMode=off`.
+### Stage B — Live shadow
+- Enable `shadow` on gateway for ≥ 14 completed solar days
+- Include clear/mixed and at least one overcast/rainy period
+- Continue writing current algorithm to `forecast_intraday_adjusted`
+- Store bounded challenger checkpoints in `forecast_intraday_run_audit`
 
-### Stage B - Live shadow
-
-- Enable `shadow` on the gateway for at least 14 completed solar days.
-- Include clear/mixed and at least one overcast/rainy period where naturally
-  available; extend the shadow period if regime coverage is inadequate.
-- Continue writing the current intraday algorithm to the production table.
-- Store bounded challenger checkpoints for later scoring.
-
-### Stage C - Controlled activation
-
-- Switch to `active` only after promotion gates pass and an operator explicitly
-  enables it.
-- Retain the old algorithm in code as the automatic fallback.
-- Monitor engine health, run duration, eligible-slot counts, correction magnitude,
-  fallback count, DB busy retries, and chart freshness.
+### Stage C — Controlled activation
+- Switch to `active` only after promotion gates pass and operator explicitly enables it
+- Retain current algorithm in code as automatic fallback
+- Monitor: engine health, run duration, eligible-slot counts, correction magnitude, fallback count, DB busy retries, chart freshness
 
 ### Automatic rollback triggers
 
-Immediately fall back to the current intraday algorithm when:
+Immediately fall back to current algorithm when:
+- Challenger raises or returns invalid/missing rows
+- Fewer than `INTRADAY_MIN_OBS_SLOTS` (6) eligible observations exist
+- Ratios or bands contain NaN/Inf or violate ordering/cap constraints
+- Artifact schema/checksum validation fails
+- Generation lock cannot be acquired
+- Execution risks missing the next 5-min cadence
 
-- the challenger raises or returns invalid/missing rows;
-- fewer than the required eligible observations exist;
-- ratios or bands contain NaN/Inf or violate ordering/cap constraints;
-- artifact schema/checksum validation fails;
-- the base day-ahead identity cannot be safely resolved;
-- the generation lock cannot be acquired within the bounded retry window; or
-- execution risks missing the next five-minute cadence.
-
-Operator rollback is a single setting change from `active` to `off`. No schema
-rollback or model deletion is required.
+**Operator rollback:** Single setting change from `active` to `off`. No schema rollback or model deletion required.
 
 ---
 
 ## 12. Test Plan
 
-### 12.1 Python unit tests
+### 12.1 Python unit tests (new file: `services/tests/test_forecast_nowcast.py`)
 
-Add tests for:
+| Test | Validates |
+|---|---|
+| `test_eligible_slot_selection` | Only PAC-integrated, unconstrained, above-threshold slots are eligible |
+| `test_solcast_est_actual_excluded` | `resolve_actual_5min_for_date()` is never called for live nowcasting |
+| `test_cutoff_enforcement` | Future slots beyond cutoff are hidden in replay |
+| `test_denominator_gate` | Low-energy slots are excluded (< `NOWCAST_MIN_BASELINE_ENERGY`) |
+| `test_weighted_median_log_ratios` | `_weighted_median()` produces correct results for symmetric/skewed distributions |
+| `test_half_life_decay` | `short_weight(h)` decays correctly; at h=0 weight=1.0, at h=half_life weight=0.5 |
+| `test_full_bias_decay` | The complete session/recent correction fades toward immutable day-ahead with lead time |
+| `test_ratio_clip_constraints` | Factor stays within `[NOWCAST_RATIO_FLOOR, NOWCAST_RATIO_CEILING]` |
+| `test_band_ordering` | `0 <= P10 <= P50 <= P90 <= physical_slot_cap` always holds |
+| `test_outage_exclusion` | Slots with inverter outage mask are excluded |
+| `test_cap_dispatch_exclusion` | Cap-dispatch slots are excluded |
+| `test_curtailment_exclusion` | Export-curtailed slots are excluded |
+| `test_insufficient_evidence_fallback` | Falls back to unchanged day-ahead when < 6 eligible slots |
+| `test_prior_series_preservation` | Last valid intraday series preserved on write failure |
+| `test_shadow_mode_no_overwrite` | Shadow mode evaluates but does not write to `forecast_intraday_adjusted` |
+| `test_active_mode_writes` | Active mode writes to `forecast_intraday_adjusted` |
+| `test_setting_off_skips_nowcast` | `forecastVirtualNowcastMode=off` runs current algorithm only |
+| `test_replay_no_persistence` | Replay mode does not write to live tables |
 
-- authoritative actual-source selection and rejection of Solcast estimated actual;
-- cutoff enforcement with no future-slot leakage;
-- denominator/low-energy gates;
-- weighted-median log ratios;
-- half-life decay and long-horizon session bias;
-- ratio, blend, capacity, and band constraints;
-- outage, manual, maintenance, cap-dispatch, and curtailment exclusions;
-- insufficient-evidence fallback;
-- prior-series preservation on write failure;
-- activity sync/desync hysteresis;
-- capacity weighting and configured-node changes;
-- rolling/as-of activity artifacts with no future-day access;
-- derivative definitions and trailing windows;
-- issue-time weather coverage handling;
-- old model/artifact compatibility;
-- replay cutoff/horizon scoring; and
-- shadow versus active behavior.
+### 12.2 Python unit tests (new file: `services/tests/test_forecast_activity_v2.py`)
 
-### 12.2 Node/database tests
+| Test | Validates |
+|---|---|
+| `test_activity_from_energy_not_comms` | Uses `energy_5min` per-inverter, not `online` status |
+| `test_sustained_activation_threshold` | Requires 3 consecutive slots above threshold |
+| `test_deactivation_hysteresis` | Lower threshold with sustained hold |
+| `test_isolated_spike_rejection` | Single-slot non-zero artifacts rejected |
+| `test_capacity_weighting` | Larger inverters have proportional influence |
+| `test_temporal_leakage_prevention` | Profile built only from dates < target |
+| `test_artifact_schema_v2_compat` | v2 artifact loads correctly; v1 falls back to existing behavior |
+| `test_artifact_v1_fallback` | Missing `capacity_weighted_profiles` → uses `activity_records` |
 
-Add tests for:
+### 12.3 Node/database tests
 
-- idempotent migration of intraday audit/evaluation tables;
-- required indexes and bounded retention;
-- transactional series replacement;
-- day-ahead audit authority remaining unchanged;
-- settings validation/defaults;
-- gateway-only writes and remote proxy behavior;
-- backup/restore behavior for new schema;
-- any replication allowlist changes that are intentionally required; and
-- watchdog idempotency/locking if a watchdog is added.
+| Test | File | Validates |
+|---|---|---|
+| `test_intraday_audit_migration` | `forecastIntradayAudit.test.js` | Table creation, indexes, idempotent migration |
+| `test_audit_retention` | `forecastIntradayAudit.test.js` | Rows > 30 days are pruned |
+| `test_dayahead_audit_unchanged` | `forecastIntradayAudit.test.js` | `forecast_run_audit` authority not modified |
+| `test_setting_validation` | `settingsSectionRegistry.test.js` | `forecastVirtualNowcastMode` validates to `off`/`shadow`/`active` |
+| `test_gateway_only_writes` | `modeIsolation.test.js` | Remote mode cannot write intraday audit |
+| `test_backup_includes_audit` | `cloudBackupRestoreSafety.test.js` | New table in backup allowlist |
 
-### 12.3 Frontend tests
+### 12.4 Frontend tests
 
-Verify:
+| Test | Validates |
+|---|---|
+| `ml_final renders as ML intraday nowcast` | Correct label, color, dataset |
+| `intraday_solcast remains Solcast est. actual` | No label confusion |
+| `missing/fallback metadata displays correctly` | Graceful handling when meta is absent |
+| `shadow mode shows indicator` | Non-production label when `execution_mode === "shadow"` |
+| `dark/light/classic themes readable` | Sufficient contrast for new purple line |
 
-- `ml_final` renders as `ML intraday nowcast`;
-- `intraday_solcast` remains `Solcast est. actual`;
-- missing/fallback/shadow metadata is accurate;
-- chart units and five-minute MW/MWh conversion remain correct;
-- no duplicate datasets appear on refresh;
-- remote mode displays gateway data; and
-- dark, light, and classic themes remain readable.
-
-### 12.4 Regression and smoke checks
-
-At minimum:
+### 12.5 Regression and smoke checks
 
 ```powershell
+# Python tests
 python -m pytest services/tests/test_forecast_engine_audit_fixes.py `
   services/tests/test_forecast_engine_constraints.py `
   services/tests/test_forecast_engine_weather.py `
-  services/tests/test_forecast_engine_triband.py -q
+  services/tests/test_forecast_engine_triband.py `
+  services/tests/test_forecast_nowcast.py `
+  services/tests/test_forecast_activity_v2.py -q
 
+# Syntax checks
+python -m py_compile services/forecast_engine.py
+python -m py_compile ForecastCoreService.py
 node --check server/index.js
 node --check server/db.js
-node --check public/js/app.js
-python -m py_compile services/forecast_engine.py ForecastCoreService.py
 ```
 
-Run all new replay/nowcast/activity tests plus existing provider-parity tests.
+For DB-backed Node tests:
+```powershell
+npm run rebuild:native:node
+# Run Node forecast/mode/database suite
+npm run rebuild:native:electron  # Always restore before Electron work
+```
 
-For DB-backed plain-Node tests:
-
-1. Run `npm run rebuild:native:node`.
-2. Run the Node forecast/mode/database suite.
-3. Always restore `npm run rebuild:native:electron` before Electron or UI work.
-
-For UI changes:
-
+For UI:
 ```powershell
 npm run rebuild:native:electron
 Push-Location server/tests
@@ -773,70 +896,133 @@ Pop-Location
 
 ## 13. Build, Documentation, and Release Requirements
 
-If `services/forecast_engine.py` or `ForecastCoreService.py` changes:
-
+If [`services/forecast_engine.py`](file:///d:/ADSI-Dashboard/services/forecast_engine.py) or [`ForecastCoreService.py`](file:///d:/ADSI-Dashboard/ForecastCoreService.py) changes:
 ```powershell
-pyinstaller --noconfirm services/ForecastCoreService.spec
+npm run build:forecast-service
 ```
 
-Only `ForecastCoreService.exe` requires rebuilding unless a shared Python module
-covered by the repository's multi-service rebuild rule also changes.
+That command generates `services/forecast-build-info.json`, verifies its source
+hash through the PyInstaller spec, bundles it at the one-file runtime resource
+root, builds the EXE, and verifies that the identity still matches the source.
+It uses the `development` channel and is always non-promotable, including from a
+clean tree. Only the signed installer workflow may generate a `signed-release`
+identity. That workflow additionally rejects a dirty/incomplete tree, a HEAD
+behind `origin/main`, an already-tagged package version, missing/invalid
+thumbprint pinning, and stale full-guide PDF provenance.
+
+Focused pre-build verification:
+
+```powershell
+python -m pytest services/tests/test_forecast_build_identity.py -q
+python scripts/generate_build_info.py --check --build-channel development
+npm run docs:pdf -- --check
+```
 
 Before an Electron build:
-
 ```powershell
 npm run rebuild:native:electron
 ```
 
 Before a release:
-
-- bump `package.json` first;
-- align `package-lock.json`, `SKILL.md`, `CLAUDE.md`, `AGENTS.md`, `MEMORY.md`,
-  `public/user-guide.html`, and all user-guide version headers;
-- regenerate the PDF guide after HTML/Markdown updates;
-- confirm rebuilt Python service binaries are current;
-- use the signed installer workflow and pass signing, thumbprint, size, and SHA-512
-  gates; and
-- keep updater app ID `com.engr-m.inverter-dashboard` unchanged.
+- Reconcile with `origin/main`, then choose a package version that does not
+  already exist as a local tag; do not reuse a published version
+- Align `package-lock.json`, `SKILL.md`, `CLAUDE.md`, `AGENTS.md`, `MEMORY.md`, `public/user-guide.html`, and all user-guide version headers
+- Generate the full guide and provenance with `npm run docs:pdf`, commit the
+  HTML/PDF/sidecar together, then pass non-mutating `npm run docs:pdf -- --check`
+- Confirm rebuilt Python service binaries are current
+- Use the signed installer workflow, which now rebuilds ForecastCoreService and
+  rejects stale/dirty release identity before electron-builder
+- Keep updater app ID `com.engr-m.inverter-dashboard` unchanged
 
 ---
 
 ## 14. Expected File Impact
 
-| Area | Expected files |
-|---|---|
-| Python algorithm/model/replay | `services/forecast_engine.py`, `ForecastCoreService.py` |
-| Python tests | `services/tests/test_forecast_engine_*.py`, new focused nowcast/activity replay tests |
-| DB and API | `server/db.js`, `server/index.js` |
-| Node tests | `server/tests/*forecast*.test.js`, mode/restore tests as needed |
-| Frontend | `public/js/app.js`, possibly `public/index.html` and `public/css/style.css` |
-| UI smoke | `server/tests/electronUiSmoke.spec.js` |
-| Documentation | HTML, Markdown, PDF user guides; project references on release |
-| Packaged service | `dist/ForecastCoreService.exe` |
+| Area | Files | Change type |
+|---|---|---|
+| Python nowcast algorithm | [`services/forecast_engine.py`](file:///d:/ADSI-Dashboard/services/forecast_engine.py) | MODIFY — refactor `build_intraday_adjusted_forecast()`, add replay, add audit writer, add constants |
+| Python service entry | [`ForecastCoreService.py`](file:///d:/ADSI-Dashboard/ForecastCoreService.py) | MODIFY — if CLI args change |
+| Python tests (nowcast) | `services/tests/test_forecast_nowcast.py` | NEW |
+| Python tests (activity) | `services/tests/test_forecast_activity_v2.py` | NEW |
+| DB schema | [`server/db.js`](file:///d:/ADSI-Dashboard/server/db.js) | MODIFY — add `forecast_intraday_run_audit` table |
+| API + diagnostics | [`server/index.js`](file:///d:/ADSI-Dashboard/server/index.js) | MODIFY — extend dayahead-chart response, settings validation, retention cleanup |
+| Cloud backup | [`server/cloudBackup.js`](file:///d:/ADSI-Dashboard/server/cloudBackup.js) | MODIFY — add new table to backup allowlist |
+| Frontend chart | [`public/js/app.js`](file:///d:/ADSI-Dashboard/public/js/app.js) | MODIFY — add ML nowcast dataset, settings UI |
+| Node tests | `server/tests/forecastIntradayAudit.test.js` | NEW |
+| UI smoke | [`server/tests/electronUiSmoke.spec.js`](file:///d:/ADSI-Dashboard/server/tests/electronUiSmoke.spec.js) | MODIFY — add nowcast chart verification |
+| Documentation | HTML, Markdown, PDF user guides | MODIFY |
+| Build identity/gates | `scripts/generate_build_info.py`, `services/ForecastCoreService.spec`, installer wrapper, focused tests | MODIFY/NEW — generate, verify, bundle, and fail closed |
+| PDF safety | `scripts/_gen_userguide_pdf.js`, `docs/USER-GUIDE-PDF-BUILD.md` | MODIFY/NEW — block incomplete-source overwrite |
+| Packaged service | `dist/ForecastCoreService.exe` | REBUILD REQUIRED — not completed in this status |
 
-No change is expected in inverter Modbus polling, write control, current-day energy
-authority, licensing, updater identity, or unrelated services.
+No change expected in: inverter Modbus polling, write control, current-day energy authority, licensing, updater identity, calibrator, or unrelated services.
 
 ---
 
-## 15. Definition of Done
+## 15. Implementation Order
+
+```mermaid
+graph TD
+    A["WP0: Baseline + Replay Harness"] --> B["WP1: Robust Decay Nowcast"]
+    A --> C["WP3: Activity Profiles v2"]
+    A --> D["WP4: Weather Derivative Features"]
+    B --> E["WP2: Intraday Audit + Observability"]
+    B --> F["WP5: Node/API/Frontend Integration"]
+    E --> F
+    C --> G["Ablation Testing"]
+    D --> G
+    B --> G
+    G --> H["Stage A: Offline Validation"]
+    F --> H
+    H --> I["Stage B: Live Shadow"]
+    I --> J["Stage C: Controlled Activation"]
+```
+
+| Phase | Work Packages | Duration estimate |
+|---|---|---|
+| Phase 1 | WP0 (baseline + replay) | 2–3 days |
+| Phase 2 | WP1 (robust nowcast) + WP2 (audit) | 3–4 days |
+| Phase 3 | WP3 (activity) + WP4 (weather features) | 2–3 days |
+| Phase 4 | WP5 (Node/API/frontend) | 2–3 days |
+| Phase 5 | Integration testing + ablation | 2–3 days |
+| Phase 6 | Shadow period (≥14 days of solar data) | 14+ days |
+
+---
+
+## 16. Definition of Done
 
 The project is complete only when:
 
-- the robust nowcast extends the existing single intraday path;
-- no live correction uses provider-estimated actual as plant truth;
-- intraday audits cannot supersede day-ahead authority;
-- replay proves there is no cutoff, artifact, or weather-input leakage;
-- every promoted feature passes its individual ablation;
-- production activation passes the defined replay and shadow gates;
-- active mode automatically falls back to the current algorithm on failure;
-- the analytics chart displays ML nowcast and Solcast estimated actual as separate
-  products;
-- gateway/remote behavior remains correct;
-- DB growth and retention are bounded;
-- Python, Node, UI, migration, backup/restore, and compatibility tests pass;
-- user guides are synchronized in HTML, Markdown, and PDF; and
-- the rebuilt Forecast service EXE and signed installer pass release gates.
+- [ ] The robust nowcast is integrated and passes all fallback/deadline/physical-output acceptance tests
+- [ ] No live correction uses provider-estimated actual or invalid/over-cap values as plant truth
+- [ ] Intraday audits remain separate and each authoritative row batch is correlated to its exact audit
+- [ ] Replay and unit tests prove immutable issue-time day-ahead, weather, artifact, and constraint inputs
+- [ ] Every experimental activity/weather feature passes its individual rolling-origin ablation before promotion
+- [ ] Production activation passes the defined replay and shadow gates
+- [ ] Active mode automatically falls back within one global deadline and preserves the prior valid series on write failure
+- [ ] The analytics chart and accessible diagnostics display exact series provenance and freshness
+- [ ] Gateway/remote behavior and clean-database startup pass behavioral tests
+- [ ] DB growth and retention are bounded and migrations are idempotent on clean and upgraded databases
+- [ ] Python, Node, UI, migration, backup/restore, and compatibility suites all pass in the required native-module order
+- [ ] User guides are synchronized from one reproducible complete source in HTML, Markdown, and PDF
+- [ ] A freshly rebuilt Forecast service EXE reports non-null package/build identity and passes CLI smoke
+- [ ] A signed installer passes release gates when a release is explicitly cut
 
-Until these conditions are met, the work remains experimental and
-`forecastVirtualNowcastMode` stays `off` or `shadow`.
+Until these conditions are met, `forecastVirtualNowcastMode` stays `off`; do not
+begin the shadow evidence window with this implementation.
+
+---
+
+## Open Questions
+
+> [!IMPORTANT]
+> 1. **Half-life tuning:** The initial `NOWCAST_HALF_LIFE_MINUTES = 45` is a starting guess. Should we run a parameter sweep (30, 45, 60, 90 min) during offline replay and pick the best, or start with 45 and refine in shadow?
+
+> [!IMPORTANT]
+> 2. **Capacity coverage threshold:** `NOWCAST_MIN_CAPACITY_COVERAGE = 0.70` means we require ≥70% of configured inverters reporting. Is this appropriate for the current plant topology, or should it be configurable per-site?
+
+> [!NOTE]
+> 3. **Per-inverter energy query:** The activity v2 profile requires per-inverter `energy_5min` queries. Does the current DB have sufficient historical per-inverter data (vs. only aggregate), and how far back?
+
+> [!NOTE]
+> 4. **Issue-time weather snapshot coverage:** How many historical days in `FORECAST_SNAPSHOT_DIR` have saved issue-time weather? If < 30 days, weather derivative features (WP4) should be deferred.

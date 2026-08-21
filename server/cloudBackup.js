@@ -2221,6 +2221,7 @@ class CloudBackupService {
       "alarms",
       "audit_log",
       "forecast_run_audit",
+      "forecast_intraday_run_audit",
       "solcast_snapshots",
       "inverter_counter_state",
       "inverter_counter_baseline",

@@ -7,14 +7,17 @@
  * scripts/generate-codesign-cert.ps1.
  *
  * Safety gates (applied in order):
- *   1. Fail fast if signing env is missing, unless ADSI_ALLOW_UNSIGNED=1.
+ *   1. Fail fast if signing env/thumbprint pin is missing, unless ADSI_ALLOW_UNSIGNED=1.
  *      Unsigned installers cannot auto-update existing signed installs
  *      because electron-updater rejects publisher-hash mismatches.
- *   2. Post-build signature verification via Get-AuthenticodeSignature.
+ *   2. Reject dirty/behind/already-tagged signed-release inputs.
+ *   3. Non-mutatingly verify committed full-guide PDF provenance.
+ *   4. Regenerate/verify Forecast build identity and rebuild the one-file EXE.
+ *   5. Post-build signature verification via Get-AuthenticodeSignature.
  *      Confirms the file was actually signed (electron-builder can silently
  *      skip signing on timestamp-server errors) and pins the thumbprint to
  *      build/private/codesign-thumbprint.txt so a stray cert can't ship.
- *   3. Installer size floor + SHA-512 log. Rejects builds that are
+ *   6. Installer size floor + SHA-512 log. Rejects builds that are
  *      implausibly small (missing Python services, broken extraResources)
  *      and logs the SHA-512 that electron-updater will expect in latest.yml.
  *
@@ -30,12 +33,14 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { spawnSync } = require('child_process');
+const { parsePinnedThumbprint } = require('./release-build-guards');
 
 const repoRoot = path.resolve(__dirname, '..');
 const envFile = path.join(repoRoot, 'build', 'private', 'codesign.env');
 const thumbFile = path.join(repoRoot, 'build', 'private', 'codesign-thumbprint.txt');
 const verifyScript = path.join(repoRoot, 'scripts', 'verify-signed-installer.ps1');
 const releaseDir = path.join(repoRoot, 'release');
+const pythonCommand = process.env.PYTHON || 'python';
 
 const ALLOW_UNSIGNED = process.env.ADSI_ALLOW_UNSIGNED === '1';
 // 150 MB floor — post-v2.8.13 slimmed builds land around 180-220 MB after
@@ -48,6 +53,7 @@ const MIN_INSTALLER_BYTES = 150 * 1024 * 1024;
 
 const env = { ...process.env };
 let signed = false;
+let expectedThumbprint = null;
 
 if (fs.existsSync(envFile)) {
   const content = fs.readFileSync(envFile, 'utf8');
@@ -98,6 +104,110 @@ if (!signed) {
   delete env.CSC_LINK;
   delete env.CSC_KEY_PASSWORD;
 }
+
+if (signed) {
+  if (!fs.existsSync(thumbFile)) {
+    console.error('[build-installer-signed] FATAL: required thumbprint pin file is missing:', thumbFile);
+    process.exit(1);
+  }
+  try {
+    expectedThumbprint = parsePinnedThumbprint(fs.readFileSync(thumbFile, 'utf8'));
+  } catch (error) {
+    console.error('[build-installer-signed] FATAL: invalid thumbprint pin:', error.message);
+    process.exit(1);
+  }
+}
+
+// GATE 1.25: rebuild ForecastCoreService with current build identity.
+//
+// forecast_engine.py is frozen into a one-file executable. Reusing an older
+// dist/ForecastCoreService.exe would make the installer pass while shipping
+// stale code, so every installer build regenerates/verifies its identity and
+// rebuilds the executable. Signed release builds additionally require a clean,
+// complete, promotion-eligible identity. ADSI_ALLOW_UNSIGNED=1 remains a safe
+// development escape hatch: the build proceeds, but its bundled identity is
+// explicitly promotion_eligible=false.
+function runForecastBuildStep(label, args, stepEnv = env) {
+  console.log('[build-installer-signed] ' + label + ': ' + pythonCommand + ' ' + args.join(' '));
+  const result = spawnSync(pythonCommand, args, {
+    cwd: repoRoot,
+    stdio: 'inherit',
+    env: stepEnv,
+    shell: false,
+  });
+  if (result.error) {
+    console.error('[build-installer-signed] FATAL: ' + label + ' could not start:', result.error.message);
+    process.exit(1);
+  }
+  if (result.status !== 0) {
+    console.error('[build-installer-signed] FATAL: ' + label + ' failed with status', result.status);
+    process.exit(result.status || 1);
+  }
+}
+
+const forecastBuildChannel = signed ? 'signed-release' : 'development';
+const identityArgs = [
+  'scripts/generate_build_info.py',
+  '--build-channel', forecastBuildChannel,
+];
+if (signed) identityArgs.push('--require-promotion-eligible', '--require-release-ready');
+runForecastBuildStep('Generating Forecast build identity', identityArgs);
+
+if (signed) {
+  console.log('[build-installer-signed] Verifying committed user-guide PDF provenance: npm run docs:pdf -- --check');
+  const docsResult = spawnSync('npm', ['run', 'docs:pdf', '--', '--check'], {
+    cwd: repoRoot,
+    stdio: 'inherit',
+    env,
+    shell: process.platform === 'win32',
+  });
+  if (docsResult.error || docsResult.status !== 0) {
+    console.error(
+      '[build-installer-signed] FATAL: complete user-guide PDF preflight failed.',
+      docsResult.error ? docsResult.error.message : 'status=' + docsResult.status,
+    );
+    process.exit(docsResult.status || 1);
+  }
+} else {
+  console.log('[build-installer-signed] Skipping release PDF preflight for unsigned development build.');
+}
+
+const forecastBuildEnv = {
+  ...env,
+  ADSI_REQUIRE_PROMOTION_ELIGIBLE: signed ? '1' : '0',
+  ADSI_FORECAST_BUILD_CHANNEL: forecastBuildChannel,
+};
+runForecastBuildStep(
+  'Rebuilding ForecastCoreService',
+  ['-m', 'PyInstaller', '--noconfirm', 'services/ForecastCoreService.spec'],
+  forecastBuildEnv,
+);
+
+const identityCheckArgs = [
+  'scripts/generate_build_info.py',
+  '--check',
+  '--build-channel', forecastBuildChannel,
+];
+if (signed) identityCheckArgs.push('--require-promotion-eligible', '--require-release-ready');
+runForecastBuildStep('Verifying Forecast build identity', identityCheckArgs);
+
+const forecastExe = path.join(repoRoot, 'dist', 'ForecastCoreService.exe');
+const forecastSource = path.join(repoRoot, 'services', 'forecast_engine.py');
+const forecastBuildInfo = path.join(repoRoot, 'services', 'forecast-build-info.json');
+if (!fs.existsSync(forecastExe)) {
+  console.error('[build-installer-signed] FATAL: Forecast build completed without:', forecastExe);
+  process.exit(1);
+}
+const forecastExeMtime = fs.statSync(forecastExe).mtimeMs;
+const newestForecastInput = Math.max(
+  fs.statSync(forecastSource).mtimeMs,
+  fs.statSync(forecastBuildInfo).mtimeMs,
+);
+if (forecastExeMtime < newestForecastInput) {
+  console.error('[build-installer-signed] FATAL: ForecastCoreService.exe is older than its source/build identity.');
+  process.exit(1);
+}
+console.log('[build-installer-signed] ForecastCoreService rebuilt with verified current identity.');
 
 // ─── GATE 1.5: free a locked stale build dir ────────────────────────────────
 //
@@ -246,10 +356,6 @@ console.log('[build-installer-signed] Installer:', installerPath);
 
 // ─── GATE 2: Post-build signature verification ──────────────────────────────
 if (signed) {
-  const expectedThumb = fs.existsSync(thumbFile)
-    ? fs.readFileSync(thumbFile, 'utf8').trim().toUpperCase()
-    : '';
-
   if (!fs.existsSync(verifyScript)) {
     console.error('[build-installer-signed] FATAL: verification script missing:', verifyScript);
     process.exit(1);
@@ -260,10 +366,8 @@ if (signed) {
     '-ExecutionPolicy', 'Bypass',
     '-File', verifyScript,
     '-Path', installerPath,
+    '-ExpectedThumbprint', expectedThumbprint,
   ];
-  if (expectedThumb) {
-    psArgs.push('-ExpectedThumbprint', expectedThumb);
-  }
 
   console.log('[build-installer-signed] Verifying signature…');
   const verify = spawnSync('powershell.exe', psArgs, {
@@ -283,11 +387,6 @@ if (signed) {
     console.error('  electron-builder may have silently skipped signing.');
     console.error('  Check its output above for timestamp server errors, expired cert, or missing signtool.');
     process.exit(1);
-  }
-
-  if (!expectedThumb) {
-    console.warn('[build-installer-signed] WARNING: build/private/codesign-thumbprint.txt missing —');
-    console.warn('                           thumbprint pin check was skipped.');
   }
 }
 
