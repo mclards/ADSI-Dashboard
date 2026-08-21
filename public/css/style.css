@@ -745,24 +745,18 @@ body.license-notice-open .side-nav {
   width: calc(34px * var(--top-scale));
   height: calc(34px * var(--top-scale));
   border: 1px solid var(--btn-topbar-border);
-  border-radius: calc(10px * var(--top-scale));
-  background: linear-gradient(
-    180deg,
-    var(--btn-topbar-1) 0%,
-    var(--btn-topbar-2) 100%
-  );
+  border-radius: calc(4px * var(--top-scale));
+  background: var(--btn-topbar-2);
   color: var(--btn-topbar-color);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  box-shadow: var(--btn-topbar-shadow);
+  box-shadow: inset 1px 1px 4px rgba(0, 0, 0, 0.5);
   transition:
-    transform 0.16s ease,
     border-color 0.18s ease,
     background 0.18s ease,
-    color 0.18s ease,
-    box-shadow 0.18s ease;
+    color 0.18s ease;
 }
 
 .tb-nav-toggle .mdi {
@@ -771,12 +765,10 @@ body.license-notice-open .side-nav {
 }
 
 .tb-nav-toggle:hover {
-  transform: translateY(-1px);
   color: #ffffff;
   border-color: var(--btn-topbar-border-hover);
-  box-shadow:
-    0 14px 28px rgba(0, 0, 0, 0.22),
-    inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  background: var(--btn-topbar-1);
+  box-shadow: inset 1px 1px 4px rgba(0, 0, 0, 0.6);
 }
 
 .tb-nav-toggle:focus-visible,
@@ -797,10 +789,7 @@ body.license-notice-open .side-nav {
 
 /* Active (unmuted): subtle accent ring so it reads as "on" */
 #btnAlarmSound:not(.muted) {
-  box-shadow:
-    0 0 0 1.5px
-      color-mix(in srgb, var(--btn-topbar-border-hover) 82%, transparent),
-    0 10px 22px rgba(0, 0, 0, 0.16);
+  border-color: var(--btn-topbar-border-hover);
 }
 
 /* Muted: desaturate and dim; diagonal line pseudo-element over icon */
@@ -936,12 +925,8 @@ body.license-notice-open .side-nav {
   min-width: calc(78px * var(--top-scale));
   padding: 0 calc(10px * var(--top-scale));
   border: 1px solid var(--btn-topbar-border);
-  border-radius: calc(10px * var(--top-scale));
-  background: linear-gradient(
-    180deg,
-    var(--btn-topbar-1) 0%,
-    var(--btn-topbar-2) 100%
-  );
+  border-radius: calc(4px * var(--top-scale));
+  background: var(--btn-topbar-2);
   color: var(--btn-topbar-color);
   font-family: var(--font-main);
   font-size: calc(10px * var(--top-scale));
@@ -952,22 +937,18 @@ body.license-notice-open .side-nav {
   justify-content: center;
   gap: calc(6px * var(--top-scale));
   cursor: pointer;
-  box-shadow: var(--btn-topbar-shadow);
+  box-shadow: inset 1px 1px 4px rgba(0, 0, 0, 0.5);
   transition:
-    transform 0.16s ease,
     border-color 0.18s ease,
     background 0.18s ease,
-    color 0.18s ease,
-    box-shadow 0.18s ease;
+    color 0.18s ease;
 }
 
 .tb-theme-toggle:hover {
-  transform: translateY(-1px);
   border-color: var(--btn-topbar-border-hover);
+  background: var(--btn-topbar-1);
   color: #ffffff;
-  box-shadow:
-    0 14px 28px rgba(0, 0, 0, 0.22),
-    inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  box-shadow: inset 1px 1px 4px rgba(0, 0, 0, 0.6);
 }
 
 .tb-theme-toggle .mdi {
@@ -1585,13 +1566,13 @@ body.sidebar-open .side-nav-backdrop {
   bottom: 0;
   left: 0;
   right: 0;
-  height: 54px;
+  height: calc(54px + max(16px, env(safe-area-inset-bottom, 0px)));
   background: var(--surface);
   border-top: 1px solid var(--border);
   z-index: 990;
   align-items: stretch;
   justify-content: space-around;
-  padding: 0 4px;
+  padding: 0 4px max(16px, env(safe-area-inset-bottom, 0px)) 4px;
   box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.3);
 }
 
@@ -9657,7 +9638,7 @@ select.cam-field-input { appearance: auto; }
 .alarm-toast {
   position: fixed;
   right: 16px;
-  bottom: 16px;
+  bottom: 80px;
   z-index: 9000;
   width: min(380px, calc(100vw - 24px));
   max-width: calc(100vw - 24px);
@@ -10000,9 +9981,9 @@ select.cam-field-input { appearance: auto; }
    persistent alarm hub + chat bubble keep the bottom-right corner. */
 .toast-container-modern {
   position: fixed;
-  top: calc(var(--header-h) + var(--progress-h) + 10px);
+  top: auto;
   right: 16px;
-  bottom: auto;
+  bottom: 90px;
   z-index: 13000;
   display: flex;
   flex-direction: column;
@@ -12355,9 +12336,7 @@ body.mode-transition-active {
 }
 
 :root[data-theme="classic"] #btnAlarmSound:not(.muted) {
-  box-shadow:
-    0 0 0 1.5px color-mix(in srgb, var(--btn-accent-border) 78%, transparent),
-    0 10px 22px rgba(0, 0, 0, 0.16);
+  border-color: var(--btn-accent-border);
 }
 
 :root[data-theme="classic"] .tb-nav-toggle:hover,
@@ -24852,7 +24831,7 @@ table.fcal-settings-table .fcal-set-readonly {
     top: calc(var(--header-h) + var(--progress-h)) !important;
     left: 0 !important;
     right: 0 !important;
-    bottom: calc(54px + env(safe-area-inset-bottom, 0px)) !important;
+    bottom: calc(54px + max(16px, env(safe-area-inset-bottom, 0px))) !important;
     overflow: hidden !important;
   }
 
@@ -24867,7 +24846,7 @@ table.fcal-settings-table .fcal-set-readonly {
     overflow-x: auto !important;
     overflow-y: auto !important;
     -webkit-overflow-scrolling: touch !important;
-    padding: 8px 8px 8px 8px !important;
+    padding: 8px 8px 16px 8px !important;
     box-sizing: border-box !important;
   }
 
@@ -25308,13 +25287,13 @@ table.fcal-settings-table .fcal-set-readonly {
   /* === 7. ALARM & WARNING TOAST NOTIFICATIONS ON MOBILE === */
   .alarm-toast {
     position: fixed !important;
-    top: calc(var(--header-h, 116px) + 8px) !important;
-    bottom: auto !important;
+    top: auto !important;
+    bottom: 125px !important;
     left: 10px !important;
     right: 10px !important;
     width: auto !important;
     max-width: calc(100vw - 20px) !important;
-    align-items: center !important;
+    align-items: flex-end !important;
     z-index: 9999 !important;
     pointer-events: none !important;
   }
@@ -25441,8 +25420,8 @@ table.fcal-settings-table .fcal-set-readonly {
 
   /* Slim Bottom Navigation Bar in Landscape */
   .mobile-bottom-nav {
-    height: 44px !important;
-    padding: 0 4px !important;
+    height: calc(44px + max(12px, env(safe-area-inset-bottom, 0px))) !important;
+    padding: 0 4px max(12px, env(safe-area-inset-bottom, 0px)) 4px !important;
   }
 
   .mobile-bottom-nav .mob-nav-btn {
@@ -25458,7 +25437,7 @@ table.fcal-settings-table .fcal-set-readonly {
 
   /* Main scroll container bounded to slim nav */
   #main {
-    bottom: calc(44px + env(safe-area-inset-bottom, 0px)) !important;
+    bottom: calc(44px + max(12px, env(safe-area-inset-bottom, 0px))) !important;
   }
 
   /* Inverters Grid: 2 columns in landscape */
@@ -25794,4 +25773,164 @@ table.fcal-settings-table .fcal-set-readonly {
     padding: 7px 10px !important;
     font-size: 11.5px !important;
   }
+}
+
+/* ==========================================================================
+   MOBILE LAYOUT GRID REFACTOR (Appended per implementation plan)
+   ========================================================================== */
+@media (max-width: 768px) {
+  /* 1. Make the main card containers a 2-column grid to allow .srow to sit side-by-side */
+  #page-settings .settings-sections > .sgroup.settings-card:not([hidden]),
+  #page-settings .settings-sections > .sgroup.settings-card.settings-section-active,
+  #page-forecast .forecast-page-sections > .sgroup.settings-card {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 12px 8px !important;
+    align-items: start !important;
+  }
+
+  /* Force all direct children that are NOT .srow to span full width */
+  #page-settings .settings-sections > .sgroup.settings-card > *:not(.srow),
+  #page-settings .settings-sections .sgroup.settings-card .settings-subsection,
+  #page-settings .settings-sections .sgroup.settings-card .cb-subsection,
+  #page-forecast .forecast-page-sections > .sgroup.settings-card > *:not(.srow),
+  #page-forecast .forecast-page-sections .sgroup.settings-card .settings-subsection,
+  #page-forecast .forecast-page-sections .sgroup.settings-card .cb-subsection {
+    grid-column: 1 / -1 !important;
+  }
+
+  /* Direct .srow children (like in Plant Config) take 1 column */
+  #page-settings .settings-sections > .sgroup.settings-card > .srow {
+    grid-column: span 1 !important;
+    display: flex !important;
+    flex-direction: column !important;
+    margin: 0 !important;
+    width: 100% !important;
+  }
+  #page-settings .settings-sections > .sgroup.settings-card > .srow > label {
+    width: 100% !important;
+  }
+
+  /* For nested .srow elements that contain multiple labels (e.g. Forecast Toolkit) */
+  #page-settings #forecastSection .srow,
+  #page-forecast .forecast-page-sections .srow {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 12px 8px !important;
+    grid-column: 1 / -1 !important;
+    align-items: end !important;
+  }
+  #page-settings #forecastSection .srow > label,
+  #page-forecast .forecast-page-sections .srow > label,
+  #page-settings #forecastSection .srow > div,
+  #page-forecast .forecast-page-sections .srow > div {
+    grid-column: span 1 !important;
+    width: 100% !important;
+  }
+  
+  /* Forecast Preview Metrics 2-column grid */
+  .forecast-preview-metrics {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 12px 8px !important;
+  }
+  .forecast-preview-metric {
+    grid-column: span 1 !important;
+    width: 100% !important;
+    margin: 0 !important;
+  }
+
+  /* 2. License Grid overrides */
+  #page-settings #licenseSection .license-grid,
+  #page-settings #appUpdateSection .license-grid,
+  #page-settings #aboutSection .license-grid {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 12px 8px !important;
+  }
+
+  /* 3. Stop Reasons controls into 2-column grid */
+  .srn-controls {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 12px 8px !important;
+    align-items: end !important;
+  }
+  .srn-controls > * {
+    margin: 0 !important;
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+  .srn-controls > button:last-child:nth-child(odd) {
+    grid-column: 1 / -1 !important;
+  }
+
+  /* 4. Toolbars packing */
+  /* Reverted: Forcing a strict 2-column grid on toolbars makes inputs/buttons stretch unnaturally. 
+     Relying on the default flex-wrap packing instead. */
+
+  /* 5. Forecast Performance Monitor */
+  .fperf-health-bar,
+  .fperf-chip-row {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 12px 8px !important;
+  }
+  .fperf-health-bar > .fperf-hchip,
+  .fperf-chip-row > .fperf-hchip {
+    grid-column: span 1 !important;
+    width: 100% !important;
+    margin: 0 !important;
+  }
+  .fperf-health-bar > .fperf-hchip:last-child:nth-child(odd),
+  .fperf-chip-row > .fperf-hchip:last-child:nth-child(odd) {
+    grid-column: 1 / -1 !important;
+  }
+
+  /* 6. Fix vertically stretched forecast preview chart */
+  :is(#page-settings, #page-forecast) #forecastSection .forecast-preview-chart-wrap {
+    min-height: 0 !important;
+  }
+  :is(#page-settings, #page-forecast) #forecastSection .forecast-preview-chart-canvas {
+    min-height: 180px !important;
+    height: 180px !important;
+  }
+
+  /* 7. Fix vertically stretched analytics charts */
+  #page-analytics .chart-card canvas {
+    height: 180px !important;
+    max-height: 180px !important;
+  }
+}
+
+/* ==========================================================================
+   GLOBAL USER PREFERENCES (UI Polishing)
+   ========================================================================== */
+/* Buttons: plain, completely flat */
+.btn {
+  border-radius: 4px !important;
+  box-shadow: none !important;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent) !important;
+}
+.btn:hover, .btn:focus-visible {
+  box-shadow: none !important;
+  background: color-mix(in srgb, currentColor 5%, transparent) !important;
+}
+
+/* Remove glowing/shadows from major cards */
+.sgroup.settings-card, .card, .fperf-card {
+  box-shadow: none !important;
+}
+
+/* Polish data tables (except inverter tables) */
+.data-table:not(.inv-table) th,
+.data-table:not(.inv-table) td {
+  border-right: none !important;
+  border-left: none !important;
+}
+.data-table:not(.inv-table) tbody tr {
+  background: transparent !important;
+}
+.data-table:not(.inv-table) tbody tr:hover {
+  background: color-mix(in srgb, var(--text) 4%, transparent) !important;
 }
