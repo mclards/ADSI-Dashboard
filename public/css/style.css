@@ -6888,12 +6888,12 @@ select.cam-field-input { appearance: auto; }
 }
 
 .analytics-grid .chart-total-card {
-  grid-column: 1 / span 2;
+  grid-column: 2 / span 2;
   min-height: 364px;
 }
 
 .analytics-grid .chart-total-side-card {
-  grid-column: 3 / span 1;
+  grid-column: 1 / span 1;
   min-height: 350px;
   max-height: 364px;
   padding: 8px;
@@ -7720,51 +7720,90 @@ select.cam-field-input { appearance: auto; }
 }
 
 .ana-dayahead-header {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px 16px;
-  margin-top: 2px;
-  margin-bottom: 4px;
-  font-size: 9px;
-  color: var(--text2);
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 6px;
   font-family: var(--font-mono);
+  width: 100%;
+}
+
+.ana-dayahead-header > span {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  background: var(--surface2);
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  line-height: 1;
+}
+
+.ana-dayahead-header .ana-stat-lbl {
+  color: var(--text3);
+  text-transform: uppercase;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+.ana-dayahead-header .ana-stat-val {
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ana-chart-legend .ana-nowcast-meta {
+  justify-self: stretch;
+  text-align: center;
+  font-size: 9px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 6px;
+  line-height: 1.3;
+  min-width: 0;
 }
 
 /* Chart titlebar — title + stats in one row */
 .ana-chart-titlebar {
-  display: flex;
-  align-items: baseline;
+  display: grid;
+  grid-template-columns: auto max-content;
+  align-items: start;
+  justify-content: space-between;
   gap: 16px;
-  flex-wrap: nowrap;
+  margin-bottom: 12px;
 }
 
 .ana-chart-titlebar .chart-title {
-  flex-shrink: 0;
-  margin-bottom: 0;
+  margin: 0;
+  padding-top: 2px;
 }
 
 .ana-chart-titlebar .ana-dayahead-header {
   margin: 0;
-  flex: 1;
-  min-width: 0;
 }
 
 /* HTML chart legend */
 .ana-chart-legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 2px 4px;
-  margin-bottom: 4px;
-  justify-content: center;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  align-items: center;
+  gap: 4px 6px;
+  margin-bottom: 6px;
+  width: 100%;
 }
 
 .ana-legend-item {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 2px 8px;
+  justify-content: center;
+  gap: 6px;
+  padding: 3px 8px;
   border: 1px solid var(--border);
-  border-radius: 5px;
+  border-radius: 6px;
   background: var(--surface2);
   cursor: pointer;
   transition: opacity 0.15s, border-color 0.15s;
@@ -7772,6 +7811,7 @@ select.cam-field-input { appearance: auto; }
   font-weight: 600;
   color: var(--text2);
   line-height: 1.3;
+  min-width: 0;
 }
 
 .ana-legend-item:hover {
@@ -7792,6 +7832,8 @@ select.cam-field-input { appearance: auto; }
 
 .ana-legend-text {
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .ana-dayahead-header span {
@@ -7805,6 +7847,9 @@ select.cam-field-input { appearance: auto; }
   border-radius: 999px;
   color: var(--chart-nowcast);
   cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .ana-nowcast-meta summary {
@@ -13630,11 +13675,11 @@ body.mode-transition-active {
   }
 
   .analytics-grid .chart-total-card {
-    grid-column: 1 / span 1;
+    grid-column: 2 / span 1;
   }
 
   .analytics-grid .chart-total-side-card {
-    grid-column: 2 / span 1;
+    grid-column: 1 / span 1;
   }
 
   .analytics-weather-item {
@@ -25012,7 +25057,7 @@ table.fcal-settings-table .fcal-set-readonly {
 
   .page-toolbar .tl-left label,
   .page-toolbar .tl-right label {
-    display: inline-flex !important;
+    display: flex !important;
     align-items: center !important;
     gap: 6px !important;
     font-size: 11px !important;
@@ -25020,6 +25065,7 @@ table.fcal-settings-table .fcal-set-readonly {
     color: var(--text3) !important;
     white-space: nowrap !important;
     margin: 0 !important;
+    width: 100% !important;
   }
 
   .page-toolbar .sel,
@@ -25031,6 +25077,8 @@ table.fcal-settings-table .fcal-set-readonly {
     max-width: 100% !important;
     min-width: 0 !important;
     box-sizing: border-box !important;
+    flex: 1 1 0 !important;
+    width: 100% !important;
   }
 
   .page-toolbar .btn {
@@ -25048,20 +25096,40 @@ table.fcal-settings-table .fcal-set-readonly {
   }
 
   /* Analytics page summary grid */
-  #page-analytics .page-toolbar .tl-left {
+  #page-analytics .page-toolbar {
     display: grid !important;
     grid-template-columns: 1fr 1fr !important;
-    gap: 6px !important;
+    gap: 8px !important;
   }
-  #page-analytics #btnLoadAnalytics {
-    grid-column: 1 / -1 !important;
-    width: 100% !important;
+  #page-analytics .page-toolbar .tl-left {
+    display: contents !important;
   }
-  #page-analytics #analyticsSummary {
+  #page-analytics .page-toolbar .tl-right {
     display: grid !important;
     grid-template-columns: repeat(2, 1fr) !important;
     gap: 4px 6px !important;
+    grid-column: 1 / -1 !important;
+    order: 3 !important;
+  }
+  #page-analytics #btnLoadAnalytics {
+    grid-column: 1 / -1 !important;
+    order: 4 !important;
     width: 100% !important;
+  }
+  #page-analytics #analyticsSummary {
+    display: contents !important;
+  }
+  #page-analytics #popout-btn-analytics {
+    width: 100% !important;
+    height: auto !important;
+    min-height: 22px !important;
+    border-radius: 6px !important;
+    gap: 6px !important;
+  }
+  #page-analytics #popout-btn-analytics::after {
+    content: "New Window";
+    font-size: 11px;
+    font-weight: 600;
   }
   #page-analytics #analyticsSummary .toolbar-info {
     width: 100% !important;
@@ -25082,6 +25150,32 @@ table.fcal-settings-table .fcal-set-readonly {
   #page-alarms #btnAckAll {
     grid-column: 1 / -1 !important;
     width: 100% !important;
+  }
+
+  /* Forecast Performance Toolbar */
+  .fperf-head-right {
+    display: grid !important;
+    grid-template-columns: repeat(3, 1fr) !important;
+    gap: 6px !important;
+    width: 100% !important;
+    align-items: center !important;
+  }
+  .fperf-head-right .fperf-days-sel,
+  .fperf-head-right #btnRefreshFperf,
+  .fperf-head-right #btnBackfillQa {
+    width: 100% !important;
+    min-width: 0 !important;
+    margin: 0 !important;
+    justify-content: center !important;
+  }
+  .fperf-head-right #btnRefreshFperf::after {
+    content: "Refresh";
+    font-size: 11px;
+    font-weight: 600;
+    margin-left: 4px;
+  }
+  .fperf-head-right #fperfLastUpdated {
+    display: none !important;
   }
 
   /* Data Tables: Horizontal Touch Scroll */
@@ -25870,21 +25964,20 @@ table.fcal-settings-table .fcal-set-readonly {
      Relying on the default flex-wrap packing instead. */
 
   /* 5. Forecast Performance Monitor */
-  .fperf-health-bar,
-  .fperf-chip-row {
+  .fperf-rows-wrap {
     display: grid !important;
     grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
     gap: 12px 8px !important;
   }
-  .fperf-health-bar > .fperf-hchip,
-  .fperf-chip-row > .fperf-hchip {
+  .fperf-rows-left,
+  .fperf-health-bar,
+  .fperf-chip-row {
+    display: contents !important;
+  }
+  .fperf-rows-wrap .fperf-hchip {
     grid-column: span 1 !important;
     width: 100% !important;
     margin: 0 !important;
-  }
-  .fperf-health-bar > .fperf-hchip:last-child:nth-child(odd),
-  .fperf-chip-row > .fperf-hchip:last-child:nth-child(odd) {
-    grid-column: 1 / -1 !important;
   }
 
   /* 6. Fix vertically stretched forecast preview chart */
@@ -25900,6 +25993,16 @@ table.fcal-settings-table .fcal-set-readonly {
   #page-analytics .chart-card canvas {
     height: 180px !important;
     max-height: 180px !important;
+  }
+
+  /* 8. Fix chart titlebar on mobile */
+  .ana-chart-titlebar {
+    grid-template-columns: 1fr !important;
+    justify-content: start !important;
+    gap: 8px !important;
+  }
+  .ana-dayahead-header {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
   }
 }
 

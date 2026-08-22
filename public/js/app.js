@@ -20987,9 +20987,16 @@ function buildNowcastDisplayModel(meta = {}, formatTimestamp = (value) => String
   const latestAttempt = meta.latest_attempt || null;
   const challenger = meta.challenger_meta || null;
   const plottedLabel = seriesKind === "dayahead_fallback" ? "day-ahead fallback" : algorithm;
-  const challengerLabel = challenger?.algorithm_version
-    ? ` · challenger ${String(challenger.algorithm_version)}`
-    : "";
+  
+  const shorten = (val) => String(val)
+    .replace(/^current_ratio_/i, "cr_")
+    .replace(/^gradient_boosting_/i, "gb_")
+    .replace(/^neural_net_/i, "nn_");
+
+  const sPlotted = shorten(plottedLabel);
+  const sChallenger = challenger?.algorithm_version ? shorten(challenger.algorithm_version) : "";
+  const challengerLabel = (sChallenger && sChallenger !== sPlotted) ? ` vs ${sChallenger}` : "";
+
   return {
     mode,
     algorithm,
@@ -21000,7 +21007,7 @@ function buildNowcastDisplayModel(meta = {}, formatTimestamp = (value) => String
     generatedLabel: generatedTs ? formatTimestamp(generatedTs) : "unknown",
     latestAttempt,
     challenger,
-    summary: `${mode} · plotted ${plottedLabel}${challengerLabel}`,
+    summary: `ML: ${mode.toUpperCase()} · ${sPlotted}${challengerLabel}`,
   };
 }
 
@@ -21019,32 +21026,35 @@ function renderDayAheadChart(payload) {
   State.dayAheadLockedPayload = payload;
 
   // Update header fields in the merged card
+  // Update header fields in the merged card
   const capturedEl = $("anaDayAheadCaptured");
   if (capturedEl) {
     const reason = locked?.capture_reason || "unknown";
-    capturedEl.textContent = lockedRows.length > 0
-      ? `captured: ${locked?.captured_local || "—"} (${reason})`
-      : "captured: —";
+    capturedEl.innerHTML = lockedRows.length > 0
+      ? `<span class="ana-stat-lbl">Captured</span><span class="ana-stat-val">${locked?.captured_local || "—"} (${reason})</span>`
+      : `<span class="ana-stat-lbl">Captured</span><span class="ana-stat-val">—</span>`;
   }
 
   const spreadEl = $("anaDayAheadSpread");
   if (spreadEl) {
     const avg = Number(locked?.spread_pct_cap_avg || 0).toFixed(1);
     const max = Number(locked?.spread_pct_cap_max || 0).toFixed(1);
-    spreadEl.textContent = lockedRows.length > 0 ? `spread: ${avg}% avg / ${max}% max` : "spread: —";
+    spreadEl.innerHTML = lockedRows.length > 0 
+      ? `<span class="ana-stat-lbl">Spread</span><span class="ana-stat-val">${avg}% avg | ${max}% max</span>`
+      : `<span class="ana-stat-lbl">Spread</span><span class="ana-stat-val">—</span>`;
   }
 
   const withinBandEl = $("anaDayAheadWithinBand");
   if (withinBandEl) {
     const pct = Number(meta?.actual_within_band_so_far_pct || 0).toFixed(1);
-    withinBandEl.textContent = `${pct}% within band`;
+    withinBandEl.innerHTML = `<span class="ana-stat-lbl">In-Band</span><span class="ana-stat-val">${pct}%</span>`;
   }
 
   const varianceEl = $("anaDayAheadVariance");
   if (varianceEl) {
     const variance = Number(meta?.variance_vs_p50_pct || 0);
     const sign = variance >= 0 ? "+" : "";
-    varianceEl.textContent = `variance vs P50: ${sign}${variance.toFixed(1)}%`;
+    varianceEl.innerHTML = `<span class="ana-stat-lbl">P50 Var</span><span class="ana-stat-val">${sign}${variance.toFixed(1)}%</span>`;
   }
 
   const nowcastEl = $("anaNowcastMeta");
@@ -21448,19 +21458,20 @@ function ensureAnalyticsCards() {
       '<div class="chart-title">🏭 Day-Ahead vs Actual — MWh</div>' +
       '<div class="ana-dayahead-header" id="anaDayAheadHeaderMerged">' +
         '<span id="anaDayAheadCaptured">captured: —</span>' +
-        '<span id="anaDayAheadSpread">spread: —</span>' +
         '<span id="anaDayAheadWithinBand">—</span>' +
+        '<span id="anaDayAheadSpread">spread: —</span>' +
         '<span id="anaDayAheadVariance">—</span>' +
-        '<details id="anaNowcastMeta" class="ana-nowcast-meta" data-mode="off" data-fallback="false">' +
-          '<summary id="anaNowcastMetaSummary" title="Virtual-nowcast run metadata">nowcast: off</summary>' +
-          '<div id="anaNowcastMetaBody" class="ana-nowcast-meta-body"></div>' +
-        '</details>' +
       '</div>' +
     '</div>' +
-    '<div class="ana-chart-legend" id="anaChartLegend"></div>' +
+    '<div class="ana-chart-legend" id="anaChartLegend">' +
+      '<details id="anaNowcastMeta" class="ana-nowcast-meta" data-mode="off" data-fallback="false">' +
+        '<summary id="anaNowcastMetaSummary" title="Virtual-nowcast run metadata">nowcast: off</summary>' +
+        '<div id="anaNowcastMetaBody" class="ana-nowcast-meta-body"></div>' +
+      '</details>' +
+    '</div>' +
     '<canvas id="chart-total-pac" height="120"></canvas>';
-  host.appendChild(totalCard);
-
+  
+  // Create side card (Summary) first so it appears on the left/top
   const totalSideCard = document.createElement("div");
   totalSideCard.className = "chart-card chart-total-side-card";
   totalSideCard.id = "analyticsTotalSideCard";
@@ -21597,6 +21608,7 @@ function ensureAnalyticsCards() {
     </div>
   `;
   host.appendChild(totalSideCard);
+  host.appendChild(totalCard);
 
   // Tab navigation for the side card (Summary / Weather / Forecast).
   // Keeps the card compact — content for each tab is swapped via display:none.
@@ -21894,7 +21906,7 @@ function upsertTotalCompareChart(
     const datasets = [
       {
         id: "actual",
-        label: "Actual (MWh)",
+        label: "Actual",
         data: actual,
         borderColor: COL_ACTUAL,
         backgroundColor: actualGrad,
@@ -21910,7 +21922,7 @@ function upsertTotalCompareChart(
       },
       {
         id: "ahead",
-        label: "Day-ahead (MWh)",
+        label: "Day-ahead",
         data: ahead,
         borderColor: COL_AHEAD,
         backgroundColor: "transparent",
@@ -21971,7 +21983,7 @@ function upsertTotalCompareChart(
       if (lockedByLabel.size > 0) datasets.unshift(
         {
           id: "p90",
-          label: "P90 (band top)",
+          label: "P90",
           data: p90Data,
           borderColor: COL_BAND,
           backgroundColor: "transparent",
@@ -21987,7 +21999,7 @@ function upsertTotalCompareChart(
         },
         {
           id: "p10",
-          label: "P10 (band bottom)",
+          label: "P10",
           data: p10Data,
           borderColor: COL_BAND,
           backgroundColor: bandGrad,
@@ -22003,7 +22015,7 @@ function upsertTotalCompareChart(
         },
         {
           id: "p50",
-          label: "P50 (locked)",
+          label: "P50",
           data: p50Data,
           borderColor: COL_P50,
           backgroundColor: "transparent",
@@ -22023,7 +22035,7 @@ function upsertTotalCompareChart(
       if (hasIntraday) {
         datasets.push({
           id: "solcast",
-          label: "Solcast est. actual",
+          label: "Solcast",
           data: intradayData,
           borderColor: COL_SOLCAST,
           backgroundColor: "transparent",
@@ -22047,7 +22059,7 @@ function upsertTotalCompareChart(
         const cutoffSlot = Number.isFinite(lp.ml_final?.meta?.cutoff_slot) ? Number(lp.ml_final?.meta?.cutoff_slot) : null;
         datasets.push({
           id: "nowcast",
-          label: (lp.ml_final?.meta?.series_kind === "dayahead_fallback") ? "ML day-ahead fallback" : "ML intraday nowcast",
+          label: (lp.ml_final?.meta?.series_kind === "dayahead_fallback") ? "ML Fallback" : "ML Nowcast",
           data: nowcastData,
           borderColor: COL_NOWCAST,
           backgroundColor: "transparent",
@@ -22195,7 +22207,12 @@ function upsertTotalCompareChart(
 function _renderHtmlLegend(chart) {
   const container = $("anaChartLegend");
   if (!container) return;
-  container.innerHTML = "";
+  
+  // Remove existing legend buttons but preserve the ML pill
+  container.querySelectorAll('.ana-legend-item').forEach(el => el.remove());
+  
+  const pill = container.querySelector('#anaNowcastMeta');
+
   chart.data.datasets.forEach((ds, i) => {
     const item = document.createElement("button");
     item.type = "button";
@@ -22226,7 +22243,12 @@ function _renderHtmlLegend(chart) {
       item.setAttribute("aria-pressed", String(!visible));
       item.setAttribute("aria-label", `${visible ? "Show" : "Hide"} ${ds.label}`);
     });
-    container.appendChild(item);
+    
+    if (pill) {
+      container.insertBefore(item, pill);
+    } else {
+      container.appendChild(item);
+    }
   });
 }
 
@@ -22523,7 +22545,7 @@ function chartOpts(unit, showLegend) {
         grid: { color: pal.grid, drawTicks: false },
         border: { display: false },
         title: {
-          display: true,
+          display: false,
           text: unit,
           color: pal.tick,
           font: { family: uiFont, size: chartType.axis, weight: "600" },
@@ -22531,7 +22553,7 @@ function chartOpts(unit, showLegend) {
       },
     },
     layout: {
-      padding: { top: 8, right: 10, bottom: 4, left: 6 },
+      padding: { top: 8, right: 0, bottom: 4, left: 0 },
     },
     interaction: { mode: "index", intersect: false },
   };
