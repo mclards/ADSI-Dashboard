@@ -24090,6 +24090,7 @@ app.get("/api/report/payload", (req, res) => {
   }
   const _t0 = Date.now();
   try {
+    const currentDaySnapshot = buildCurrentDayEnergySnapshot();
     const requestedDate = parseIsoDateStrict(req.query?.date || localDateStr(), "date");
     const refreshRequested = ["1", "true", "yes", "on"].includes(
       String(req.query?.refresh || "")

@@ -28737,12 +28737,12 @@ async function init() {
     // Refresh alarm badge every 30s
     State.alarmBadgeTimer = setInterval(refreshAlarmBadge, 30000);
 
-    await prefetchAllTabs({
+    prefetchAllTabs({
       delayMs: 0,
       sequential: true,
       silent: true,
       onStep: reportStartupProgress,
-    });
+    }).catch(err => console.warn("[startup] prefetchAllTabs background error:", err));
 
     reportStartupReady({
       text: "Dashboard ready.",
