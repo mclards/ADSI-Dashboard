@@ -3940,12 +3940,13 @@ async function refreshPollCadenceChip() {
   const chip = document.getElementById("pollCadenceChip");
   const valueEl = document.getElementById("pollCadenceValue");
   if (!chip || !valueEl) return;
+  if (getActiveOperationModeClient() === "remote") {
+    valueEl.textContent = "Remote";
+    chip.title = "Live metrics are streaming from the gateway over WebSocket.";
+    chip.hidden = false;
+    return;
+  }
   try {
-    const resp = await fetch("/api/runtime/data-health", { cache: "no-store" });
-    if (!resp || !resp.ok) { chip.hidden = true; return; }
-    const payload = await resp.json();
-    const pc = payload?.pollCadence;
-    if (!pc || !Number.isFinite(Number(pc.minIntervalSec))) {
       chip.hidden = true;
       return;
     }

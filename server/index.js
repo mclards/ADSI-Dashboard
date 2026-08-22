@@ -6931,6 +6931,7 @@ function closeRemoteBridgeSocket({ preserveHandlers = false } = {}) {
   const ws = remoteBridgeSocket;
   remoteBridgeSocket = null;
   if (!ws) return;
+  if (ws._keepAliveTimer) { clearInterval(ws._keepAliveTimer); ws._keepAliveTimer = null; }
   try {
     if (!preserveHandlers && typeof ws.removeAllListeners === "function") {
       ws.removeAllListeners();
@@ -7130,7 +7131,23 @@ function connectRemoteBridgeSocket() {
   });
   remoteBridgeSocket = ws;
 
+  ws._isAlive = true;
+  ws._keepAliveTimer = setInterval(() => {
+    if (ws.readyState !== 1) return;
+    if (!ws._isAlive) {
+      failOnce(new Error("WebSocket keep-alive timeout: gateway failed to respond to ping"));
+      return;
+    }
+    ws._isAlive = false;
+    try { ws.ping(); } catch (_) {}
+  }, 15000);
+
+  ws.on("pong", () => {
+    ws._isAlive = true;
+  });
+
   const failOnce = (err) => {
+    if (ws._keepAliveTimer) { clearInterval(ws._keepAliveTimer); ws._keepAliveTimer = null; }
     if (ws._bridgeFailureHandled) return;
     ws._bridgeFailureHandled = true;
     if (remoteBridgeSocket === ws) remoteBridgeSocket = null;
