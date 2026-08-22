@@ -6048,9 +6048,21 @@ function ensureArchiveTableSchema(archiveDb, monthKey, tableName, schema) {
     //   2. DEFAULT (CAST((julianday('now')...) AS INTEGER)) clauses would
     //      generate fresh values on archive INSERT, hiding the original
     //      hot timestamp — but we always provide the explicit value.
-    createTableSql = String(hotTableSql)
+    let stripped = String(hotTableSql);
+    while (/\bDEFAULT\s*\(/i.test(stripped)) {
+      const match = stripped.search(/\bDEFAULT\s*\(/i);
+      const startParen = stripped.indexOf("(", match);
+      let depth = 1;
+      let i = startParen + 1;
+      while (i < stripped.length && depth > 0) {
+        if (stripped[i] === "(") depth++;
+        else if (stripped[i] === ")") depth--;
+        i++;
+      }
+      stripped = stripped.slice(0, match) + stripped.slice(i);
+    }
+    createTableSql = stripped
       .replace(/\bNOT\s+NULL\b/gi, "")
-      .replace(/\bDEFAULT\s*\([^)]*(?:\([^)]*\)[^)]*)*\)/gi, "")
       .replace(/\bDEFAULT\s+[^,)\s]+/gi, "")
       .replace(/\bAUTOINCREMENT\b/gi, "")
       .replace(/^\s*CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?"?[\w]+"?/i,

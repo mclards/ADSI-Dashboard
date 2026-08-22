@@ -174,11 +174,17 @@ function parseHostHeader(value) {
 
 function isDirectLoopbackRequest(req) {
   if (!isLoopbackIp(requestPeerIp(req))) return false;
-  // A loopback reverse proxy (notably Tailscale Serve) must not inherit the
-  // Electron exemption. Electron's own renderer always targets localhost.
+  
   if (headerValue(req, "x-forwarded-for") || headerValue(req, "tailscale-user-login")) {
     return false;
   }
+  
+  // Exempt the Electron renderer from strict Host header parsing, provided it originates from a loopback IP.
+  const ua = headerValue(req, "user-agent");
+  if (ua.includes("Electron/")) {
+    return true;
+  }
+
   const parsedHost = parseHostHeader(headerValue(req, "host"));
   return Boolean(parsedHost && classifyDashboardHost(parsedHost.hostname) === "loopback");
 }

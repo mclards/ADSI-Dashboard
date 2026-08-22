@@ -1975,20 +1975,33 @@ function isSolarWindowNow(ts = Date.now()) {
   return hour >= SOLCAST_SOLAR_START_H && hour < SOLCAST_SOLAR_END_H;
 }
 
-function normalizeRemoteLiveReading(row, fallbackTs = Date.now()) {
-  const inverter = Math.trunc(Number(row?.inverter || 0));
-  const unit = Math.trunc(Number(row?.unit || 0));
+function normalizeRemoteLiveReading(row, fallbackTs = Date.now(), key = "") {
+  const parts = String(key || "").split("_").map((p) => Math.trunc(Number(p)));
+  const kInv = parts.length >= 2 && parts[0] > 0 ? parts[0] : 0;
+  const kUnit = parts.length >= 2 && parts[1] > 0 ? parts[1] : 0;
+  const inverter = Math.trunc(Number(row?.inverter || kInv || 0));
+  const unit = Math.trunc(Number(row?.unit || kUnit || 0));
   if (!(inverter > 0) || !(unit > 0)) return null;
   const ts = Math.max(0, Number(row?.ts || fallbackTs) || fallbackTs);
+  const pac = Number.isFinite(Number(row?.pac)) ? Math.max(0, Number(row.pac)) : 0;
+  const pdc = Number.isFinite(Number(row?.pdc)) ? Math.max(0, Number(row.pdc)) : 0;
+  const kwh = Number.isFinite(Number(row?.kwh)) ? Math.max(0, Number(row.kwh)) : 0;
+  const alarm = Number.isFinite(Number(row?.alarm)) ? Math.max(0, Number(row.alarm)) : 0;
+  const on_off = Number(row?.on_off ?? row?.onOff ?? 0) === 1 ? 1 : 0;
+  const online =
+    row?.online === false || row?.online === 0 || row?.online === "0"
+      ? 0
+      : 1;
   return {
     ts,
     inverter,
     unit,
-    pac: Math.max(0, Number(row?.pac || 0)),
-    kwh: Math.max(0, Number(row?.kwh || 0)),
-    alarm: Math.max(0, Number(row?.alarm || 0)),
-    on_off: Number(row?.on_off ?? row?.onOff ?? 0) === 1 ? 1 : 0,
-    online: Number(row?.online ?? 1) === 1 ? 1 : 0,
+    pac,
+    pdc,
+    kwh,
+    alarm,
+    on_off,
+    online,
   };
 }
 
@@ -1996,9 +2009,9 @@ function buildRemoteLiveSnapshot(rowsRaw, syncedAt = Date.now()) {
   const rows = rowsRaw && typeof rowsRaw === "object" ? rowsRaw : {};
   const out = {};
   for (const [key, rawRow] of Object.entries(rows)) {
-    const parsed = normalizeRemoteLiveReading(rawRow, syncedAt);
+    const parsed = normalizeRemoteLiveReading(rawRow, syncedAt, key);
     if (!parsed) continue;
-    out[String(key || `${parsed.inverter}_${parsed.unit}`)] = {
+    out[`${parsed.inverter}_${parsed.unit}`] = {
       ...(rawRow && typeof rawRow === "object" ? rawRow : {}),
       ...parsed,
       // Preserve the gateway sample ts for persistence/history while using a
@@ -7040,14 +7053,17 @@ function handleRemoteBridgeStreamFailure(err, context = {}) {
   if (!isCurrentRemoteBridgeContext(context)) return;
   const failure = classifyRemoteBridgeFailure(err);
   const nowTs = Date.now();
-  remoteBridgeState.connected = false;
-  remoteBridgeState.liveFailureCount += 1;
-  remoteBridgeState.lastFailureTs = nowTs;
-  remoteBridgeState.lastReasonCode = failure.reasonCode;
-  remoteBridgeState.lastReasonClass = failure.reasonClass;
-  remoteBridgeState.lastError = failure.reasonText;
-  if (!hasUsableRemoteLiveSnapshot(nowTs) && (wasConnected || hadLiveData)) {
-    broadcastRemoteOfflineLiveState();
+  const recentSuccess = hasRecentRemoteBridgeSuccess(nowTs);
+  if (!recentSuccess) {
+    remoteBridgeState.connected = false;
+    remoteBridgeState.liveFailureCount += 1;
+    remoteBridgeState.lastFailureTs = nowTs;
+    remoteBridgeState.lastReasonCode = failure.reasonCode;
+    remoteBridgeState.lastReasonClass = failure.reasonClass;
+    remoteBridgeState.lastError = failure.reasonText;
+    if (!hasUsableRemoteLiveSnapshot(nowTs) && (wasConnected || hadLiveData)) {
+      broadcastRemoteOfflineLiveState();
+    }
   }
   if (wasConnected) {
     remoteBridgeState.lastSyncDirection = "stream-live-failed";
@@ -7064,9 +7080,26 @@ function scheduleRemoteBridgeReconnect() {
     remoteBridgeTimer = null;
   }
   const nextDelay = getRemoteBridgeNextDelayMs(Date.now(), 0);
-  remoteBridgeTimer = setTimeout(() => {
+  remoteBridgeTimer = setTimeout(async () => {
     remoteBridgeTimer = null;
-    connectRemoteBridgeSocket();
+    if (!remoteBridgeState.running || isRemoteLiveBridgePausedForTransfer() || !isRemoteMode()) {
+      return;
+    }
+    const isStreaming =
+      remoteBridgeSocket &&
+      remoteBridgeSocket.readyState === 1 &&
+      Date.now() - Number(remoteBridgeState.lastSuccessTs || 0) < 3000;
+    if (!isStreaming) {
+      try {
+        await pollRemoteLiveOnce();
+      } catch (e) {
+        console.warn("[remoteBridge] poll tick failed:", e.message);
+      }
+      if (!remoteBridgeSocket || remoteBridgeSocket.readyState > 1) {
+        connectRemoteBridgeSocket();
+      }
+    }
+    scheduleRemoteBridgeReconnect();
   }, Math.round(nextDelay));
 }
 
@@ -7621,6 +7654,9 @@ function startRemoteBridge() {
   } else {
     remoteBridgeState.replicationCursors = readReplicationCursorsSetting();
   }
+  pollRemoteLiveOnce().finally(() => {
+    scheduleRemoteBridgeReconnect();
+  });
   connectRemoteBridgeSocket();
 }
 

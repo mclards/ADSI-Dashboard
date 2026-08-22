@@ -577,7 +577,7 @@ async function restart(configRaw) {
 
 function selectedStream(configRaw = activeConfig) {
   const cfg = sanitizeConfig(configRaw || {});
-  if (cfg.playbackMode === "compatible") return STREAM_COMPAT;
+  if (cfg.playbackMode === "compatible" || cfg.stream === "sub") return STREAM_COMPAT;
   if (cfg.playbackMode === "hls") return STREAM_DIRECT;
   return STREAM_BROWSER;
 }
@@ -647,6 +647,8 @@ function proxyMedia(req, res, configRaw) {
     upstreamPath = `/api/stream.m3u8?src=${encodeURIComponent(selectedStream(cfg))}&mp4`;
   } else if (suffix.startsWith("hls/")) {
     upstreamPath = `/api/${suffix}${req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : ""}`;
+  } else if (/\.(?:m3u8|m4s|mp4|ts)(?:\?|$)/i.test(suffix)) {
+    upstreamPath = `/api/hls/${suffix}${req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : ""}`;
   } else {
     return res.status(404).end();
   }

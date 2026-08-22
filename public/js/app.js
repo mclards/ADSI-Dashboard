@@ -3941,12 +3941,17 @@ async function refreshPollCadenceChip() {
   const valueEl = document.getElementById("pollCadenceValue");
   if (!chip || !valueEl) return;
   if (getActiveOperationModeClient() === "remote") {
-    valueEl.textContent = "Remote";
+    valueEl.textContent = "Remote Stream Active";
     chip.title = "Live metrics are streaming from the gateway over WebSocket.";
     chip.hidden = false;
     return;
   }
   try {
+    const resp = await fetch("/api/runtime/data-health", { cache: "no-store" });
+    if (!resp || !resp.ok) { chip.hidden = true; return; }
+    const payload = await resp.json();
+    const pc = payload?.pollCadence;
+    if (!pc || !Number.isFinite(Number(pc.minIntervalSec))) {
       chip.hidden = true;
       return;
     }
@@ -13074,7 +13079,7 @@ function updateHeaderTotalsFast() {
     const configuredUnits = getConfiguredUnits(inv, nodeCount);
     const configuredSet = new Set(configuredUnits);
     const units = (unitsByInv[inv] || []).filter(
-      (d) => d.inverter === inv && configuredSet.has(Number(d.unit || 0)),
+      (d) => Number(d.inverter || inv) === inv && configuredSet.has(Number(d.unit || 0)),
     );
     const freshUnits = units.filter(
       (d) => d.online && now - getLiveFreshTsClient(d) <= DATA_FRESH_MS,
@@ -13195,7 +13200,7 @@ function updateInverterCards() {
 
     // Aggregate units for this inverter
     const units = (unitsByInv[inv] || []).filter(
-      (d) => d.inverter === inv && configuredSet.has(Number(d.unit || 0)),
+      (d) => Number(d.inverter || inv) === inv && configuredSet.has(Number(d.unit || 0)),
     );
     const invUnitMap = unitMapByInv[inv] || Object.create(null);
     const freshUnits = units.filter(
@@ -15551,14 +15556,11 @@ function isHikvisionFullscreen(card = $("hikvisionCard")) {
 }
 
 function openHikvisionViewer(card = $("hikvisionCard")) {
-  if (!card) return Promise.resolve();
-  const requestedMode = hikvisionPlayer?.requestedMode
-    || State.settings?.hikvisionConfig?.playbackMode
-    || "localservice";
-  if (requestedMode === "localservice" && window.electronAPI?.openHikvisionNativeViewer) {
+  if (window.electronAPI?.openHikvisionNativeViewer) {
     const theme = document.documentElement.getAttribute("data-theme") || "dark";
     return window.electronAPI.openHikvisionNativeViewer(theme);
   }
+  if (!card) return Promise.resolve();
   if (isHikvisionFullscreen(card)) return document.exitFullscreen();
   if (document.fullscreenElement) return Promise.reject(new Error("Another fullscreen view is active"));
   return card.requestFullscreen();
@@ -16250,24 +16252,26 @@ class HikVisionPlayer {
     this._setLive(false);
     this._hideRetry();
     try {
+      let delivery = null;
       try {
         const cfgResult = await api("/api/hikvision/config");
         this.requestedMode = cfgResult?.config?.playbackMode || "localservice";
+        delivery = cfgResult?.delivery;
       } catch (_) {
         this.requestedMode = State.settings?.hikvisionConfig?.playbackMode || "localservice";
       }
       if (!this._isCurrent(generation)) return;
-      // Hybrid mode applies only to the recommended LocalService selection.
-      // Explicit snapshot/direct-HLS diagnostic choices retain their meaning.
+      const isRemote = delivery?.operationMode === "remote"
+        || (typeof isClientModeActive === "function" && isClientModeActive())
+        || State.settings?.operationMode === "remote"
+        || State.runtimeMode === "remote";
       this.effectiveMode = this.requestedMode === "localservice"
-        ? "browser"
+        ? (isRemote ? "compatible" : "browser")
         : this.requestedMode;
-      if (this.effectiveMode === "compatible") {
-        this._openSnapshots(generation);
-      } else if (this.effectiveMode === "localservice") {
+      if (this.effectiveMode === "localservice" && !isRemote) {
         await this._openNative(generation);
       } else {
-        await api("/api/hikvision/start", "POST");
+        await api("/api/hikvision/start", "POST").catch(() => {});
         if (!this._isCurrent(generation)) return;
         await this._openHls(generation);
       }
@@ -16397,7 +16401,7 @@ class HikVisionPlayer {
       const badge = this.card.querySelector("#hikvisionCodecBadge");
       if (badge) {
         const size = video.videoWidth && video.videoHeight ? `${video.videoWidth}x${video.videoHeight} ` : "";
-        badge.textContent = `${size}${this.effectiveMode === "browser" ? "H.264 HLS" : "HLS"}`;
+        badge.textContent = `${size}${this.effectiveMode === "browser" || this.effectiveMode === "compatible" ? "H.264 HLS" : "HLS"}`;
       }
       this._hideOverlay();
       this._setLive(true);
@@ -16408,23 +16412,45 @@ class HikVisionPlayer {
       const hls = new Hls({
         enableWorker: true,
         lowLatencyMode: true,
-        liveSyncDurationCount: 1,
-        liveMaxLatencyDurationCount: 3,
-        maxBufferLength: 4,
-        maxMaxBufferLength: 8,
+        backBufferLength: 0,
+        liveSyncDurationCount: 2,
+        liveMaxLatencyDurationCount: 5,
+        maxBufferLength: 8,
+        maxMaxBufferLength: 16,
+        maxBufferSize: 20 * 1024 * 1024,
+        manifestLoadingTimeOut: 15000,
+        manifestLoadingMaxRetry: 5,
+        levelLoadingTimeOut: 15000,
+        levelLoadingMaxRetry: 5,
+        fragLoadingTimeOut: 20000,
+        fragLoadingMaxRetry: 6,
       });
       this.hls = hls;
       hls.loadSource(url);
       hls.attachMedia(video);
       hls.on(Hls.Events.MANIFEST_PARSED, (_event, data) => {
         if (!this._isCurrent(generation)) return;
-        const codec = data?.levels?.[0]?.videoCodec || (this.effectiveMode === "browser" ? "H.264" : "H.265");
+        const codec = data?.levels?.[0]?.videoCodec || (this.effectiveMode === "browser" || this.effectiveMode === "compatible" ? "H.264" : "H.265");
         const badge = this.card.querySelector("#hikvisionCodecBadge");
         if (badge) badge.textContent = /avc|h264/i.test(codec) ? "H.264 HLS" : "H.265 HLS";
         video.play().catch(() => {});
       });
       hls.on(Hls.Events.ERROR, (_event, data) => {
-        if (data.fatal && this._isCurrent(generation)) this._onError(`Hikvision ${data.details || "stream error"}`, generation);
+        if (data.fatal) {
+          switch (data.type) {
+            case Hls.ErrorTypes.NETWORK_ERROR:
+              console.warn("[hikvision] HLS network error, recovering...", data.details);
+              hls.startLoad();
+              break;
+            case Hls.ErrorTypes.MEDIA_ERROR:
+              console.warn("[hikvision] HLS media error, recovering...", data.details);
+              hls.recoverMediaError();
+              break;
+            default:
+              if (this._isCurrent(generation)) this._onError(`Hikvision ${data.details || "stream error"}`, generation);
+              break;
+          }
+        }
       });
     } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
       video.src = url;

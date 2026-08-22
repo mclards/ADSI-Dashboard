@@ -4517,6 +4517,11 @@ function createMainWindow() {
       clearTimeout(initialLoadRetryTimer);
       initialLoadRetryTimer = null;
     }
+    updateLoadingStartupState({
+      step: 4,
+      progress: 78,
+      text: "Loading dashboard data...",
+    });
     armMainRendererReadyTimer();
     revealMainWindowIfReady();
   });
