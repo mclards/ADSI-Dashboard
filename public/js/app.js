@@ -8902,7 +8902,7 @@ function buildPlantCapPanel() {
           </select>
         </label>
         <label id="plantCapSequenceCustomWrap" hidden title="Exempted inverter numbers. These inverter numbers are skipped during automatic stop selection. Use a comma-separated list.">
-          Exempted Inverter Numbers
+          Exempted
           <input id="plantCapSequenceCustom" class="inp" type="text" placeholder="2, 5, 9" autocomplete="off" title="Comma-separated inverter numbers to exempt from automatic stop selection." />
         </label>
         <label title="Cooldown or settling time in seconds after each stop or restart action. The controller waits this long before making another decision.">
@@ -9224,21 +9224,21 @@ function switchPlantCapTab(tabKey) {
 const _compliancePollers = {}; // run_id → setInterval handle
 
 function _complianceTargetSelectorMarkup(idPrefix) {
-  // v2.11.x — replaced free-text Inverter # / Internal node inputs with
-  // <select> dropdowns populated from State.ipConfig (same pattern as
-  // %P Setpoint via populateApcIpSelector). Eliminates input errors
-  // ("inverter 28 doesn't exist", "node 5 not configured", typo IP).
-  // The IP field is now a read-only display showing the resolved IP for
-  // the chosen inverter.
   return `
     <div class="cmp-target-row">
-      <label class="cmp-label" for="${idPrefix}Inv" title="Inverter — the physical INGECON SUN unit (one per IP). Populated from your IP Config.">Inverter</label>
-      <select id="${idPrefix}Inv" class="sel cmp-sel" title="Inverter — the physical INGECON SUN unit (one per IP)."></select>
-      <label class="cmp-label" for="${idPrefix}Slave" title="Internal node — Modbus slave ID (1–4) of an independent converter inside the inverter. The inverter has no fixed master; nodes rotate the leader role per cycle, so each must be tested individually.">Internal node</label>
-      <select id="${idPrefix}Slave" class="sel cmp-sel" title="Internal converter address inside the inverter (1–4). Each internal node is an independent IGBT bridge."></select>
-      <label class="cmp-label" for="${idPrefix}Ip">IP</label>
-      <input id="${idPrefix}Ip" type="text" class="cmp-text" readonly tabindex="-1"
-             title="Auto-resolved from the chosen Inverter via your IP Config." />
+      <label class="cmp-field" for="${idPrefix}Inv" title="Inverter — the physical INGECON SUN unit (one per IP). Populated from your IP Config.">
+        <span class="cmp-label">Inverter</span>
+        <select id="${idPrefix}Inv" class="sel cmp-sel" title="Inverter — the physical INGECON SUN unit (one per IP)."></select>
+      </label>
+      <label class="cmp-field" for="${idPrefix}Slave" title="Internal node — Modbus slave ID (1–4) of an independent converter inside the inverter.">
+        <span class="cmp-label">Internal node</span>
+        <select id="${idPrefix}Slave" class="sel cmp-sel" title="Internal converter address inside the inverter (1–4). Each internal node is an independent IGBT bridge."></select>
+      </label>
+      <label class="cmp-field cmp-field-ip" for="${idPrefix}Ip">
+        <span class="cmp-label">IP</span>
+        <input id="${idPrefix}Ip" type="text" class="cmp-text" readonly tabindex="-1"
+               title="Auto-resolved from the chosen Inverter via your IP Config." />
+      </label>
     </div>
     <div class="cmp-target-help">
       <b>Inverter</b> = the physical INGECON SUN unit (one per IP). <b>Internal node</b> = the Modbus slave (1–4) of an independent power converter inside the inverter — each has its own DC string and IGBT bridge. The inverter has no fixed master; the leader role rotates per cycle, which is why every test targets one specific (inverter, internal node) pair so the witness can attribute results unambiguously.
@@ -9477,12 +9477,16 @@ function buildComplianceT2Pane() {
       </details>
 
       ${_complianceTargetSelectorMarkup("t2")}
-      <div class="cmp-target-row">
-        <label class="cmp-label" for="t2Duration">Duration (s)</label>
-        <input id="t2Duration" type="number" min="60" max="7200" step="60" value="1800" class="cmp-num" />
-        <label class="cmp-label" for="t2Period" title="How often the gateway polls the inverter's live frame. Server clamp 1-60 s — values outside that range are silently bumped to the nearest bound.">Sample period (s)</label>
-        <input id="t2Period" type="number" min="1" max="60" step="1" value="2" class="cmp-num"
-               title="1-60 s. 2 s typical for capturing transient excursions; 30-60 s for long-soak observation runs." />
+      <div class="cmp-target-row cmp-target-row--params">
+        <label class="cmp-field" for="t2Duration">
+          <span class="cmp-label">Duration (s)</span>
+          <input id="t2Duration" type="number" min="60" max="7200" step="60" value="1800" class="cmp-num inp" />
+        </label>
+        <label class="cmp-field" for="t2Period" title="How often the gateway polls the inverter's live frame. Server clamp 1-60 s — values outside that range are silently bumped to the nearest bound.">
+          <span class="cmp-label">Sample period (s)</span>
+          <input id="t2Period" type="number" min="1" max="60" step="1" value="2" class="cmp-num inp"
+                 title="1-60 s. 2 s typical for capturing transient excursions; 30-60 s for long-soak observation runs." />
+        </label>
       </div>
       <div class="cmp-actions">
         <button id="t2Start" class="btn btn-accent btn-xs" type="button">Start observation</button>
@@ -9746,15 +9750,23 @@ function buildComplianceT3Pane() {
       </details>
 
       ${_complianceTargetSelectorMarkup("t3")}
-      <div class="cmp-target-row">
-        <label class="cmp-label" for="t3Sweep" title="Comma-separated PF list with sign. Defaults to the full 21-step NGCP sweep 1.00 → 0.95 lag → 1.00 → 0.95 lead → 1.00.">Sweep</label>
-        <input id="t3Sweep" type="text" value="1.00,0.99,0.98,0.97,0.96,0.95,0.96,0.97,0.98,0.99,1.00,-0.99,-0.98,-0.97,-0.96,-0.95,-0.96,-0.97,-0.98,-0.99,1.00" class="cmp-text cmp-text-flex" />
-        <label class="cmp-label" for="t3Hold">Hold (s/step)</label>
-        <input id="t3Hold" type="number" min="20" max="900" step="10" value="60" class="cmp-num" />
-        <label class="cmp-label" for="t3Settle">Settle (s)</label>
-        <input id="t3Settle" type="number" min="5" max="120" step="5" value="15" class="cmp-num" />
-        <label class="cmp-label" for="t3Tol" title="Allowed deviation between observed PF and target PF, in percentage points. Default 5 % per θ-3 acceptance criterion.">Tol (±%)</label>
-        <input id="t3Tol" type="number" min="1" max="20" step="0.5" value="5" class="cmp-num" />
+      <div class="cmp-target-row cmp-target-row--params">
+        <label class="cmp-field cmp-field--wide" for="t3Sweep" title="Comma-separated PF list with sign. Defaults to the full 21-step NGCP sweep 1.00 → 0.95 lag → 1.00 → 0.95 lead → 1.00.">
+          <span class="cmp-label">Sweep</span>
+          <input id="t3Sweep" type="text" value="1.00,0.99,0.98,0.97,0.96,0.95,0.96,0.97,0.98,0.99,1.00,-0.99,-0.98,-0.97,-0.96,-0.95,-0.96,-0.97,-0.98,-0.99,1.00" class="cmp-text cmp-text-flex inp" />
+        </label>
+        <label class="cmp-field" for="t3Hold">
+          <span class="cmp-label">Hold (s/step)</span>
+          <input id="t3Hold" type="number" min="20" max="900" step="10" value="60" class="cmp-num inp" />
+        </label>
+        <label class="cmp-field" for="t3Settle">
+          <span class="cmp-label">Settle (s)</span>
+          <input id="t3Settle" type="number" min="5" max="120" step="5" value="15" class="cmp-num inp" />
+        </label>
+        <label class="cmp-field" for="t3Tol" title="Allowed deviation between observed PF and target PF, in percentage points. Default 5 % per θ-3 acceptance criterion.">
+          <span class="cmp-label">Tol (±%)</span>
+          <input id="t3Tol" type="number" min="1" max="20" step="0.5" value="5" class="cmp-num inp" />
+        </label>
       </div>
       <div class="cmp-target-help">
         <b>PF sign convention:</b>
@@ -10044,15 +10056,23 @@ function buildComplianceT5Pane() {
       </details>
 
       ${_complianceTargetSelectorMarkup("t5")}
-      <div class="cmp-target-row">
-        <label class="cmp-label" for="t5Ramp">Ramp (% comma-sep)</label>
-        <input id="t5Ramp" type="text" value="100,75,50,25,75,100" class="cmp-text cmp-text-flex" />
-        <label class="cmp-label" for="t5Hold">Hold (s/step)</label>
-        <input id="t5Hold" type="number" min="30" max="900" step="10" value="120" class="cmp-num" />
-        <label class="cmp-label" for="t5Settle">Settle (s)</label>
-        <input id="t5Settle" type="number" min="5" max="120" step="5" value="30" class="cmp-num" />
-        <label class="cmp-label" for="t5Tol">Tol (±%)</label>
-        <input id="t5Tol" type="number" min="0.5" max="10" step="0.1" value="2" class="cmp-num" />
+      <div class="cmp-target-row cmp-target-row--params">
+        <label class="cmp-field cmp-field--wide" for="t5Ramp">
+          <span class="cmp-label">Ramp (% comma-sep)</span>
+          <input id="t5Ramp" type="text" value="100,75,50,25,75,100" class="cmp-text cmp-text-flex inp" />
+        </label>
+        <label class="cmp-field" for="t5Hold">
+          <span class="cmp-label">Hold (s/step)</span>
+          <input id="t5Hold" type="number" min="30" max="900" step="10" value="120" class="cmp-num inp" />
+        </label>
+        <label class="cmp-field" for="t5Settle">
+          <span class="cmp-label">Settle (s)</span>
+          <input id="t5Settle" type="number" min="5" max="120" step="5" value="30" class="cmp-num inp" />
+        </label>
+        <label class="cmp-field" for="t5Tol">
+          <span class="cmp-label">Tol (±%)</span>
+          <input id="t5Tol" type="number" min="0.5" max="10" step="0.1" value="2" class="cmp-num inp" />
+        </label>
       </div>
       <div class="cmp-actions">
         <button id="t5Start" class="btn btn-accent btn-xs" type="button">Run sweep</button>

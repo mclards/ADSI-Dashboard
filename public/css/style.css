@@ -6207,7 +6207,30 @@ select.cam-field-input { appearance: auto; }
   font-weight: 400;
   color: var(--text2);
 }
-.cmp-target-row {
+
+.cmp-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.cmp-field .cmp-label {
+  font-size: 11.5px;
+  color: var(--text2);
+}
+
+
+  /* Hide verbose explanation boxes on mobile */
+  .cmp-target-help,
+  .cmp-howto,
+  .cmp-panel-sub,
+  .cmp-panel-subtitle,
+  .apc-field-help,
+  .apc-field-auth-note,
+  .apc-actions-help {
+    display: none !important;
+  }
+
+  .cmp-target-row {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -17063,6 +17086,16 @@ body.mode-transition-active {
 }
 
 /* Smsg variants used by form error */
+
+.smsg-error:empty,
+.smsg:empty,
+.cap-sched-form-error:empty,
+.cap-sched-form-error[hidden],
+#plantCapClientWarnings:empty,
+#plantCapClientWarnings[hidden] {
+  display: none !important;
+}
+
 .smsg-error {
   color: var(--red, #ef4444);
   background: rgba(224, 53, 96, 0.08);
@@ -18041,6 +18074,11 @@ body.mode-transition-active {
 .srn-controls {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   margin-bottom: 12px;
+}
+.srn-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 .srn-controls select {
   min-width: 180px;
@@ -23142,6 +23180,9 @@ body.camera-popout-mode > :not(#main) {
   line-height: 1;
   pointer-events: none;
 }
+.btn-popout .btn-popout-label {
+  display: none;
+}
 
 /* Transport selector — only meaningful for the standalone calibrator (its
    /api/transport/select + /api/serial/ports routes live on :3600, not the
@@ -26013,11 +26054,48 @@ table.fcal-settings-table .fcal-set-readonly {
 .btn {
   border-radius: 4px !important;
   box-shadow: none !important;
+}
+.btn:not(.btn-accent):not(.btn-green):not(.btn-danger):not(.btn-primary) {
   border: 1px solid color-mix(in srgb, currentColor 20%, transparent) !important;
 }
-.btn:hover, .btn:focus-visible {
+.btn:not(.btn-accent):not(.btn-green):not(.btn-danger):not(.btn-primary):hover,
+.btn:not(.btn-accent):not(.btn-green):not(.btn-danger):not(.btn-primary):focus-visible {
   box-shadow: none !important;
-  background: color-mix(in srgb, currentColor 5%, transparent) !important;
+  background: color-mix(in srgb, currentColor 10%, transparent) !important;
+}
+
+.btn-accent {
+  border: 1px solid var(--btn-accent-border) !important;
+  background: linear-gradient(180deg, var(--btn-accent-1) 0%, var(--btn-accent-2) 100%) !important;
+  color: var(--btn-accent-color) !important;
+}
+.btn-accent:hover,
+.btn-accent:focus-visible {
+  border-color: var(--btn-accent-border-hover) !important;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--btn-accent-1) 85%, white) 0%, color-mix(in srgb, var(--btn-accent-2) 85%, white) 100%) !important;
+  color: var(--btn-accent-color) !important;
+  filter: brightness(1.08) !important;
+  box-shadow: none !important;
+}
+.btn-accent:active {
+  filter: brightness(0.92) !important;
+}
+
+.btn-green {
+  border: 1px solid var(--btn-green-border) !important;
+  background: linear-gradient(180deg, var(--btn-green-1) 0%, var(--btn-green-2) 100%) !important;
+  color: var(--btn-green-color) !important;
+}
+.btn-green:hover,
+.btn-green:focus-visible {
+  border-color: var(--btn-green-border-hover) !important;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--btn-green-1) 85%, white) 0%, color-mix(in srgb, var(--btn-green-2) 85%, white) 100%) !important;
+  color: var(--btn-green-color) !important;
+  filter: brightness(1.08) !important;
+  box-shadow: none !important;
+}
+.btn-green:active {
+  filter: brightness(0.92) !important;
 }
 
 /* Remove glowing/shadows from major cards */
@@ -26036,4 +26114,1787 @@ table.fcal-settings-table .fcal-set-readonly {
 }
 .data-table:not(.inv-table) tbody tr:hover {
   background: color-mix(in srgb, var(--text) 4%, transparent) !important;
+}
+@media screen and (max-width: 768px) {
+  /* 1. Data & Polling Tabs Flattening */
+  #opsCompactSection .card-tabs { display: none !important; }
+  #opsCompactSection .card-tab-panel,
+  #opsCompactSection .card-tab-panel[hidden] {
+    display: block !important; padding-top: 0 !important; padding-bottom: 0 !important;
+  }
+  #opsPanelEndpoints::before { content: 'API ENDPOINTS'; display: block; font-size: 11px; font-weight: 600; color: var(--text2); margin: 10px 0 6px 4px; letter-spacing: 0.5px; }
+  #opsPanelStorage::before { content: 'STORAGE'; display: block; font-size: 11px; font-weight: 600; color: var(--text2); margin: 16px 0 6px 4px; letter-spacing: 0.5px; }
+  #opsPanelPolling::before { content: 'POLLING'; display: block; font-size: 11px; font-weight: 600; color: var(--text2); margin: 16px 0 6px 4px; letter-spacing: 0.5px; }
+  
+  #page-settings .settings-sections #opsPanelEndpoints .srow,
+  #page-settings .settings-sections #opsPanelStorage .srow {
+    display: grid !important; grid-template-columns: repeat(2, minmax(0, 1fr)) !important; flex-direction: row !important; gap: 8px !important;
+  }
+  #page-settings .settings-sections #opsPanelPolling .srow {
+    display: grid !important; grid-template-columns: repeat(3, minmax(0, 1fr)) !important; flex-direction: row !important; gap: 8px !important;
+  }
+  #page-settings .settings-sections #opsCompactSection .srow label {
+    grid-column: span 1 !important; width: 100% !important;
+  }
+
+  /* 2. Inverter Clock Tabs (Separate chips) */
+  .invclock-tabs {
+    background: transparent !important;
+    border: none !important;
+    padding: 0 !important;
+  }
+  .invclock-tab {
+    background: color-mix(in srgb, var(--text) 3%, transparent) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 6px !important;
+    padding: 8px 4px !important;
+    display: flex !important; flex-direction: row !important; align-items: center !important; justify-content: center !important;
+    flex: 1 1 0 !important; min-width: 0 !important; position: relative !important; margin-bottom: 32px !important; overflow: visible !important;
+  }
+  .invclock-tab-counts {
+    position: absolute !important; bottom: -28px !important; left: 50% !important; transform: translateX(-50%) !important;
+    width: max-content !important; display: inline-flex !important; justify-content: center !important; gap: 4px !important;
+  }
+
+  /* 3. Scheduled Auto-Sync 2-col Layout */
+  #btnInvClockSaveSchedule { width: 100% !important; flex: 1 1 100% !important; }
+  #invClockPanelSchedule .invclock-2col-cell:first-child .sgroup-actions { flex-wrap: wrap !important; }
+  #invClockPanelSchedule .invclock-2col-cell:first-child .invclock-form { display: grid !important; grid-template-columns: repeat(2, minmax(0, 1fr)) !important; gap: 8px 12px !important; }
+  #invClockPanelSchedule .invclock-2col-cell:first-child .invclock-form .invclock-form-row-check { grid-column: 1 / -1 !important; }
+  #invClockPanelSchedule .invclock-2col-cell:first-child .invclock-form .invclock-form-row:not(.invclock-form-row-check) { display: flex !important; flex-direction: column !important; }
+
+  /* 4. Per-Inverter Toolbar */
+  .invclock-toolbar {
+    display: grid !important; grid-template-columns: repeat(3, minmax(0, 1fr)) !important; gap: 8px 6px !important; padding: 10px 8px !important;
+  }
+  .invclock-toolbar-label { grid-column: 1 / -1 !important; margin-bottom: -4px !important; }
+  .invclock-toolbar-select { grid-column: 1 / -1 !important; max-width: none !important; width: 100% !important; }
+  .invclock-toolbar-sep { display: none !important; }
+  
+  .invclock-toolbar .btn {
+    width: 100% !important; padding: 6px 4px !important; font-size: 10px !important; white-space: normal !important; line-height: 1.2 !important; height: auto !important; min-height: 36px !important;
+    display: flex !important; flex-direction: row !important; align-items: center !important; justify-content: center !important; text-align: center !important; gap: 4px !important;
+  }
+  .invclock-toolbar .btn .icon-inline { margin: 0 !important; font-size: 14px !important; }
+  
+  #btnInvClockSyncInverter { grid-column: 1 / 2 !important; }
+  #btnInvClockSyncPlant { grid-column: 2 / 3 !important; }
+  #btnInvClockRefresh { grid-column: 3 / 4 !important; }
+  .invclock-toolbar-msg { grid-column: 1 / -1 !important; text-align: center !important; margin-left: 0 !important; }
+  
+  /* Standardize ALL card tabs to distinct pills */
+  .card-tabs {
+    background: transparent !important;
+    border: none !important;
+    padding: 0 !important;
+  }
+  .card-tab {
+    background: color-mix(in srgb, var(--text) 3%, transparent) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 6px !important;
+    padding: 8px 4px !important;
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: center !important;
+    flex: 1 1 0 !important;
+    min-width: 0 !important;
+    margin-bottom: 8px !important;
+  }
+  /* Ultimate mobile form stack for srn-controls */
+  .srn-controls {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 8px !important;
+  }
+  .srn-controls > * {
+    grid-column: 1 / -1 !important;
+    width: 100% !important;
+    max-width: none !important;
+    margin: 0 !important;
+    text-align: center;
+  }
+  .srn-controls label {
+    text-align: left;
+    margin-bottom: -4px !important;
+  }
+  .srn-controls .invclock-check {
+    text-align: left;
+    margin-bottom: 0 !important;
+  }
+
+  /* Clean mobile Grid for 2-col and 3-col field rows */
+  .srn-controls.srn-grid-2col {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 8px !important;
+  }
+  .srn-controls.srn-grid-3col {
+    display: grid !important;
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+    gap: 6px !important;
+  }
+  .srn-controls.srn-grid-2col > .srn-field,
+  .srn-controls.srn-grid-3col > .srn-field {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 4px !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    grid-column: span 1 !important;
+  }
+  .srn-controls.srn-grid-2col > .srn-field label,
+  .srn-controls.srn-grid-3col > .srn-field label {
+    text-align: left !important;
+    font-size: 11px !important;
+    margin: 0 !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+  }
+  .srn-controls.srn-grid-2col > .srn-field select,
+  .srn-controls.srn-grid-3col > .srn-field select {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+    margin: 0 !important;
+  }
+  .srn-controls.srn-grid-2col > button,
+  .srn-controls.srn-grid-3col > button,
+  .srn-controls.srn-grid-2col > .smsg,
+  .srn-controls.srn-grid-3col > .smsg {
+    grid-column: 1 / -1 !important;
+    width: 100% !important;
+    margin-top: 4px !important;
+  }
+
+  /* Connectivity Access Panel: 2x2 Grid & Full-Width Buttons */
+  #page-settings .settings-sections #connPanelAccess .srow {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 8px !important;
+  }
+  #page-settings .settings-sections #connPanelAccess .srow label {
+    grid-column: span 1 !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 4px !important;
+  }
+  #page-settings .settings-sections #connPanelAccess .srow label input,
+  #page-settings .settings-sections #connPanelAccess .srow label select {
+    width: 100% !important;
+    min-width: 0 !important;
+    box-sizing: border-box !important;
+  }
+  #page-settings .settings-sections .sgroup-actions {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 8px !important;
+  }
+  #page-settings .settings-sections .sgroup-actions .btn {
+    width: 100% !important;
+    flex: 1 1 100% !important;
+    justify-content: center !important;
+  }
+  #page-settings .settings-sections .sgroup-actions .smsg {
+    width: 100% !important;
+    text-align: center !important;
+  }
+
+  /* Connectivity Link Tab (Connection & Standby Refresh) 2-column grids */
+  #page-settings .settings-sections #connPanelLink .rep-health-grid,
+  #page-settings .settings-sections #connPanelRuntime .rep-health-grid {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 8px !important;
+  }
+  #page-settings .settings-sections #connPanelLink .rep-health-grid > .license-item,
+  #page-settings .settings-sections #connPanelRuntime .rep-health-grid > .license-item {
+    grid-column: span 1 !important;
+    min-width: 0 !important;
+  }
+  #page-settings .settings-sections #connPanelLink .rep-health-grid > .license-item .license-value,
+  #page-settings .settings-sections #connPanelRuntime .rep-health-grid > .license-item .license-value {
+    overflow-wrap: anywhere !important;
+    word-break: break-word !important;
+    font-size: 11.5px !important;
+  }
+
+  /* Prevent settings cards and tab panels from stretching with empty unused space on mobile */
+  #page-settings .settings-sections > .sgroup.settings-card,
+  #page-settings .settings-sections > .sgroup.settings-card.settings-section-active,
+  #page-settings .settings-sections > .sgroup.settings-card.settings-section-active:has(> .card-tabs),
+  #page-settings .settings-sections > .sgroup.settings-card > .card-tab-panel,
+  #page-settings .settings-sections > .sgroup.settings-card > .card-tab-panel:not([hidden]) {
+    flex: 0 0 auto !important;
+    height: auto !important;
+    min-height: 0 !important;
+    align-content: start !important;
+  }
+
+  /* All settings card action bars full-width stacked on mobile */
+  #page-settings .sgroup-actions {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 8px !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+  }
+  #page-settings .sgroup-actions .btn {
+    width: 100% !important;
+    flex: 1 1 100% !important;
+    justify-content: center !important;
+  }
+  #page-settings .sgroup-actions .smsg {
+    flex: 0 0 auto !important;
+    min-height: 0 !important;
+    height: auto !important;
+    width: 100% !important;
+    text-align: center !important;
+    margin-top: 6px !important;
+  }
+
+  /* ==========================================================================
+     ASSET HEALTH (IGBT / CONTACTOR) MOBILE 4-COLUMN COMPACT TILES
+     ========================================================================== */
+  #page-igbt-health .igbt-fleet-grid-wrapper {
+    padding: 8px 4px !important;
+  }
+  #page-igbt-health .igbt-inverter-group {
+    margin-bottom: 12px !important;
+  }
+  #page-igbt-health .igbt-inverter-title {
+    font-size: 11.5px !important;
+    font-weight: 700 !important;
+    margin-bottom: 5px !important;
+    padding-left: 2px !important;
+  }
+  #page-igbt-health .igbt-fleet-grid {
+    display: grid !important;
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+    gap: 5px !important;
+  }
+  #page-igbt-health .igbt-card {
+    padding: 8px 4px !important;
+    border-radius: 6px !important;
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    gap: 4px !important;
+    min-width: 0 !important;
+    text-align: center !important;
+  }
+  #page-igbt-health .igbt-card-header {
+    width: 100% !important;
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    border-bottom: 1px solid var(--border) !important;
+    padding-bottom: 4px !important;
+    margin-bottom: 2px !important;
+    gap: 3px !important;
+  }
+  #page-igbt-health .igbt-card-title {
+    font-size: 10px !important;
+    font-weight: 700 !important;
+    text-align: center !important;
+    white-space: nowrap !important;
+    line-height: 1.1 !important;
+  }
+  #page-igbt-health .tier-pill {
+    font-size: 7.5px !important;
+    padding: 2px 5px !important;
+    line-height: 1 !important;
+    border-radius: 4px !important;
+    letter-spacing: 0 !important;
+    font-weight: 700 !important;
+  }
+  #page-igbt-health .igbt-card-body {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+    padding: 4px 0 2px 0 !important;
+    width: 100% !important;
+  }
+  #page-igbt-health .igbt-card-score-wrap {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    text-align: center !important;
+  }
+  #page-igbt-health .igbt-card-score-val {
+    font-size: 1.35rem !important;
+    font-weight: 800 !important;
+    line-height: 1 !important;
+  }
+  #page-igbt-health .igbt-card-score-lbl {
+    font-size: 7px !important;
+    margin-top: 2px !important;
+    text-align: center !important;
+    letter-spacing: 0 !important;
+    font-weight: 600 !important;
+    white-space: nowrap !important;
+    color: var(--text2) !important;
+  }
+  /* Hide stats and footer on mobile since each card is clickable for drilldown */
+  #page-igbt-health .igbt-card-stats,
+  #page-igbt-health .igbt-card-footer {
+    display: none !important;
+  }
+
+  /* ==========================================================================
+     ASSET HEALTH TOOLBAR POLISHED MOBILE GRID
+     ========================================================================== */
+  #page-igbt-health .page-toolbar {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+    padding: 8px 6px !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+  }
+  #page-igbt-health .page-toolbar .tl-left,
+  #page-igbt-health .page-toolbar .tl-right {
+    width: 100% !important;
+  }
+  /* 5-Column Grid for Tier Filter Chips */
+  #page-igbt-health .tier-filter-group {
+    display: grid !important;
+    grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
+    gap: 4px !important;
+    width: 100% !important;
+  }
+  #page-igbt-health .tier-chip {
+    width: 100% !important;
+    padding: 6px 2px !important;
+    font-size: 9.5px !important;
+    font-weight: 700 !important;
+    text-align: center !important;
+    justify-content: center !important;
+    border-radius: 6px !important;
+    margin: 0 !important;
+    box-sizing: border-box !important;
+    white-space: nowrap !important;
+  }
+  /* 2x2 Grid for Info & Action Buttons in tl-right */
+  #page-igbt-health .page-toolbar .tl-right {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 6px !important;
+    align-items: stretch !important;
+  }
+  #page-igbt-health .page-toolbar .toolbar-info {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    padding: 6px 8px !important;
+    border-radius: 6px !important;
+    font-size: 10.5px !important;
+    margin: 0 !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+    background: var(--surface2) !important;
+    border: 1px solid var(--border) !important;
+    color: var(--text2) !important;
+    white-space: nowrap !important;
+  }
+  #page-igbt-health .page-toolbar .toolbar-info b {
+    color: var(--text) !important;
+    margin-left: 4px !important;
+  }
+  #page-igbt-health .page-toolbar .toolbar-num-input {
+    width: 44px !important;
+    margin: 0 4px !important;
+    text-align: center !important;
+    height: 22px !important;
+    padding: 0 2px !important;
+  }
+  #page-igbt-health #btnRefreshIgbt {
+    width: 100% !important;
+    height: 32px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 6px !important;
+    font-size: 11.5px !important;
+    font-weight: 600 !important;
+    border-radius: 6px !important;
+    margin: 0 !important;
+  }
+  #page-igbt-health #popout-btn-igbt-health {
+    width: 100% !important;
+    height: 32px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 6px !important;
+    font-size: 11.5px !important;
+    font-weight: 600 !important;
+    border-radius: 6px !important;
+    border: 1px solid var(--border) !important;
+    background: var(--surface2) !important;
+    color: var(--text) !important;
+    margin: 0 !important;
+  }
+  #page-igbt-health #popout-btn-igbt-health .btn-popout-label {
+    display: inline !important;
+  }
+
+  /* ==========================================================================
+     ALARMS PAGE TOOLBAR: 3-COLS INPUTS + 3-COLS BUTTONS GRID
+     ========================================================================== */
+  #page-alarms .page-toolbar {
+    display: grid !important;
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+    gap: 6px !important;
+    padding: 8px 6px !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+  }
+  #page-alarms .page-toolbar .tl-left,
+  #page-alarms .page-toolbar .tl-right {
+    display: contents !important;
+  }
+  #page-alarms .page-toolbar label {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 3px !important;
+    font-size: 10px !important;
+    font-weight: 600 !important;
+    color: var(--text2) !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    margin: 0 !important;
+  }
+  #page-alarms .page-toolbar label:has(#alarmInv) {
+    order: 1 !important;
+    grid-column: span 1 !important;
+  }
+  #page-alarms .page-toolbar label:has(#alarmDate) {
+    order: 2 !important;
+    grid-column: span 1 !important;
+  }
+  #page-alarms .page-toolbar label:has(#alarmMinDur) {
+    order: 3 !important;
+    grid-column: span 1 !important;
+  }
+  #page-alarms .page-toolbar label input,
+  #page-alarms .page-toolbar label select {
+    width: 100% !important;
+    max-width: 100% !important;
+    height: 32px !important;
+    min-width: 0 !important;
+    font-size: 11px !important;
+    box-sizing: border-box !important;
+    padding: 0 4px !important;
+  }
+  #page-alarms .page-toolbar #btnFetchAlarms {
+    order: 4 !important;
+    grid-column: span 1 !important;
+    width: 100% !important;
+    height: 32px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    font-size: 10px !important;
+    font-weight: 600 !important;
+    padding: 0 4px !important;
+    margin: 0 !important;
+    white-space: nowrap !important;
+    border-radius: 6px !important;
+  }
+  #page-alarms .page-toolbar #btnAckAll {
+    order: 5 !important;
+    grid-column: span 1 !important;
+    width: 100% !important;
+    height: 32px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 4px !important;
+    font-size: 10px !important;
+    font-weight: 600 !important;
+    padding: 0 4px !important;
+    margin: 0 !important;
+    white-space: nowrap !important;
+    border-radius: 6px !important;
+  }
+  #page-alarms #alarmCount {
+    display: none !important;
+  }
+  #page-alarms #popout-btn-alarms {
+    order: 6 !important;
+    grid-column: span 1 !important;
+    width: 100% !important;
+    height: 32px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 4px !important;
+    font-size: 10px !important;
+    font-weight: 600 !important;
+    border-radius: 6px !important;
+    border: 1px solid var(--border) !important;
+    background: var(--surface2) !important;
+    color: var(--text) !important;
+    padding: 0 4px !important;
+    margin: 0 !important;
+    white-space: nowrap !important;
+  }
+  #page-alarms #popout-btn-alarms .btn-popout-label {
+    display: inline !important;
+  }
+
+  /* ==========================================================================
+     PARAMETERS (ENERGY LOG) TOOLBAR 2-COLUMN BALANCED MOBILE GRID
+     ========================================================================== */
+  #page-energy .page-toolbar {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 8px !important;
+    padding: 8px 6px !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+  }
+  #page-energy .page-toolbar .tl-left,
+  #page-energy .page-toolbar .tl-right {
+    display: contents !important;
+  }
+  #page-energy #paramModeBadge,
+  #page-energy #paramRowCount {
+    display: none !important;
+  }
+  /* Row 1: Inputs */
+  #page-energy .page-toolbar label:not(.param-adv-toggle) {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 3px !important;
+    font-size: 10.5px !important;
+    font-weight: 600 !important;
+    color: var(--text2) !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    margin: 0 !important;
+  }
+  #page-energy .page-toolbar label:has(#paramInv) {
+    order: 1 !important;
+    grid-column: 1 / 2 !important;
+  }
+  #page-energy .page-toolbar label:has(#paramDate) {
+    order: 2 !important;
+    grid-column: 2 / 3 !important;
+  }
+  #page-energy .page-toolbar label:not(.param-adv-toggle) input,
+  #page-energy .page-toolbar label:not(.param-adv-toggle) select {
+    width: 100% !important;
+    max-width: 100% !important;
+    height: 34px !important;
+    min-width: 0 !important;
+    font-size: 11.5px !important;
+    box-sizing: border-box !important;
+    padding: 0 6px !important;
+  }
+  /* Row 2: Action Buttons */
+  #page-energy #btnParamRefresh {
+    order: 3 !important;
+    grid-column: 1 / 2 !important;
+    width: 100% !important;
+    height: 34px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 6px !important;
+    font-size: 11.5px !important;
+    font-weight: 600 !important;
+    border-radius: 6px !important;
+    margin: 0 !important;
+    white-space: nowrap !important;
+  }
+  #page-energy #btnParamFleetToggle {
+    order: 4 !important;
+    grid-column: 2 / 3 !important;
+    width: 100% !important;
+    height: 34px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 6px !important;
+    font-size: 11.5px !important;
+    font-weight: 600 !important;
+    border-radius: 6px !important;
+    margin: 0 !important;
+    white-space: nowrap !important;
+  }
+  /* Row 3: Checkbox and Info Badge */
+  #page-energy .param-adv-toggle {
+    order: 5 !important;
+    grid-column: 1 / 2 !important;
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 6px !important;
+    font-size: 10px !important;
+    padding: 0 6px !important;
+    border-radius: 6px !important;
+    border: 1px solid var(--border) !important;
+    background: var(--surface2) !important;
+    color: var(--text2) !important;
+    margin: 0 !important;
+    height: 34px !important;
+    box-sizing: border-box !important;
+    white-space: nowrap !important;
+    cursor: pointer !important;
+  }
+  #page-energy .param-adv-toggle input[type="checkbox"] {
+    width: 14px !important;
+    height: 14px !important;
+    max-width: 14px !important;
+    min-width: 14px !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    flex-shrink: 0 !important;
+  }
+  #page-energy #paramSolarBadge {
+    order: 6 !important;
+    grid-column: 2 / 3 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    padding: 0 6px !important;
+    border-radius: 6px !important;
+    border: 1px solid var(--border) !important;
+    background: var(--surface2) !important;
+    font-size: 10px !important;
+    color: var(--text2) !important;
+    margin: 0 !important;
+    height: 34px !important;
+    box-sizing: border-box !important;
+    white-space: nowrap !important;
+    text-align: center !important;
+  }
+
+  /* ==========================================================================
+     AUDIT LOG PAGE TOOLBAR: 2-COLS INPUTS + FULL-WIDTH BUTTON
+     ========================================================================== */
+  #page-audit .page-toolbar {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 8px !important;
+    padding: 8px 6px !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+  }
+  #page-audit .page-toolbar .tl-left,
+  #page-audit .page-toolbar .tl-right {
+    display: contents !important;
+  }
+  #page-audit .page-toolbar label {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 3px !important;
+    font-size: 10.5px !important;
+    font-weight: 600 !important;
+    color: var(--text2) !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    margin: 0 !important;
+  }
+  #page-audit .page-toolbar label:has(#auditInv) {
+    order: 1 !important;
+    grid-column: 1 / 2 !important;
+  }
+  #page-audit .page-toolbar label:has(#auditDate) {
+    order: 2 !important;
+    grid-column: 2 / 3 !important;
+  }
+  #page-audit .page-toolbar label input,
+  #page-audit .page-toolbar label select {
+    width: 100% !important;
+    max-width: 100% !important;
+    height: 34px !important;
+    min-width: 0 !important;
+    font-size: 11.5px !important;
+    box-sizing: border-box !important;
+    padding: 0 6px !important;
+  }
+  #page-audit #btnFetchAudit {
+    order: 3 !important;
+    grid-column: 1 / -1 !important;
+    width: 100% !important;
+    height: 34px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    font-size: 11.5px !important;
+    font-weight: 600 !important;
+    border-radius: 6px !important;
+    margin: 0 !important;
+  }
+  #page-audit #auditCount {
+    display: none !important;
+  }
+
+  /* ==========================================================================
+     REPORT PAGE TOOLBAR: FULL-WIDTH INPUTS/BUTTONS + 3-COL BALANCED KPIS
+     ========================================================================== */
+  #page-report .page-toolbar {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+    padding: 8px 6px !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+  }
+  #page-report .page-toolbar .tl-left {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 6px !important;
+    width: 100% !important;
+  }
+  #page-report .page-toolbar .tl-left label {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 3px !important;
+    font-size: 10.5px !important;
+    font-weight: 600 !important;
+    color: var(--text2) !important;
+    width: 100% !important;
+    margin: 0 !important;
+  }
+  #page-report .page-toolbar .tl-left label input {
+    width: 100% !important;
+    max-width: 100% !important;
+    height: 34px !important;
+    box-sizing: border-box !important;
+    font-size: 11.5px !important;
+    padding: 0 6px !important;
+  }
+  #page-report #btnFetchReport {
+    width: 100% !important;
+    height: 34px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    font-size: 11.5px !important;
+    font-weight: 600 !important;
+    border-radius: 6px !important;
+    margin: 0 !important;
+  }
+  #page-report #reportKpis {
+    display: grid !important;
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+    gap: 6px !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+    margin: 0 !important;
+  }
+  #page-report .kpi-box {
+    min-width: 0 !important;
+    width: 100% !important;
+    padding: 6px 3px !important;
+    box-sizing: border-box !important;
+    text-align: center !important;
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+    border-radius: 6px !important;
+    margin: 0 !important;
+  }
+  #page-report .kpi-label {
+    font-size: 7.5px !important;
+    text-transform: uppercase !important;
+    font-weight: 700 !important;
+    line-height: 1.15 !important;
+    text-align: center !important;
+    white-space: normal !important;
+    letter-spacing: 0 !important;
+    color: var(--text2) !important;
+  }
+  #page-report .kpi-val {
+    font-size: 12px !important;
+    font-weight: 800 !important;
+    line-height: 1.1 !important;
+    margin-top: 3px !important;
+  }
+
+  /* ==========================================================================
+     EXPORT PAGE: DYNAMIC 2x2, 3x1, 2x1 FORM GRIDS ON MOBILE
+     ========================================================================== */
+  #page-export .export-grid {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 12px !important;
+    width: 100% !important;
+    padding: 0 !important;
+    box-sizing: border-box !important;
+  }
+  #page-export .exp-card {
+    display: flex !important;
+    flex-direction: column !important;
+    width: 100% !important;
+    min-height: 0 !important;
+    height: auto !important;
+    flex: 0 0 auto !important;
+    padding: 14px 12px !important;
+    gap: 8px !important;
+    box-sizing: border-box !important;
+    position: relative !important;
+  }
+  #page-export .exp-head {
+    display: flex !important;
+    align-items: center !important;
+    gap: 10px !important;
+    width: 100% !important;
+    flex: 0 0 auto !important;
+  }
+  /* Hide descriptions and notes across the entire export section on mobile */
+  #page-export .exp-desc,
+  #page-export .exp-note {
+    display: none !important;
+  }
+  #page-export .exp-form {
+    display: grid !important;
+    gap: 6px !important;
+    width: 100% !important;
+    height: auto !important;
+    flex: 0 0 auto !important;
+    align-content: start !important;
+    box-sizing: border-box !important;
+  }
+  /* 4 fields: 2x2 */
+  #page-export .exp-form:has(> label:nth-child(4)) {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+  /* 3 fields: 3x1 */
+  #page-export .exp-form:has(> label:nth-child(3)):not(:has(> label:nth-child(4))) {
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  }
+  /* 2 fields: 2x1 */
+  #page-export .exp-form:has(> label:nth-child(2)):not(:has(> label:nth-child(3))) {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+  /* Day-Ahead Forecast Export: Source full-width (Row 1), remaining 4 fields in 2x2 grid */
+  #page-export .exp-form:has(#expForecastSource) {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+  #page-export .exp-form label:has(#expForecastSource) {
+    grid-column: 1 / -1 !important;
+  }
+  #page-export .exp-form label:has(#expForecastDate) {
+    grid-column: 1 / 2 !important;
+  }
+  #page-export .exp-form label:has(#expForecastResolution) {
+    grid-column: 2 / 3 !important;
+  }
+  #page-export .exp-form label:has(#expForecastExportFormat) {
+    grid-column: 1 / 2 !important;
+  }
+  #page-export .exp-form label:has(#expForecastFormat) {
+    grid-column: 2 / 3 !important;
+  }
+  #page-export .exp-form label {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 2px !important;
+    font-size: 10px !important;
+    font-weight: 600 !important;
+    color: var(--text2) !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    height: auto !important;
+    flex: 0 0 auto !important;
+    margin: 0 !important;
+  }
+  #page-export .exp-form label .sel,
+  #page-export .exp-form label .inp {
+    width: 100% !important;
+    max-width: 100% !important;
+    height: 30px !important;
+    max-height: 30px !important;
+    min-height: 30px !important;
+    min-width: 0 !important;
+    flex: 0 0 30px !important;
+    font-size: 10.5px !important;
+    box-sizing: border-box !important;
+    padding: 0 6px !important;
+    border-radius: 5px !important;
+  }
+  /* Action buttons side-by-side */
+  #page-export .exp-actions {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 6px !important;
+    width: 100% !important;
+    flex: 0 0 auto !important;
+    margin-top: 6px !important;
+  }
+  #page-export .exp-actions:has(> .btn:only-child) {
+    grid-template-columns: 1fr !important;
+  }
+  #page-export .exp-actions.exp-actions--triple {
+    display: grid !important;
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+    gap: 6px !important;
+  }
+  #page-export .exp-actions .btn {
+    width: 100% !important;
+    height: 32px !important;
+    min-height: 32px !important;
+    max-height: 32px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 5px !important;
+    font-size: 11px !important;
+    padding: 0 4px !important;
+    border-radius: 5px !important;
+    margin: 0 !important;
+  }
+
+  /* ==========================================================================
+     PLANT CONTROLLER: TOOLBAR, HERO METRICS, 2/3-COL FORM, 4-COL ACTIONS, 2x4 STATUS
+     ========================================================================== */
+  #page-plant-cap .page-toolbar {
+    display: grid !important;
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+    gap: 4px !important;
+    padding: 8px 6px !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+    align-items: stretch !important;
+  }
+  #page-plant-cap .page-toolbar .tl-left,
+  #page-plant-cap .page-toolbar .tl-right {
+    display: contents !important;
+  }
+  #page-plant-cap .page-toolbar .toolbar-info {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    height: 32px !important;
+    min-height: 32px !important;
+    padding: 0 4px !important;
+    border-radius: 5px !important;
+    font-size: 8.5px !important;
+    background: var(--surface2) !important;
+    border: 1px solid var(--border) !important;
+    color: var(--text2) !important;
+    white-space: nowrap !important;
+    text-align: center !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+    margin: 0 !important;
+  }
+  #page-plant-cap .page-toolbar .toolbar-info b {
+    color: var(--text) !important;
+    margin-left: 2px !important;
+    font-size: 9px !important;
+  }
+  #page-plant-cap #btnAddCapScheduleToolbar {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    height: 32px !important;
+    min-height: 32px !important;
+    padding: 0 4px !important;
+    border-radius: 5px !important;
+    font-size: 8.5px !important;
+    font-weight: 700 !important;
+    white-space: nowrap !important;
+    margin: 0 !important;
+    width: 100% !important;
+    gap: 2px !important;
+  }
+  #page-plant-cap #btnAddCapScheduleToolbar .mdi {
+    font-size: 11px !important;
+  }
+
+  /* 4-column single row for hero metrics */
+  #page-plant-cap .plant-cap-metrics,
+  .plant-cap-panel .plant-cap-metrics,
+  #plantCapPanel .plant-cap-metrics,
+  .plant-cap-metrics {
+    display: grid !important;
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+    gap: 4px !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+  }
+  #page-plant-cap .plant-cap-metric,
+  .plant-cap-panel .plant-cap-metric,
+  #plantCapPanel .plant-cap-metric,
+  .plant-cap-metric {
+    min-width: 0 !important;
+    width: 100% !important;
+    padding: 6px 3px !important;
+    border-radius: 6px !important;
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+    text-align: center !important;
+    box-sizing: border-box !important;
+    gap: 2px !important;
+  }
+  .plant-cap-metric span {
+    font-size: 7.5px !important;
+    line-height: 1.1 !important;
+    text-align: center !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    width: 100% !important;
+  }
+  .plant-cap-metric strong {
+    font-size: 11px !important;
+    line-height: 1.1 !important;
+    text-align: center !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    width: 100% !important;
+  }
+
+  /* Form: Row 1 is 2-columns (Upper + Lower MW), Row 2 is 3-columns (Sequence + Exempted + Cooldown) */
+  #page-plant-cap .plant-cap-form,
+  .plant-cap-panel .plant-cap-form,
+  #plantCapPanel .plant-cap-form,
+  .plant-cap-form {
+    display: grid !important;
+    grid-template-columns: repeat(6, minmax(0, 1fr)) !important;
+    gap: 6px !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+  }
+  .plant-cap-form label {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 2px !important;
+    font-size: 10px !important;
+    font-weight: 600 !important;
+    color: var(--text2) !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    margin: 0 !important;
+  }
+  .plant-cap-form label:has(#plantCapUpperMw) {
+    grid-column: 1 / 4 !important;
+  }
+  .plant-cap-form label:has(#plantCapLowerMw) {
+    grid-column: 4 / 7 !important;
+  }
+  .plant-cap-form label:has(#plantCapSequenceMode) {
+    grid-column: 1 / 3 !important;
+  }
+  .plant-cap-form #plantCapSequenceCustomWrap {
+    grid-column: 3 / 5 !important;
+    display: flex !important;
+  }
+  .plant-cap-form label:has(#plantCapCooldownSec) {
+    grid-column: 5 / 7 !important;
+  }
+  .plant-cap-form label input,
+  .plant-cap-form label select {
+    width: 100% !important;
+    max-width: 100% !important;
+    height: 30px !important;
+    min-height: 30px !important;
+    min-width: 0 !important;
+    font-size: 10.5px !important;
+    box-sizing: border-box !important;
+    padding: 0 4px !important;
+    border-radius: 5px !important;
+  }
+
+  /* Plant cap action buttons: 4-column single row on mobile */
+  #page-plant-cap .plant-cap-actions,
+  .plant-cap-panel .plant-cap-actions,
+  #plantCapPanel .plant-cap-actions,
+  .plant-cap-actions {
+    display: grid !important;
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+    gap: 4px !important;
+    width: 100% !important;
+    margin-top: 8px !important;
+  }
+  .plant-cap-actions .btn {
+    width: 100% !important;
+    height: 32px !important;
+    min-height: 32px !important;
+    font-size: 8px !important;
+    font-weight: 700 !important;
+    padding: 0 2px !important;
+    border-radius: 5px !important;
+    margin: 0 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    text-align: center !important;
+    white-space: normal !important;
+    line-height: 1.1 !important;
+  }
+
+  /* Plant Controller Status Grid: 2-Columns x 4-Rows on Mobile */
+  #page-plant-cap .plant-cap-status-grid,
+  .plant-cap-panel .plant-cap-status-grid,
+  #plantCapPanel .plant-cap-status-grid,
+  .plant-cap-status-grid {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 6px !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+    margin-top: 8px !important;
+  }
+  .plant-cap-status-item {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    justify-content: center !important;
+    min-width: 0 !important;
+    width: 100% !important;
+    padding: 6px 8px !important;
+    border-radius: 6px !important;
+    gap: 2px !important;
+    box-sizing: border-box !important;
+    min-height: 44px !important;
+  }
+  .plant-cap-status-item span {
+    font-size: 7.5px !important;
+    font-weight: 700 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.3px !important;
+    color: var(--text3) !important;
+    line-height: 1.1 !important;
+  }
+  .plant-cap-status-item strong {
+    font-size: 10.5px !important;
+    font-weight: 700 !important;
+    color: var(--text) !important;
+    line-height: 1.2 !important;
+    word-break: break-word !important;
+  }
+
+  /* ==========================================================================
+     NEW / EDIT SCHEDULE MODAL: 2x4 GRID + FULL-WIDTH SAVE BUTTON ON MOBILE
+     ========================================================================== */
+  #capScheduleModal .cap-sched-modal-card {
+    width: 95vw !important;
+    max-height: 90vh !important;
+    padding: 0 !important;
+  }
+  #capScheduleModal .cap-sched-form {
+    padding: 12px 10px !important;
+  }
+  #capScheduleModal .cap-sched-form-grid {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 6px !important;
+    margin-bottom: 8px !important;
+  }
+  #capScheduleModal .cap-sched-field {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 2px !important;
+    grid-column: span 1 !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    margin: 0 !important;
+  }
+  #capScheduleModal .cap-sched-field-wide {
+    grid-column: span 1 !important;
+  }
+  #capScheduleModal .cap-sched-label {
+    font-size: 10px !important;
+    font-weight: 700 !important;
+    color: var(--text2) !important;
+    white-space: nowrap !important;
+  }
+  #capScheduleModal .cap-sched-modal-card .inp,
+  #capScheduleModal .cap-sched-modal-card .sel {
+    width: 100% !important;
+    max-width: 100% !important;
+    height: 32px !important;
+    min-height: 32px !important;
+    min-width: 0 !important;
+    font-size: 11px !important;
+    box-sizing: border-box !important;
+    padding: 0 6px !important;
+    border-radius: 5px !important;
+  }
+  /* Hide help descriptions on mobile for compact layout */
+  #capScheduleModal .cap-sched-help {
+    display: none !important;
+  }
+  /* Buttons: Full width Save button, remove redundant Cancel button */
+  #capScheduleModal .cap-sched-form-actions {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 6px !important;
+    width: 100% !important;
+    padding-top: 8px !important;
+    margin-top: 6px !important;
+    border-top: 1px solid var(--border) !important;
+  }
+  #capScheduleModal #btnSaveCapSchedule {
+    width: 100% !important;
+    height: 36px !important;
+    min-height: 36px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    font-size: 12px !important;
+    font-weight: 700 !important;
+    border-radius: 6px !important;
+    margin: 0 !important;
+  }
+  #capScheduleModal #btnCancelCapSchedule {
+    display: none !important;
+  }
+
+  
+  /* ==========================================================================
+     PLANT CONTROLLER: 2-ROW 100% VISIBLE TAB GRID ON MOBILE
+     ========================================================================== */
+  .plant-cap-tab-strip {
+    display: grid !important;
+    grid-template-columns: repeat(12, minmax(0, 1fr)) !important;
+    gap: 4px !important;
+    padding: 6px !important;
+    background: var(--surface2) !important;
+    border-radius: 8px !important;
+    margin: 4px 6px 8px !important;
+    border: 1px solid var(--border) !important;
+    overflow: visible !important;
+    box-sizing: border-box !important;
+    width: calc(100% - 12px) !important;
+  }
+  .plant-cap-tab-divider {
+    display: none !important;
+  }
+  /* ROW 1: APC Group + 3 tabs */
+  .plant-cap-tab-group:first-of-type {
+    grid-column: span 3 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    height: 28px !important;
+    min-height: 28px !important;
+    font-size: 9px !important;
+    font-weight: 800 !important;
+    letter-spacing: 0.5px !important;
+    border-radius: 5px !important;
+    background: color-mix(in srgb, var(--accent) 15%, transparent) !important;
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent) !important;
+    color: var(--accent) !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    text-align: center !important;
+  }
+  .plant-cap-tab-btn[data-tab="mw-cap"],
+  .plant-cap-tab-btn[data-tab="apc"],
+  .plant-cap-tab-btn[data-tab="grid-control"] {
+    grid-column: span 3 !important;
+  }
+
+  /* ROW 2: GRID TESTS Group + 4 tabs */
+  .plant-cap-tab-group:last-of-type {
+    grid-column: span 4 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    height: 28px !important;
+    min-height: 28px !important;
+    font-size: 8px !important;
+    font-weight: 800 !important;
+    letter-spacing: 0.4px !important;
+    border-radius: 5px !important;
+    background: color-mix(in srgb, #818cf8 15%, transparent) !important;
+    border: 1px solid color-mix(in srgb, #818cf8 40%, transparent) !important;
+    color: #818cf8 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    text-align: center !important;
+  }
+  .plant-cap-tab-btn[data-tab="t2"],
+  .plant-cap-tab-btn[data-tab="t3"],
+  .plant-cap-tab-btn[data-tab="t5"],
+  .plant-cap-tab-btn[data-tab="reports"] {
+    grid-column: span 2 !important;
+  }
+
+  /* Base button styling */
+  .plant-cap-tab-btn {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    height: 28px !important;
+    min-height: 28px !important;
+    padding: 0 2px !important;
+    border-radius: 5px !important;
+    font-size: 9px !important;
+    font-weight: 600 !important;
+    color: var(--text2) !important;
+    background: var(--surface) !important;
+    border: 1px solid var(--border) !important;
+    margin: 0 !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    text-align: center !important;
+    box-sizing: border-box !important;
+    cursor: pointer !important;
+    transition: all 0.15s ease !important;
+  }
+  .plant-cap-tab-btn:hover {
+    color: var(--text) !important;
+    background: color-mix(in srgb, var(--text) 6%, var(--surface)) !important;
+  }
+  .plant-cap-tab-btn.active {
+    color: #ffffff !important;
+    background: linear-gradient(135deg, var(--accent) 0%, color-mix(in srgb, var(--accent) 80%, #000) 100%) !important;
+    border-color: var(--accent) !important;
+    box-shadow: 0 2px 6px color-mix(in srgb, var(--accent) 35%, transparent) !important;
+    font-weight: 700 !important;
+  }
+
+
+  /* ==========================================================================
+     PLANT CONTROLLER: POLISH ALL TABS (APC, GRID CODE, T2, T3, T5, REPORTS)
+     ========================================================================== */
+  .plant-cap-tab-pane {
+    width: 100% !important;
+    box-sizing: border-box !important;
+    padding: 0 4px !important;
+  }
+
+  /* --- APC (%P Setpoint) Tab Polish --- */
+  .apc-panel {
+    padding: 12px 10px !important;
+    margin: 0 !important;
+    border-radius: 10px !important;
+    gap: 10px !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+  }
+  .apc-panel-title {
+    font-size: 13px !important;
+  }
+  .apc-panel-subtitle {
+    font-size: 10px !important;
+  }
+  .apc-lockout-banner {
+    padding: 8px 10px !important;
+    font-size: 10.5px !important;
+    border-radius: 6px !important;
+    margin-bottom: 4px !important;
+  }
+  .apc-form-grid {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+    width: 100% !important;
+  }
+  .apc-field {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 3px !important;
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+  .apc-field-lbl {
+    font-size: 10px !important;
+    font-weight: 700 !important;
+    color: var(--text2) !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.3px !important;
+    margin: 0 !important;
+  }
+  .apc-scope-row {
+    display: grid !important;
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+    gap: 4px !important;
+    width: 100% !important;
+  }
+  .apc-chip-radio {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    height: 32px !important;
+    min-height: 32px !important;
+    padding: 0 2px !important;
+    border-radius: 5px !important;
+    font-size: 9.5px !important;
+    font-weight: 600 !important;
+    margin: 0 !important;
+    text-align: center !important;
+  }
+  .apc-chip-radio input {
+    display: none !important;
+  }
+  .apc-target-row {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 6px !important;
+    width: 100% !important;
+  }
+  .apc-target-row .sel {
+    width: 100% !important;
+    height: 32px !important;
+    min-height: 32px !important;
+    font-size: 11px !important;
+    padding: 0 6px !important;
+    border-radius: 5px !important;
+  }
+  .apc-current-pill {
+    grid-column: 1 / -1 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    height: 30px !important;
+    padding: 0 10px !important;
+    border-radius: 5px !important;
+    font-size: 10.5px !important;
+    background: var(--surface) !important;
+    border: 1px solid var(--border) !important;
+    margin: 0 !important;
+  }
+  .apc-setpoint-row {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 6px !important;
+    width: 100% !important;
+  }
+  .apc-pct-input {
+    width: 100% !important;
+    display: flex !important;
+    align-items: center !important;
+    position: relative !important;
+  }
+  .apc-pct-input .inp {
+    width: 100% !important;
+    height: 34px !important;
+    min-height: 34px !important;
+    font-size: 13px !important;
+    font-weight: 700 !important;
+    padding: 0 24px 0 8px !important;
+    border-radius: 6px !important;
+  }
+  .apc-pct-suffix {
+    position: absolute !important;
+    right: 10px !important;
+    font-size: 12px !important;
+    font-weight: 700 !important;
+    color: var(--text3) !important;
+  }
+  .apc-presets {
+    display: grid !important;
+    grid-template-columns: repeat(6, minmax(0, 1fr)) !important;
+    gap: 4px !important;
+    width: 100% !important;
+  }
+  .apc-preset-btn {
+    height: 28px !important;
+    min-height: 28px !important;
+    padding: 0 !important;
+    font-size: 10px !important;
+    font-weight: 700 !important;
+    border-radius: 4px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+  }
+  /* Hide multi-paragraph helper prose on mobile */
+  .apc-field-help,
+  .apc-field-auth-note,
+  .apc-actions-help {
+    display: none !important;
+  }
+  /* APC Action Buttons: 3-column row */
+  .apc-actions {
+    display: grid !important;
+    grid-template-columns: 1fr 1fr 1.4fr !important;
+    gap: 5px !important;
+    width: 100% !important;
+    margin-top: 6px !important;
+  }
+  .apc-actions .btn {
+    height: 34px !important;
+    min-height: 34px !important;
+    font-size: 10.5px !important;
+    font-weight: 700 !important;
+    padding: 0 4px !important;
+    border-radius: 6px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 3px !important;
+    margin: 0 !important;
+  }
+  .apc-actions-divider {
+    display: none !important;
+  }
+  .apc-ramp-row {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 4px !important;
+    padding: 8px 10px !important;
+    border-radius: 6px !important;
+    font-size: 10.5px !important;
+    margin-top: 6px !important;
+  }
+
+  /* --- Grid Code & Compliance Test Panels (T2, T3, T5, Reports) --- */
+  .cmp-panel {
+    padding: 12px 10px !important;
+    margin: 0 !important;
+    border-radius: 10px !important;
+    gap: 10px !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+  }
+  .cmp-panel-head {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 4px !important;
+    width: 100% !important;
+  }
+  .cmp-panel-title {
+    font-size: 13px !important;
+    font-weight: 700 !important;
+  }
+  /* Hide verbose test guides & explanations on mobile */
+  .cmp-panel-sub,
+  .cmp-howto {
+    display: none !important;
+  }
+  /* Test configuration controls */
+  .cmp-controls,
+  .cmp-form,
+  .cmp-ctrl-grid {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 6px !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+  }
+  .cmp-controls label,
+  .cmp-form label {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 2px !important;
+    font-size: 10px !important;
+    font-weight: 600 !important;
+    color: var(--text2) !important;
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+  .cmp-controls .inp,
+  .cmp-controls .sel,
+  .cmp-form .inp,
+  .cmp-form .sel {
+    width: 100% !important;
+    height: 32px !important;
+    min-height: 32px !important;
+    font-size: 11px !important;
+    padding: 0 6px !important;
+    border-radius: 5px !important;
+    box-sizing: border-box !important;
+  }
+  /* Compliance Action Buttons */
+  .cmp-actions {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 6px !important;
+    width: 100% !important;
+    margin-top: 6px !important;
+  }
+  .cmp-actions .btn {
+    width: 100% !important;
+    height: 34px !important;
+    min-height: 34px !important;
+    font-size: 11px !important;
+    font-weight: 700 !important;
+    padding: 0 4px !important;
+    border-radius: 6px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    margin: 0 !important;
+  }
+  /* Compliance Run Reports Table */
+  .cmp-runs-table-wrap,
+  .plant-cap-controlled-wrap {
+    width: 100% !important;
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+    border-radius: 6px !important;
+  }
+  .cmp-runs-table th,
+  .cmp-runs-table td {
+    padding: 6px 6px !important;
+    font-size: 10.5px !important;
+    white-space: nowrap !important;
+  }
+
+
+  
+  
+  
+  
+  /* ==========================================================================
+     STRICT NO-OVERLAP OVERRIDES FOR ALL MOBILE FORM FIELDS & TARGET SELECTORS
+     ========================================================================== */
+  .cmp-target-row {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 8px !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+    align-items: start !important;
+  }
+  .cmp-target-row--params {
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  }
+  .cmp-field {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 3px !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+    margin: 0 !important;
+  }
+  .cmp-field--wide {
+    grid-column: 1 / -1 !important;
+  }
+  .cmp-field-ip {
+    display: none !important;
+  }
+  .cmp-field .cmp-label {
+    display: block !important;
+    font-size: 9.5px !important;
+    font-weight: 700 !important;
+    color: var(--text2) !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.3px !important;
+    margin: 0 !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+  }
+  .cmp-field .cmp-sel,
+  .cmp-field .cmp-text,
+  .cmp-field .cmp-text-flex,
+  .cmp-field .cmp-num,
+  .cmp-field .inp,
+  .cmp-field .sel,
+  .cmp-field select,
+  .cmp-field input,
+  .cmp-target-row select,
+  .cmp-target-row input {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+    height: 32px !important;
+    min-height: 32px !important;
+    max-height: 32px !important;
+    font-size: 11px !important;
+    box-sizing: border-box !important;
+    padding: 0 6px !important;
+    border-radius: 5px !important;
+    margin: 0 !important;
+    text-overflow: ellipsis !important;
+  }
+
+  /* Results tiles: 3-column balanced grid */
+  .cmp-results {
+    display: grid !important;
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+    gap: 5px !important;
+    width: 100% !important;
+    margin: 8px 0 !important;
+  }
+  .cmp-result-row {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+    height: 48px !important;
+    min-height: 48px !important;
+    padding: 4px 2px !important;
+    border-radius: 6px !important;
+    background: var(--surface2) !important;
+    border: 1px solid var(--border) !important;
+    box-sizing: border-box !important;
+    text-align: center !important;
+    gap: 2px !important;
+    min-width: 0 !important;
+    overflow: hidden !important;
+  }
+  .cmp-result-row span {
+    font-size: 7.5px !important;
+    font-weight: 700 !important;
+    text-transform: uppercase !important;
+    color: var(--text3) !important;
+    line-height: 1 !important;
+    display: block !important;
+    width: 100% !important;
+    text-align: center !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+  }
+  .cmp-result-row b {
+    font-size: 11px !important;
+    font-weight: 700 !important;
+    color: var(--text) !important;
+    line-height: 1.1 !important;
+    display: block !important;
+    width: 100% !important;
+    text-align: center !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+  }
+
+  /* Live feed header */
+  .cmp-live-feed-head {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 2px !important;
+    margin-bottom: 6px !important;
+  }
+  .cmp-live-feed-title {
+    font-size: 11px !important;
+    font-weight: 700 !important;
+  }
+  .cmp-live-feed-sub {
+    font-size: 9.5px !important;
+    color: var(--text3) !important;
+  }
+
 }

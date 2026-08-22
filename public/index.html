@@ -16,7 +16,7 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black" />
     <meta name="apple-mobile-web-app-title" content="ADSI Dashboard" />
     <link rel="apple-touch-icon" href="/assets/icon-256.png" />
-    <link rel="stylesheet" href="css/style.css?v=9" />
+    <link rel="stylesheet" href="css/style.css?v=76" />
     <script>
       // Pre-paint calibrator-mode gate. Runs during <head> parsing — before
       // <body> exists — so the fleet dashboard chrome is hidden on the very
@@ -339,6 +339,7 @@
             <button id="popout-btn-alarms" class="btn-popout" type="button"
                     title="Open Alarms in a new window">
               <span class="mdi mdi-open-in-new" aria-hidden="true"></span>
+              <span class="btn-popout-label">New Window</span>
             </button>
           </div>
         </div>
@@ -1091,6 +1092,7 @@
             <button id="popout-btn-igbt-health" class="btn-popout" type="button"
                     title="Open Asset Health in a new window">
               <span class="mdi mdi-open-in-new" aria-hidden="true"></span>
+              <span class="btn-popout-label">New Window</span>
             </button>
           </div>
         </div>
@@ -1875,7 +1877,7 @@
             <div class="card-tabs" role="tablist" aria-label="Data and polling sub-sections">
               <button id="opsTabEndpoints" class="card-tab active" type="button" role="tab" aria-selected="true" aria-controls="opsPanelEndpoints" data-card-tab="endpoints" title="Python inverter service endpoints (data + write).">
                 <span class="mdi mdi-api icon-inline" aria-hidden="true"></span>
-                <span class="card-tab-label">Service Endpoints</span>
+                <span class="card-tab-label">Endpoints</span>
               </button>
               <button id="opsTabStorage" class="card-tab" type="button" role="tab" aria-selected="false" aria-controls="opsPanelStorage" data-card-tab="storage" title="Local export folder and retention window for raw readings.">
                 <span class="mdi mdi-database-cog-outline icon-inline" aria-hidden="true"></span>
@@ -1883,64 +1885,31 @@
               </button>
               <button id="opsTabPolling" class="card-tab" type="button" role="tab" aria-selected="false" aria-controls="opsPanelPolling" data-card-tab="polling" title="Modbus timeout, reconnect delay, and read spacing.">
                 <span class="mdi mdi-timer-cog-outline icon-inline" aria-hidden="true"></span>
-                <span class="card-tab-label">Polling Timing</span>
+                <span class="card-tab-label">Polling</span>
               </button>
             </div>
             <div id="opsPanelEndpoints" class="card-tab-panel active" data-card-tab-panel="endpoints" role="tabpanel" aria-labelledby="opsTabEndpoints">
               <div class="settings-subsection">
                 <div class="srow">
-                  <label
-                    >Data API URL<input
-                      type="text"
-                      id="setApiUrl"
-                      class="inp inp-lg"
-                      placeholder="http://127.0.0.1:9100/data"
-                      title="Python inverter service data endpoint (default http://127.0.0.1:9100/data). Provides live Modbus register readings to the Express server."
-                  /></label>
-                  <label
-                    >Write API URL<input
-                      type="text"
-                      id="setWriteUrl"
-                      class="inp inp-lg"
-                      placeholder="http://127.0.0.1:9100/write"
-                      title="Python inverter service write endpoint (default http://127.0.0.1:9100/write). Sends START/STOP control commands to inverters via Modbus."
-                  /></label>
+                  <label>Data API URL<input type="text" id="setApiUrl" class="inp inp-lg" placeholder="http://127.0.0.1:9100/data" title="Python inverter service data endpoint (default http://127.0.0.1:9100/data). Provides live Modbus register readings to the Express server." /></label>
+                  <label>Write API URL<input type="text" id="setWriteUrl" class="inp inp-lg" placeholder="http://127.0.0.1:9100/write" title="Python inverter service write endpoint (default http://127.0.0.1:9100/write). Sends START/STOP control commands to inverters via Modbus." /></label>
                 </div>
               </div>
             </div>
             <div id="opsPanelStorage" class="card-tab-panel" data-card-tab-panel="storage" role="tabpanel" aria-labelledby="opsTabStorage" hidden>
               <div class="settings-subsection">
                 <div class="srow">
-                  <label
-                    >Export Folder<input
-                      type="text"
-                      id="setCsvPath"
-                      class="inp inp-lg"
-                      placeholder="C:\Logs\InverterDashboard"
-                      title="Local folder where CSV and Excel export files are saved. Subfolders are created per inverter and category."
-                  /></label>
-                  <label
-                    >Retention Window (days)<input
-                      type="number"
-                      id="setRetainDays"
-                      class="inp inp-sm"
-                      min="1"
-                      max="1095"
-                      title="Number of days to keep raw readings and 5-min energy data in the hot database before archiving (1-1095)."
-                  /></label>
+                  <label>Export Folder<input type="text" id="setCsvPath" class="inp inp-lg" placeholder="C:\Logs\InverterDashboard" title="Local folder where CSV and Excel export files are saved. Subfolders are created per inverter and category." /></label>
+                  <label>Retention (days)<input type="number" id="setRetainDays" class="inp inp-sm" min="1" max="1095" title="Number of days to keep raw readings and 5-min energy data in the hot database before archiving (1-1095)." /></label>
                 </div>
               </div>
             </div>
             <div id="opsPanelPolling" class="card-tab-panel" data-card-tab-panel="polling" role="tabpanel" aria-labelledby="opsTabPolling" hidden>
               <div class="settings-subsection">
-                <div class="srow">
-                  <label>Modbus Timeout (s)<input type="number" id="setPollModbusTimeout" class="inp inp-sm" min="0.2" max="10" step="0.1" title="Maximum seconds to wait for each Modbus register read before timing out. Increase for slow or high-latency links." /></label>
-                </div>
-                <div class="srow">
-                  <label>Reconnect Delay (s)<input type="number" id="setPollReconnectDelay" class="inp inp-sm" min="0.1" max="10" step="0.1" title="Seconds to wait before retrying a read after the TCP connection to an inverter is re-established." /></label>
-                </div>
-                <div class="srow">
-                  <label>Read Spacing (s)<input type="number" id="setPollReadSpacing" class="inp inp-sm" min="0.001" max="1" step="0.001" title="Short pause in seconds between consecutive Modbus register group reads to reduce device communication pressure." /></label>
+                <div class="srow" id="opsPollingRow">
+                  <label>Timeout<input type="number" id="setPollModbusTimeout" class="inp inp-sm" min="0.2" max="10" step="0.1" title="Timeout (s)" /></label>
+                  <label>Delay<input type="number" id="setPollReconnectDelay" class="inp inp-sm" min="0.1" max="10" step="0.1" title="Delay (s)" /></label>
+                  <label>Spacing<input type="number" id="setPollReadSpacing" class="inp inp-sm" min="0.001" max="1" step="0.001" title="Spacing (s)" /></label>
                 </div>
               </div>
             </div>
@@ -1950,15 +1919,15 @@
             <div class="card-tabs" role="tablist" aria-label="Connectivity sub-sections">
               <button id="connTabAccess" class="card-tab active" type="button" role="tab" aria-selected="true" aria-controls="connPanelAccess" data-card-tab="access" title="Operation mode (Gateway/Remote), gateway URL, API token, Tailscale hint.">
                 <span class="mdi mdi-lan-connect icon-inline" aria-hidden="true"></span>
-                <span class="card-tab-label">Mode &amp; Remote Access</span>
+                <span class="card-tab-label">Access</span>
               </button>
               <button id="connTabLink" class="card-tab" type="button" role="tab" aria-selected="false" aria-controls="connPanelLink" data-card-tab="link" title="Gateway link status, standby refresh counters, archive scope, transfer monitor.">
                 <span class="mdi mdi-vector-link icon-inline" aria-hidden="true"></span>
-                <span class="card-tab-label">Gateway Link</span>
+                <span class="card-tab-label">Gateway</span>
               </button>
               <button id="connTabRuntime" class="card-tab" type="button" role="tab" aria-selected="false" aria-controls="connPanelRuntime" data-card-tab="runtime" title="Server CPU, memory, poll duration, persistence + WS delivery diagnostics.">
                 <span class="mdi mdi-speedometer icon-inline" aria-hidden="true"></span>
-                <span class="card-tab-label">Runtime Health</span>
+                <span class="card-tab-label">Health</span>
               </button>
             </div>
             <div id="connPanelAccess" class="card-tab-panel active" data-card-tab-panel="access" role="tabpanel" aria-labelledby="connTabAccess">
@@ -2195,15 +2164,15 @@
               </button>
               <button id="fcTabAccess" class="card-tab" type="button" role="tab" aria-selected="false" aria-controls="fcPanelAccess" data-card-tab="access" title="Solcast access mode (Toolkit/API), base URL, and timezone alignment.">
                 <span class="mdi mdi-key-outline icon-inline" aria-hidden="true"></span>
-                <span class="card-tab-label">Solcast Access</span>
+                <span class="card-tab-label">Access</span>
               </button>
               <button id="fcTabApi" class="card-tab" type="button" role="tab" aria-selected="false" aria-controls="fcPanelApi" data-card-tab="api" title="Formal Solcast API credentials (key + resource ID).">
                 <span class="mdi mdi-api icon-inline" aria-hidden="true"></span>
-                <span class="card-tab-label">Solcast API</span>
+                <span class="card-tab-label">API</span>
               </button>
               <button id="fcTabToolkit" class="card-tab" type="button" role="tab" aria-selected="false" aria-controls="fcPanelToolkit" data-card-tab="toolkit" title="Toolkit account credentials, forecast horizon, resolution, and live preview.">
                 <span class="mdi mdi-toolbox-outline icon-inline" aria-hidden="true"></span>
-                <span class="card-tab-label">Solcast Toolkit</span>
+                <span class="card-tab-label">Toolkit</span>
               </button>
             </div>
             <div id="fcPanelProvider" class="card-tab-panel active" data-card-tab-panel="provider" role="tabpanel" aria-labelledby="fcTabProvider">
@@ -2902,7 +2871,7 @@
               </button>
               <button id="lbTabSchedule" class="card-tab" type="button" role="tab" aria-selected="false" aria-controls="lbPanelSchedule" data-card-tab="schedule" title="Automatically export a .adsibak to a chosen folder on a schedule.">
                 <span class="mdi mdi-clock-outline icon-inline" aria-hidden="true"></span>
-                <span class="card-tab-label">Auto-Export</span>
+                <span class="card-tab-label">Auto</span>
               </button>
               <button id="lbTabExport" class="card-tab" type="button" role="tab" aria-selected="false" aria-controls="lbPanelExport" data-card-tab="export" title="Manually create a portable .adsibak snapshot now.">
                 <span class="mdi mdi-export icon-inline" aria-hidden="true"></span>
@@ -3043,11 +3012,11 @@
             <div class="invclock-tabs" role="tablist" aria-label="Inverter clock sub-sections">
               <button id="invClockTabSchedule" class="invclock-tab active" type="button" role="tab" aria-selected="true" aria-controls="invClockPanelSchedule" data-invclock-tab="schedule" title="Daily auto-sync schedule and which energy source drives today's display.">
                 <span class="mdi mdi-clock-check-outline icon-inline" aria-hidden="true"></span>
-                <span class="invclock-tab-label">Schedule &amp; Source</span>
+                <span class="invclock-tab-label">Schedule</span>
               </button>
               <button id="invClockTabHealth" class="invclock-tab" type="button" role="tab" aria-selected="false" aria-controls="invClockPanelHealth" data-invclock-tab="health" title="Per-unit counter and RTC drift state, with manual sync controls.">
                 <span class="mdi mdi-counter icon-inline" aria-hidden="true"></span>
-                <span class="invclock-tab-label">Per-Unit Counter Health</span>
+                <span class="invclock-tab-label">Health</span>
                 <span class="invclock-counts invclock-tab-counts">
                   <span class="invclock-chip-nodes js-invclock-count-nodes" title="Total configured nodes (units) per ip-config topology.">0 nodes</span>
                   <span class="invclock-chip-ok    js-invclock-count-ok">0 OK</span>
@@ -3057,7 +3026,7 @@
               </button>
               <button id="invClockTabLog" class="invclock-tab" type="button" role="tab" aria-selected="false" aria-controls="invClockPanelLog" data-invclock-tab="log" title="Audit trail of every sync attempt, with drift-before / drift-after readback.">
                 <span class="mdi mdi-history icon-inline" aria-hidden="true"></span>
-                <span class="invclock-tab-label">Recent Sync Attempts</span>
+                <span class="invclock-tab-label">Logs</span>
               </button>
             </div>
 
@@ -3137,11 +3106,11 @@
                   <option value="">Select inverter…</option>
                 </select>
                 <button id="btnInvClockSyncInverter" class="btn btn-accent btn-sm" type="button" disabled title="Send the server clock to every node of the selected inverter using one Modbus broadcast frame. No auth required.">
-                  <span class="mdi mdi-sync icon-inline" aria-hidden="true"></span><span>Sync This Inverter</span>
+                  <span class="mdi mdi-sync icon-inline" aria-hidden="true"></span><span>Sync Inverter</span>
                 </button>
                 <span class="invclock-toolbar-sep" aria-hidden="true">|</span>
                 <button id="btnInvClockSyncPlant" class="btn btn-red btn-sm" type="button" title="Broadcast the gateway clock to every inverter at once. Requires the current-minute bulk auth key.">
-                  <span class="mdi mdi-broadcast icon-inline" aria-hidden="true"></span><span>Sync ALL Plant</span>
+                  <span class="mdi mdi-broadcast icon-inline" aria-hidden="true"></span><span>Sync Plant</span>
                 </button>
                 <button id="btnInvClockRefresh" class="btn btn-outline btn-sm" type="button" title="Refresh per-unit counter state, drift, and sync log tables.">
                   <span class="mdi mdi-refresh icon-inline" aria-hidden="true"></span><span>Refresh</span>
@@ -3228,13 +3197,13 @@ Hover any pill in the column for the row-specific explanation.">Anchor</th>
                       data-card-tab="single" aria-controls="snbPanelSingle" aria-selected="true"
                       title="Per-inverter Read / Edit / Send + audit log.">
                 <span class="mdi mdi-pencil-outline icon-inline" aria-hidden="true"></span>
-                <span class="card-tab-label">Read / Edit / Send</span>
+                <span class="card-tab-label">Edit</span>
               </button>
               <button class="card-tab" type="button" role="tab"
                       data-card-tab="fleet" aria-controls="snbPanelFleet" aria-selected="false"
                       title="Fleet-wide serial map with duplicate detection.">
                 <span class="mdi mdi-table-network icon-inline" aria-hidden="true"></span>
-                <span class="card-tab-label">Plant Serial Map</span>
+                <span class="card-tab-label">Serials</span>
               </button>
               <button class="card-tab" type="button" role="tab"
                       data-card-tab="bulk" aria-controls="snbPanelBulk" aria-selected="false"
@@ -3246,7 +3215,7 @@ Hover any pill in the column for the row-specific explanation.">Anchor</th>
                       data-card-tab="firmware" aria-controls="snbPanelFirmware" aria-selected="false"
                       title="Fleet firmware versions — every node should run the same firmware. Drift and intra-inverter splits are flagged.">
                 <span class="mdi mdi-chip icon-inline" aria-hidden="true"></span>
-                <span class="card-tab-label">Firmware Map</span>
+                <span class="card-tab-label">Firmware</span>
               </button>
             </div>
 
@@ -3258,19 +3227,25 @@ Hover any pill in the column for the row-specific explanation.">Anchor</th>
                   <span class="mdi mdi-barcode icon-inline" aria-hidden="true"></span>
                   Serial Number Setting
                 </div>
-                <div class="srn-controls">
-                  <label class="invclock-label" for="snbInverterPicker">Inverter</label>
-                  <select id="snbInverterPicker" class="inp invclock-input"
-                          title="Pick the inverter (controller) to operate on."></select>
-                  <label class="invclock-label" for="snbSlavePicker">Slave</label>
-                  <select id="snbSlavePicker" class="inp invclock-input" style="max-width: 90px;"
-                          title="Modbus slave id (1..4) on the daisy chain. 'All nodes' reads every configured slave at once and exposes per-row Send."></select>
-                  <label class="invclock-label" for="snbFmtPicker">Format</label>
-                  <select id="snbFmtPicker" class="inp invclock-input" style="max-width: 130px;"
-                          title="Motorola firmware = 12 ASCII bytes (FreescaleDSP56F). TX firmware = 32 ASCII bytes (TexasTMS320F).">
-                    <option value="motorola" selected>Motorola (12)</option>
-                    <option value="tx">Texas TI (32)</option>
-                  </select>
+                <div class="srn-controls srn-grid-3col">
+                  <div class="srn-field">
+                    <label class="invclock-label" for="snbInverterPicker">Inverter</label>
+                    <select id="snbInverterPicker" class="inp invclock-input"
+                            title="Pick the inverter (controller) to operate on."></select>
+                  </div>
+                  <div class="srn-field">
+                    <label class="invclock-label" for="snbSlavePicker">Slave</label>
+                    <select id="snbSlavePicker" class="inp invclock-input" style="max-width: 90px;"
+                            title="Modbus slave id (1..4) on the daisy chain. 'All nodes' reads every configured slave at once and exposes per-row Send."></select>
+                  </div>
+                  <div class="srn-field">
+                    <label class="invclock-label" for="snbFmtPicker">Format</label>
+                    <select id="snbFmtPicker" class="inp invclock-input" style="max-width: 130px;"
+                            title="Motorola firmware = 12 ASCII bytes (FreescaleDSP56F). TX firmware = 32 ASCII bytes (TexasTMS320F).">
+                      <option value="motorola" selected>Motorola (12)</option>
+                      <option value="tx">Texas TI (32)</option>
+                    </select>
+                  </div>
                   <button id="btnSnbRead" class="btn btn-accent" type="button"
                           title="FC11 Report Slave ID — reads the current serial, model, and firmware. Mints a 5-minute session token required by Send.">
                     <span class="mdi mdi-eye-outline icon-inline" aria-hidden="true"></span>
@@ -3476,13 +3451,13 @@ Hover any pill in the column for the row-specific explanation.">Anchor</th>
                       data-card-tab="snapshots" aria-controls="srnPanelSnapshots" aria-selected="true"
                       title="Per-node StopReason snapshots captured via vendor FC 0x71 SCOPE peek.">
                 <span class="mdi mdi-clipboard-pulse-outline icon-inline" aria-hidden="true"></span>
-                <span class="card-tab-label">Captured Snapshots</span>
+                <span class="card-tab-label">Snapshots</span>
               </button>
               <button id="srnTabHistogram" class="card-tab" type="button" role="tab"
                       data-card-tab="histogram" aria-controls="srnPanelHistogram" aria-selected="false"
                       title="Lifetime stop-motive counters (30 stop reasons + TOTAL).">
                 <span class="mdi mdi-chart-bar icon-inline" aria-hidden="true"></span>
-                <span class="card-tab-label">Lifetime Counters</span>
+                <span class="card-tab-label">Counters</span>
               </button>
               <button id="srnTabCrossCheck" class="card-tab" type="button" role="tab"
                       data-card-tab="crosscheck" aria-controls="srnPanelCrossCheck" aria-selected="false"
@@ -3547,13 +3522,17 @@ Hover any pill in the column for the row-specific explanation.">Anchor</th>
                   <span class="mdi mdi-check-network-outline icon-inline" aria-hidden="true"></span>
                   Standard-Modbus Cross-Check
                 </div>
-                <div class="srn-controls">
-                  <label class="invclock-label" for="srnCrossCheckInverterPicker">Inverter</label>
-                  <select id="srnCrossCheckInverterPicker" class="inp invclock-input"
-                          title="Pick an inverter to compare vendor SCOPE stop reasons with standard-Modbus ring buffer."></select>
-                  <label class="invclock-label" for="srnCrossCheckNodePicker">Node</label>
-                  <select id="srnCrossCheckNodePicker" class="inp invclock-input"
-                          title="Pick a node (slave) to view its cross-check."></select>
+                <div class="srn-controls srn-grid-2col">
+                  <div class="srn-field">
+                    <label class="invclock-label" for="srnCrossCheckInverterPicker">Inverter</label>
+                    <select id="srnCrossCheckInverterPicker" class="inp invclock-input"
+                            title="Pick an inverter to compare vendor SCOPE stop reasons with standard-Modbus ring buffer."></select>
+                  </div>
+                  <div class="srn-field">
+                    <label class="invclock-label" for="srnCrossCheckNodePicker">Node</label>
+                    <select id="srnCrossCheckNodePicker" class="inp invclock-input"
+                            title="Pick a node (slave) to view its cross-check."></select>
+                  </div>
                   <button id="btnSrnCrossCheck" class="btn btn-accent" type="button"
                           title="Read the standard-Modbus ring buffer for this node and compare against the last vendor SCOPE snapshot.">
                     <span class="mdi mdi-refresh icon-inline" aria-hidden="true"></span>
