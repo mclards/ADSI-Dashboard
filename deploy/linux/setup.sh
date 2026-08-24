@@ -22,13 +22,14 @@
 #   --ip-forward         Enable Linux IP forwarding (required for Tailscale subnet routing)
 #
 # WHAT THIS SCRIPT DOES (in order)
-#    1. Install OS packages (build tools, python3, ffmpeg, sqlite3, chrony, ufw …)
+#    1. Install OS packages (build tools, python3, ffmpeg, sqlite3, chrony, openssh-server, ufw …)
 #    2. Set timezone to Asia/Manila (UTC+8) — mandatory for slot-binning parity
 #    3. Install Node.js 20 LTS via NodeSource
 #    4. Create 'adsi' system user + add to 'dialout' group (RS-485 serial)
 #    5. Create all persistent storage directories under DATA_DIR
+#    5b. Create browser auth credentials file (admin / SHA-256 of '1234')
 #    6. Install /etc/default/adsi-dashboard environment file
-#    7. Install all Systemd unit files + adsi.target, reload daemon
+#    7. Install all Systemd unit files + adsi.target + adsi-db-check.sh, reload daemon
 #    8. npm install --omit=dev + npm rebuild better-sqlite3 (Node ABI)
 #    9. Create Python venv + pip install -r requirements.txt
 #   10. Download go2rtc_linux_amd64 binary (camera streaming workaround)
@@ -36,9 +37,10 @@
 #   12. Chrony: configure hardware RTC as stratum-10 offline clock fallback
 #   13. Tailscale: install daemon + enable subnet routing (optional)
 #   14. Linux IP forwarding for Tailscale subnet routing (optional)
-#   15. SSD/NVMe write-barrier flush via hdparm (power-loss resilience)
-#   16. Enable all Systemd services (does NOT auto-start — operator confirms)
-#   17. Print post-setup checklist (data migration, go2rtc config, verification)
+#   15. Lid-close / sleep hardening (HandleLidSwitch + mask sleep targets)
+#   16. SSD/NVMe write-barrier flush via hdparm (power-loss resilience)
+#   17. Enable all Systemd services (does NOT auto-start — operator confirms)
+#   18. Print post-setup checklist (data migration, go2rtc config, verification)
 #
 # =============================================================================
 
@@ -109,10 +111,10 @@ OS_CODENAME="${VERSION_CODENAME:-}"
 info "Detected OS: ${PRETTY_NAME:-Linux}"
 
 # ── Step 1: OS packages ───────────────────────────────────────────────────────
-step "1 / 17  OS packages"
+step "1 / 18  OS packages"
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
-  curl wget git build-essential ufw chrony \
+  curl wget git build-essential ufw chrony openssh-server \
   python3 python3-venv python3-dev python3-pip \
   ffmpeg sqlite3 libsqlite3-dev \
   pkg-config libopenblas-dev gfortran \
@@ -131,7 +133,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
 success "Display libraries installed (GUI mode optional support)"
 
 # ── Step 2: Timezone ──────────────────────────────────────────────────────────
-step "2 / 17  Timezone → Asia/Manila (UTC+8)"
+step "2 / 18  Timezone → Asia/Manila (UTC+8)"
 timedatectl set-timezone Asia/Manila
 TZ_CHECK=$(date +%z)
 if [[ "$TZ_CHECK" == "+0800" ]]; then
@@ -141,7 +143,7 @@ else
 fi
 
 # ── Step 3: Node.js 20 LTS ────────────────────────────────────────────────────
-step "3 / 17  Node.js 20 LTS"
+step "3 / 18  Node.js 20 LTS"
 CURRENT_NODE_MAJOR=""
 if command -v node &>/dev/null; then
   CURRENT_NODE_MAJOR=$(node --version | cut -d. -f1 | tr -d 'v')
@@ -156,7 +158,7 @@ else
 fi
 
 # ── Step 4: System user ───────────────────────────────────────────────────────
-step "4 / 17  System user 'adsi'"
+step "4 / 18  System user 'adsi'"
 if ! id adsi &>/dev/null; then
   useradd -r -s /bin/false -d "${DATA_DIR}" -m adsi
   success "System user 'adsi' created"
@@ -167,7 +169,7 @@ usermod -a -G dialout adsi 2>/dev/null && \
   success "User 'adsi' added to 'dialout' group (RS-485 serial access)" || true
 
 # ── Step 5: Storage directories ───────────────────────────────────────────────
-step "5 / 17  Create core data directories"
+step "5 / 18  Create core data directories"
 mkdir -p "${DATA_DIR}"/{db,db/backups,archive,config,cloud_backups}
 mkdir -p "${DATA_DIR}/programdata"/{forecast,history,weather,go2rtc}
 mkdir -p "${DATA_DIR}/programdata/go2rtc"
@@ -178,8 +180,28 @@ chmod -R 750 "${DATA_DIR}" "${LOG_DIR}"
 success "Storage tree created at ${DATA_DIR}"
 success "Log directory created at ${LOG_DIR}"
 
+# ── Step 5b: Browser auth credentials file ────────────────────────────────────
+step "5b / 18  Browser auth credentials file"
+AUTH_DIR="${DATA_DIR}/auth"
+CRED_FILE="${AUTH_DIR}/credentials.json"
+mkdir -p "${AUTH_DIR}"
+if [[ ! -f "${CRED_FILE}" ]]; then
+  # SHA-256 hash of the default password '1234'
+  DEFAULT_HASH="$(echo -n '1234' | sha256sum | awk '{print $1}')"
+  cat > "${CRED_FILE}" <<JSON
+{"username":"admin","passwordHash":"${DEFAULT_HASH}"}
+JSON
+  chown adsi:adsi "${CRED_FILE}"
+  chmod 600 "${CRED_FILE}"
+  success "Browser auth credentials created at ${CRED_FILE} (default pw: 1234 — change after first login)"
+else
+  success "Browser auth credentials file already exists — skipping (${CRED_FILE})"
+fi
+chown adsi:adsi "${AUTH_DIR}"
+chmod 750 "${AUTH_DIR}"
+
 # ── Step 6: Environment file ──────────────────────────────────────────────────
-step "6 / 17  /etc/default/adsi-dashboard"
+step "6 / 18  /etc/default/adsi-dashboard"
 if [[ -f "${ETC_DEFAULT}" ]]; then
   cp "${ETC_DEFAULT}" "${ETC_DEFAULT}.bak.$(date +%Y%m%d%H%M%S)"
   warn "Existing env file backed up to ${ETC_DEFAULT}.bak.*"
@@ -189,11 +211,12 @@ cp "${SCRIPT_DIR}/default/adsi-dashboard" "${ETC_DEFAULT}"
 sed -i "s|ADSI_DATA_DIR=.*|ADSI_DATA_DIR=${DATA_DIR}/db|" "${ETC_DEFAULT}"
 sed -i "s|ADSI_PORTABLE_DATA_DIR=.*|ADSI_PORTABLE_DATA_DIR=${DATA_DIR}|" "${ETC_DEFAULT}"
 sed -i "s|PROGRAMDATA=.*|PROGRAMDATA=${DATA_DIR}/programdata|" "${ETC_DEFAULT}"
+sed -i "s|ADSI_LOGIN_CREDENTIAL_PATH=.*|ADSI_LOGIN_CREDENTIAL_PATH=${DATA_DIR}/auth/credentials.json|" "${ETC_DEFAULT}"
 chmod 644 "${ETC_DEFAULT}"
 success "Environment file installed → ${ETC_DEFAULT}"
 
 # ── Step 7: Systemd unit files ────────────────────────────────────────────────
-step "7 / 17  Systemd unit files"
+step "7 / 18  Systemd unit files + db-check script"
 for unit in adsi-inverter.service adsi-forecast.service adsi-server.service adsi-go2rtc.service adsi.target; do
   SRC="${SCRIPT_DIR}/systemd/${unit}"
   DST="${SYSTEMD_DIR}/${unit}"
@@ -207,11 +230,21 @@ for unit in adsi-inverter.service adsi-forecast.service adsi-server.service adsi
   chmod 644 "$DST"
   success "Installed ${unit}"
 done
+# Install the SQLite startup integrity check script
+DB_CHECK_SRC="${SCRIPT_DIR}/scripts/adsi-db-check.sh"
+DB_CHECK_DST="${APP_DIR}/deploy/linux/scripts/adsi-db-check.sh"
+if [[ -f "${DB_CHECK_SRC}" ]]; then
+  mkdir -p "$(dirname "${DB_CHECK_DST}")"
+  install -m 755 -o root -g root "${DB_CHECK_SRC}" "${DB_CHECK_DST}"
+  success "Installed adsi-db-check.sh → ${DB_CHECK_DST}"
+else
+  warn "adsi-db-check.sh not found at ${DB_CHECK_SRC} — skipping"
+fi
 systemctl daemon-reload
 success "Systemd daemon reloaded"
 
 # ── Step 8: npm install ───────────────────────────────────────────────────────
-step "8 / 17  npm install + rebuild better-sqlite3"
+step "8 / 18  npm install + rebuild better-sqlite3"
 if $SKIP_NPM; then
   skip "npm install"
 elif [[ -f "${APP_DIR}/package.json" ]]; then
@@ -227,7 +260,7 @@ else
 fi
 
 # ── Step 9: Python virtualenv ─────────────────────────────────────────────────
-step "9 / 17  Python virtualenv + pip install"
+step "9 / 18  Python virtualenv + pip install"
 VENV="${APP_DIR}/venv"
 if $SKIP_PYTHON; then
   skip "Python virtualenv"
@@ -263,7 +296,7 @@ else
 fi
 
 # ── Step 10: go2rtc binary ────────────────────────────────────────────────────
-step "10 / 17  go2rtc ${GO2RTC_VERSION} binary (camera streaming)"
+step "10 / 18  go2rtc ${GO2RTC_VERSION} binary (camera streaming)"
 GO2RTC_DIR="${APP_DIR}/server/go2rtc"
 GO2RTC_BIN="${GO2RTC_DIR}/go2rtc_linux_${GO2RTC_ARCH}"
 if $SKIP_GO2RTC; then
@@ -304,7 +337,7 @@ YAML
 fi
 
 # ── Step 11: UFW firewall ─────────────────────────────────────────────────────
-step "11 / 17  UFW firewall hardening"
+step "11 / 18  UFW firewall hardening"
 if $SKIP_UFW; then
   skip "UFW firewall"
 else
@@ -334,7 +367,7 @@ else
 fi
 
 # ── Step 12: Chrony offline RTC clock ─────────────────────────────────────────
-step "12 / 17  Chrony hardware RTC offline timekeeping"
+step "12 / 18  Chrony hardware RTC offline timekeeping"
 if $SKIP_CHRONY; then
   skip "Chrony configuration"
 else
@@ -368,7 +401,7 @@ CHRONY
 fi
 
 # ── Step 13: Tailscale ────────────────────────────────────────────────────────
-step "13 / 17  Tailscale mesh VPN"
+step "13 / 18  Tailscale mesh VPN"
 if $SKIP_TAILSCALE; then
   skip "Tailscale installation"
 else
@@ -387,7 +420,7 @@ else
 fi
 
 # ── Step 14: IP forwarding (Tailscale subnet routing) ─────────────────────────
-step "14 / 17  Linux IP forwarding (Tailscale subnet routing)"
+step "14 / 18  Linux IP forwarding (Tailscale subnet routing)"
 if $ENABLE_IP_FORWARD; then
   SYSCTL_FILE="/etc/sysctl.d/99-adsi-tailscale.conf"
   cat > "$SYSCTL_FILE" <<'SYSCTL'
@@ -401,8 +434,40 @@ else
   skip "IP forwarding (pass --ip-forward to enable subnet routing)"
 fi
 
-# ── Step 15: SSD/NVMe write-barrier ──────────────────────────────────────────
-step "15 / 17  SSD / NVMe write-cache barrier (power-loss resilience)"
+# ── Step 15: Lid-close / sleep hardening ─────────────────────────────────────
+step "15 / 18  Lid-close / sleep hardening (logind + systemd targets)"
+LOGIND_CONF="/etc/systemd/logind.conf"
+# Patch HandleLidSwitch — only if not already set to ignore
+if grep -qE '^HandleLidSwitch=ignore' "${LOGIND_CONF}" 2>/dev/null; then
+  success "HandleLidSwitch=ignore already set — skipping"
+else
+  if grep -qE '^#?HandleLidSwitch=' "${LOGIND_CONF}" 2>/dev/null; then
+    sed -i 's/^#\?HandleLidSwitch=.*/HandleLidSwitch=ignore/' "${LOGIND_CONF}"
+  else
+    echo 'HandleLidSwitch=ignore' >> "${LOGIND_CONF}"
+  fi
+  success "HandleLidSwitch=ignore written to ${LOGIND_CONF}"
+fi
+# Patch HandleLidSwitchExternalPower
+if grep -qE '^HandleLidSwitchExternalPower=ignore' "${LOGIND_CONF}" 2>/dev/null; then
+  success "HandleLidSwitchExternalPower=ignore already set — skipping"
+else
+  if grep -qE '^#?HandleLidSwitchExternalPower=' "${LOGIND_CONF}" 2>/dev/null; then
+    sed -i 's/^#\?HandleLidSwitchExternalPower=.*/HandleLidSwitchExternalPower=ignore/' "${LOGIND_CONF}"
+  else
+    echo 'HandleLidSwitchExternalPower=ignore' >> "${LOGIND_CONF}"
+  fi
+  success "HandleLidSwitchExternalPower=ignore written to ${LOGIND_CONF}"
+fi
+systemctl restart systemd-logind
+success "systemd-logind restarted with new lid-switch policy"
+# Mask sleep/suspend/hibernate targets so the server never sleeps
+systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target 2>/dev/null && \
+  success "sleep.target / suspend.target / hibernate.target / hybrid-sleep.target masked" || \
+  warn "Could not mask some sleep targets — verify with: systemctl status sleep.target"
+
+# ── Step 16: SSD/NVMe write-barrier ──────────────────────────────────────────
+step "16 / 18  SSD / NVMe write-cache barrier (power-loss resilience)"
 # Enable write-cache barrier on all detected SATA/NVMe block devices
 # This ensures fsync() calls flush all pending writes to stable storage
 # before SQLite WAL transactions are considered committed.
@@ -417,14 +482,14 @@ else
   warn "No block devices detected for hdparm — skipping"
 fi
 
-# ── Step 16: Enable services ──────────────────────────────────────────────────
-step "16 / 17  Enable Systemd services (auto-start on boot)"
+# ── Step 17: Enable services ──────────────────────────────────────────────────
+step "17 / 18  Enable Systemd services (auto-start on boot)"
 systemctl enable adsi.target adsi-inverter adsi-forecast adsi-server adsi-go2rtc 2>/dev/null
 success "All ADSI services enabled for auto-start on boot"
 info "Services are NOT started yet — start manually after data migration (see below)"
 
-# ── Step 17: Post-setup summary ───────────────────────────────────────────────
-step "17 / 17  Setup complete"
+# ── Step 18: Post-setup summary ───────────────────────────────────────────────
+step "18 / 18  Setup complete"
 
 echo ""
 echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════╗${NC}"

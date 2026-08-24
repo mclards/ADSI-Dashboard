@@ -1,6 +1,8 @@
 [Unit]
 Description=ADSI Inverter Modbus Engine & Telemetry Poller (Port 9100)
 After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -11,8 +13,6 @@ EnvironmentFile=/etc/default/adsi-dashboard
 ExecStart=/opt/adsi-dashboard/venv/bin/python InverterCoreService.py
 Restart=always
 RestartSec=3
-StartLimitIntervalSec=60
-StartLimitBurst=5
 TimeoutStopSec=15
 StandardOutput=append:/var/log/adsi-dashboard/inverter_engine.log
 StandardError=append:/var/log/adsi-dashboard/inverter_engine.log

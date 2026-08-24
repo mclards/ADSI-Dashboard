@@ -2,6 +2,8 @@
 Description=ADSI Dashboard Express & WebSockets Backend Gateway (Port 3500)
 After=network.target adsi-inverter.service adsi-forecast.service
 Requires=adsi-inverter.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -9,11 +11,10 @@ User=adsi
 Group=adsi
 WorkingDirectory=/opt/adsi-dashboard
 EnvironmentFile=/etc/default/adsi-dashboard
+ExecStartPre=/opt/adsi-dashboard/deploy/linux/scripts/adsi-db-check.sh
 ExecStart=/usr/bin/node server/index.js
 Restart=always
 RestartSec=3
-StartLimitIntervalSec=60
-StartLimitBurst=5
 TimeoutStopSec=15
 LimitNOFILE=65536
 StandardOutput=append:/var/log/adsi-dashboard/server.log

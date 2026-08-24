@@ -1,6 +1,8 @@
 [Unit]
 Description=ADSI Solar Power Day-Ahead Forecasting Engine
 After=network.target adsi-inverter.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -11,8 +13,6 @@ EnvironmentFile=/etc/default/adsi-dashboard
 ExecStart=/opt/adsi-dashboard/venv/bin/python ForecastCoreService.py
 Restart=always
 RestartSec=5
-StartLimitIntervalSec=60
-StartLimitBurst=5
 TimeoutStopSec=15
 StandardOutput=append:/var/log/adsi-dashboard/forecast_engine.log
 StandardError=append:/var/log/adsi-dashboard/forecast_engine.log
