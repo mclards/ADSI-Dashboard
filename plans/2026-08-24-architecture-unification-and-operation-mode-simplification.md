@@ -2,15 +2,22 @@
 
 **Date:** 2026-08-24  
 **Status:** PROPOSED (Awaiting Operator Approval)  
-**Goal:** Unify the ADSI Dashboard into a clean, standard **Client-Server Architecture**. Eliminate legacy dual-mode boilerplate while establishing **Strict Inverter Control Arbitration** (unlimited multi-client read telemetry + single-writer control locking).
+**Goal:** Unify the ADSI Dashboard into a clean, standard **Client-Server Architecture**. Eliminate legacy dual-mode boilerplate while establishing **Strict Inverter Control Arbitration** and **Server Single Source of Truth**.
 
 ---
 
 ## User Review Required
 
 > [!IMPORTANT]
-> ### ðŸ›¡ï¸ Inverter Control Safety & Single-Writer Arbitration (NEW RULE)
-> While **data telemetry, charts, and camera streams** are open to unlimited concurrent viewers (browsers, mobile, desktop), **Inverter Control Actions** (APC Setpoints, %P, Power Factor, Reactive kVAr, Start/Stop, Plant Cap Schedules, Compliance Tests) will be strictly protected against multi-operator collisions:
+> ### ðŸ—„ï¸ Server as the Single Source of Truth (DATA & CONFIG PRESERVATION INVARIANT)
+> To prevent configuration drift and split-brain data fragmentation:
+> 1. **100% Authoritative Server Storage:** All configurations (`ipconfig.json`, `settings` table, `credentials.json`, `go2rtc.yaml`), operational data (`adsi.db`, multi-year `archive/*.db`), AI models (`.joblib`, `ml_train_state.json`), weather CSVs, and audit logs reside **exclusively on the server** (e.g. `/var/lib/adsi-dashboard/`).
+> 2. **Stateless Clients:** Web browsers, mobile devices, and Electron viewer windows are purely clients. They will **never** store separate local database fragments or divergent config files.
+> 3. **Direct Config Persistence:** Any setting or topology edit saved by an operator is sent directly to the server API and committed directly to the server's master storage.
+
+> [!IMPORTANT]
+> ### ðŸ›¡ï¸ Inverter Control Safety & Single-Writer Arbitration
+> While **data telemetry, charts, and camera streams** are open to unlimited concurrent viewers (browsers, mobile, desktop), **Inverter Control Actions** (APC Setpoints, %P, Power Factor, Reactive kVAr, Start/Stop, Plant Cap Schedules, Compliance Tests) are strictly protected against multi-operator collisions:
 > 1. **Centralized Control Lock (Server-Enforced):** A control session lease is granted to one active operator at a time (authenticated via `adsiMM` / session lease token).
 > 2. **Visual Busy Indicator:** Other connected clients immediately see a status pill: `ðŸ”’ Controlled by Operator (<Client-IP>) â€” Locked`.
 > 3. **Conflict Rejection (HTTP 423 Locked):** Simultaneous competing commands from another device are safely rejected while a control sequence is in flight.
@@ -18,16 +25,8 @@
 
 ---
 
-## 1. Problem & Architectural Rationale
+## 1. Target Architecture Overview
 
-### Current State (The "Mess" & Technical Debt)
-1. **Server-on-Server Redundancy:** A remote laptop running the Electron app starts a full local Express server on port 3500 just to proxy requests over HTTP to the actual Linux server on port 3500.
-2. **Dual-DB & Sync Complexities:** The local client tries to cache and snapshot tables from the gateway, creating stale-data warnings, replication collisions, and sync state machines (`State.remoteHealth`, `remoteBridgeState`).
-3. **Artificial Feature Lockouts:** Features like Day-Ahead Generator, DLS uploads, and QA backfill were riddled with `if (isRemoteMode()) return 403` or client-side `isClientModeActive()` disables.
-4. **Reverse-Proxy Boilerplate:** Over 250 instances of `if (isRemoteMode()) return proxyToRemote(req, res)` and manual route routing filters (`shouldProxyApiPath()`) scattered across `server/index.js` and `server/calibrationRoutes.js`.
-5. **Operator Confusion:** Users had to navigate to Settings / Global Config to toggle "Gateway" vs "Remote" modes instead of simply connecting to the server.
-
-### Target State (Unified Architecture with Control Arbitration)
 ```
  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
  â”‚                     ADSI Server Backend                     â”‚
@@ -36,7 +35,10 @@
  â”‚   - Inverter Modbus Engine (Port 9100)                      â”‚
  â”‚   - Solar AI Day-Ahead Engine (Python venv)                 â”‚
  â”‚   - go2rtc RTSP/WebRTC Streaming (Ports 1984, 8555)         â”‚
- â”‚   - Single Authoritative SQLite Database & Archives         â”‚
+ â”‚   - Single Authoritative Storage (/var/lib/adsi-dashboard)  â”‚
+ â”‚     â”œâ”€ db/adsi.db & db/archive/*.db (27.5 GB Telemetry)     â”‚
+ â”‚     â”œâ”€ config/ipconfig.json & auth/credentials.json         â”‚
+ â”‚     â””â”€ programdata/forecast/*.joblib & weather/*.csv        â”‚
  â”‚   - [CONTROL ARBITER]: Single-Writer Lease & Mutex Guard    â”‚
  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
                                 â”‚
@@ -89,11 +91,12 @@
 ## 3. Verification Plan
 
 ### Automated & Concurrency Tests
-1. **Multi-Client Read Test:** Connect 5 simulated WebSocket and HTTP clients simultaneously â€” verify zero performance drop in telemetry.
+1. **Multi-Client Read Test:** Connect simulated WebSocket and HTTP clients simultaneously â€” verify zero performance drop in telemetry.
 2. **Concurrent Write Lock Test:** Send simultaneous conflicting setpoints from Client A and Client B:
    - Verify Client A obtains lease and applies setpoint.
    - Verify Client B receives `423 Locked: Control session active by Client A`.
 3. **Lease Expiration Test:** Verify lease cleanly releases after timeout or manual release.
+4. **Config Persistence Test:** Update settings/IP configuration from client â†’ verify change is written directly to server storage.
 
 ### Manual Verification
 1. **Dual Device Verification:** Open dashboard on Laptop and Phone simultaneously:
