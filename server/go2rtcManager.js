@@ -4,10 +4,15 @@ const path = require("path");
 const fs = require("fs");
 const net = require("net");
 const http = require("http");
+const os = require("os");
 
 /* ── Constants ────────────────────────────────────────────────────── */
 const PROGRAMDATA_ROOT = path.join(
-  process.env.PROGRAMDATA || "C:\\ProgramData",
+  process.env.PROGRAMDATA ||
+    (process.platform === "win32"
+      ? "C:\\ProgramData"
+      : process.env.ADSI_PORTABLE_DATA_DIR ||
+        path.join(os.homedir(), ".inverter-dashboard")),
   "InverterDashboard",
 );
 const API_PORT = 1984;
@@ -31,25 +36,47 @@ let _stoppingIntentional = false;
 /* ── Path resolution ──────────────────────────────────────────────── */
 
 function resolveExePath() {
+  // On Windows, only look for .exe; on Linux, try native binary names first.
+  const binaryNames =
+    process.platform === "win32"
+      ? ["go2rtc.exe"]
+      : ["go2rtc", "go2rtc_linux_amd64", "go2rtc_linux_arm64", "go2rtc.exe"];
+
   // 1. Packaged Electron (extraResources)
   if (process.resourcesPath) {
-    const packaged = path.join(
-      process.resourcesPath,
-      "backend",
-      "go2rtc",
-      "go2rtc.exe",
-    );
-    if (fs.existsSync(packaged)) return packaged;
+    for (const name of binaryNames) {
+      const packaged = path.join(
+        process.resourcesPath,
+        "backend",
+        "go2rtc",
+        name,
+      );
+      if (fs.existsSync(packaged)) return packaged;
+    }
   }
-  // 2. Development — alongside this module
-  const dev = path.join(__dirname, "go2rtc", "go2rtc.exe");
-  if (fs.existsSync(dev)) return dev;
-  // 3. Not found
+  // 2. Development / installed — alongside this module
+  for (const name of binaryNames) {
+    const dev = path.join(__dirname, "go2rtc", name);
+    if (fs.existsSync(dev)) return dev;
+  }
+  // 3. Standard Linux system paths (not reached on Windows)
+  if (process.platform !== "win32") {
+    const systemPaths = [
+      "/usr/local/bin/go2rtc",
+      "/usr/bin/go2rtc",
+      "/opt/adsi-dashboard/server/go2rtc/go2rtc",
+      "/opt/adsi-dashboard/server/go2rtc/go2rtc_linux_amd64",
+    ];
+    for (const p of systemPaths) {
+      if (fs.existsSync(p)) return p;
+    }
+  }
+  // 4. Not found
   return null;
 }
 
 function resolveConfigPath() {
-  // 1. User override in ProgramData
+  // 1. User override in ProgramData / Linux data dir
   const userCfg = path.join(PROGRAMDATA_ROOT, "go2rtc", "go2rtc.yaml");
   if (fs.existsSync(userCfg)) return userCfg;
   // 2. Packaged Electron (extraResources)
@@ -65,6 +92,11 @@ function resolveConfigPath() {
   // 3. Development — alongside this module
   const dev = path.join(__dirname, "go2rtc", "go2rtc.yaml");
   if (fs.existsSync(dev)) return dev;
+  // 4. Linux /etc fallback (not reached on Windows)
+  if (process.platform !== "win32") {
+    const etcCfg = "/etc/adsi-dashboard/go2rtc.yaml";
+    if (fs.existsSync(etcCfg)) return etcCfg;
+  }
   return null;
 }
 

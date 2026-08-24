@@ -82,9 +82,17 @@ This file documents the core project rules, responsive design patterns, and oper
 
 ---
 
-## 4. Testing & Verification Checklist
+## 4. Tablet & Intermediate Screen Patterns (769px–1200px)
+
+- **Analytics Top Cards:** On tablet viewports (`≤ 1200px`), `.chart-total-side-card` (`Selected Date Summary`) and `.chart-total-card` (`Day-Ahead vs Actual MWh`) span full width (`grid-column: 1 / -1`) stacked vertically, giving 9 metric tiles spacious 3-column rows and granting the 24-hour day-ahead vs actual chart high-resolution canvas width.
+- **Chart Titlebar & Legend Flex:** Header metrics and legend chips use flex-wrap with non-breaking titles rather than rigid grid columns, preventing word-wrapping on titles and text truncation on legend chips.
+
+---
+
+## 5. Testing & Verification Checklist
 
 When making UI adjustments:
 1. **Mobile Verification:** Test in responsive viewport (e.g. 360px–390px width) using headless browser/Puppeteer to confirm zero horizontal scroll on tab bars and zero field overlap.
-2. **Desktop Verification:** Take full desktop screenshots (1440px width) to verify zero layout regressions.
-3. **Bump CSS Version:** Ensure `public/index.html` has incremented CSS query version before finalizing.
+2. **Intermediate/Tablet Verification:** Test in tablet viewport (e.g. 800px–1024px width) to confirm seamless stacking and card expansion.
+3. **Desktop Verification:** Take full desktop screenshots (1440px width) to verify zero layout regressions.
+4. **Bump CSS Version:** Ensure `public/index.html` has incremented CSS query version before finalizing.

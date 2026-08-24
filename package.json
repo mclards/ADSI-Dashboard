@@ -10,7 +10,7 @@
     "server": "node server/index.js",
     "rebuild:native:node": "npm rebuild better-sqlite3",
     "rebuild:native:electron": "electron-builder install-app-deps",
-    "postinstall": "electron-builder install-app-deps",
+    "postinstall": "node scripts/postinstall-guard.js",
     "build:forecast-service": "python scripts/generate_build_info.py --build-channel development && python -m PyInstaller --noconfirm services/ForecastCoreService.spec && python scripts/generate_build_info.py --check --build-channel development",
     "check:forecast-build-info": "python scripts/generate_build_info.py --check --build-channel development",
     "build:win": "node scripts/build-installer-signed.js",

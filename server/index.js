@@ -327,7 +327,13 @@ const REMOTE_GATEWAY_DEFAULT_PORT = 3500;
 const PORTABLE_ROOT = getPortableDataRoot();
 const PROGRAMDATA_ROOT = PORTABLE_ROOT
   ? path.join(PORTABLE_ROOT, "programdata")
-  : path.join(process.env.PROGRAMDATA || "C:\\ProgramData", "InverterDashboard");
+  : path.join(
+      process.env.PROGRAMDATA ||
+        (process.platform === "win32"
+          ? "C:\\ProgramData"
+          : path.join(os.homedir(), ".inverter-dashboard")),
+      "InverterDashboard",
+    );
 
 // v2.8.14: ensure %PROGRAMDATA%\InverterDashboard is writable by Users.
 // db.js already does this for DATA_DIR (the db/ subfolder), but the restore

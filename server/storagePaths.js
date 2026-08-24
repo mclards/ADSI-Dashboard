@@ -21,7 +21,14 @@ const os   = require("os");
 const MIGRATION_VERSION = "2.4.43";
 
 function getProgramDataRoot() {
-  return process.env.PROGRAMDATA || process.env.ALLUSERSPROFILE || "C:\\ProgramData";
+  return (
+    process.env.PROGRAMDATA ||
+    process.env.ALLUSERSPROFILE ||
+    (process.platform === "win32"
+      ? "C:\\ProgramData"
+      : process.env.ADSI_PORTABLE_DATA_DIR ||
+        path.join(os.homedir(), ".inverter-dashboard"))
+  );
 }
 
 /** Root of the unified storage tree: %PROGRAMDATA%\InverterDashboard */

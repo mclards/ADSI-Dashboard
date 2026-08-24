@@ -5363,14 +5363,15 @@ function mountForecastPerfPanel() {
         <option value="90">Last 90 days</option>
       </select>
       <span id="fperfLastUpdated" class="fperf-updated-ts" title="Last data refresh time"></span>
-      <button id="btnRefreshFperf" class="btn btn-outline fperf-refresh-btn" type="button"
+      <button id="btnRefreshFperf" class="btn btn-outline fperf-action-btn" type="button"
               title="Refresh forecast performance data" aria-label="Refresh forecast performance">
         <span class="mdi mdi-refresh" aria-hidden="true"></span>
+        <span>Refresh</span>
       </button>
-      <button id="btnBackfillQa" class="btn btn-outline fperf-refresh-btn" type="button"
-              title="Re-evaluate QA for all displayed days (backfill)" aria-label="Reprocess QA history"
-              style="margin-left:4px;font-size:0.82em;gap:3px;display:inline-flex;align-items:center;">
-        <span class="mdi mdi-database-refresh-outline" aria-hidden="true"></span> Reprocess QA
+      <button id="btnBackfillQa" class="btn btn-outline fperf-action-btn" type="button"
+              title="Re-evaluate QA for all displayed days (backfill)" aria-label="Reprocess QA history">
+        <span class="mdi mdi-database-refresh-outline" aria-hidden="true"></span>
+        <span>Reprocess QA</span>
       </button>
     </div>
   </div>
@@ -5513,7 +5514,7 @@ function mountForecastPerfPanel() {
     const btn = $("btnBackfillQa");
     if (btn.disabled) return;
     btn.disabled = true;
-    btn.innerHTML = '<span class="mdi mdi-spin mdi-loading" aria-hidden="true"></span> Reprocessing...';
+    btn.innerHTML = '<span class="mdi mdi-spin mdi-loading" aria-hidden="true"></span><span>Reprocessing...</span>';
     try {
       const days = State.fperf.days || 15;
       const result = await api(`/api/forecast/backfill-qa?days=${days}`, "POST");
@@ -5524,7 +5525,7 @@ function mountForecastPerfPanel() {
       showToast(`QA backfill failed: ${e.message}`, "error");
     } finally {
       btn.disabled = false;
-      btn.innerHTML = '<span class="mdi mdi-database-refresh-outline" aria-hidden="true"></span> Reprocess QA';
+      btn.innerHTML = '<span class="mdi mdi-database-refresh-outline" aria-hidden="true"></span><span>Reprocess QA</span>';
     }
   });
   $("fperfDaysSelect").addEventListener("change", (e) => {

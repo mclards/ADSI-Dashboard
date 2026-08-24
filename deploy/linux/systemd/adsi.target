@@ -1,0 +1,7 @@
+[Unit]
+Description=ADSI Industrial Engine Suite
+Wants=adsi-inverter.service adsi-forecast.service adsi-server.service adsi-go2rtc.service
+
+[Install]
+WantedBy=multi-user.target
+
