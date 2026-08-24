@@ -115,6 +115,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
   curl wget git build-essential ufw chrony \
   python3 python3-venv python3-dev python3-pip \
   ffmpeg sqlite3 libsqlite3-dev \
+  pkg-config libopenblas-dev gfortran \
   tzdata ca-certificates hdparm lsof
 success "Base OS packages installed"
 
@@ -230,8 +231,8 @@ else
   else
     info "Virtualenv already exists at ${VENV}"
   fi
-  info "Upgrading pip..."
-  "${VENV}/bin/pip" install --upgrade pip -q
+  info "Upgrading pip, setuptools, and wheel..."
+  "${VENV}/bin/pip" install --upgrade pip setuptools wheel -q
   if [[ -f "${APP_DIR}/requirements.txt" ]]; then
     info "Installing from requirements.txt..."
     "${VENV}/bin/pip" install -r "${APP_DIR}/requirements.txt"
