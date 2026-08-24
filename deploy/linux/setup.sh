@@ -346,18 +346,17 @@ else
     # Backup original
     cp "$CHRONY_CONF" "${CHRONY_CONF}.bak.$(date +%Y%m%d%H%M%S)"
 
-    # Remove any existing local / rtconcpu lines to avoid duplication
-    sed -i '/^local stratum/d; /^rtconcpu/d; /^rtconutc/d' "$CHRONY_CONF"
+    # Remove any existing local / rtconutc lines to avoid duplication
+    sed -i '/^local stratum/d; /^rtconutc/d' "$CHRONY_CONF"
 
     # Append offline RTC fallback block
     cat >> "$CHRONY_CONF" <<'CHRONY'
 
-# ── ADSI Offline RTC Fallback ───────────────────────────────────────────────
+# ADSI Offline RTC Fallback
 # When all upstream NTP servers are unreachable (WAN outage, air-gapped plant),
-# Chrony falls back to the hardware CMOS/DS3231 RTC as stratum-10 local source.
-# This keeps Asia/Manila clock discipline accurate during extended offline periods.
+# Chrony falls back to the local clock as stratum-10 source.
 local stratum 10
-rtconcpu
+rtconutc
 CHRONY
     systemctl enable chrony 2>/dev/null || true
     systemctl restart chrony
