@@ -346,8 +346,8 @@ else
     # Backup original
     cp "$CHRONY_CONF" "${CHRONY_CONF}.bak.$(date +%Y%m%d%H%M%S)"
 
-    # Remove any existing local / rtconutc lines to avoid duplication
-    sed -i '/^local stratum/d; /^rtconutc/d' "$CHRONY_CONF"
+    # Remove any existing local / rtconutc / rtconcpu lines to avoid duplication
+    sed -i '/^local stratum/d; /^rtconutc/d; /^rtconcpu/d' "$CHRONY_CONF"
 
     # Append offline RTC fallback block
     cat >> "$CHRONY_CONF" <<'CHRONY'
