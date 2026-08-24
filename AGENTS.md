@@ -25,6 +25,9 @@ This file documents the core project rules, responsive design patterns, and oper
    - Always wrap form inputs inside semantic `<label class="...-field">` containers with top labels (`display: flex; flex-direction: column; gap: 2px;`) to prevent grid cell collisions and border overlap.
 5. **Decluttering on Mobile:**
    - Hide lengthy prose, multi-paragraph help text, `<details class="cmp-howto">`, and `.cmp-target-help` on mobile. Focus on actionable controls, readable metrics, and compact touch targets.
+6. **Linux Zero-Collision Maintenance Rule:**
+   - **ALWAYS** explicitly stop all ADSI services (`sudo systemctl stop adsi.target adsi-server adsi-inverter adsi-forecast adsi-go2rtc`) before executing any code updates (`git pull`), script setups (`setup.sh`), database replacements, or large file migrations.
+   - Restart services (`sudo systemctl start adsi.target`) only after all files, directories, and permissions (`chown -R adsi:adsi /var/lib/adsi-dashboard`) are completely finalized.
 
 ---
 
