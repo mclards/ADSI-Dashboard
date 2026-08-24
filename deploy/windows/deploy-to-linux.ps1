@@ -208,7 +208,23 @@ if ($Mode -in @("Full", "DataOnly")) {
             Write-Success "ipconfig.json copied to config/"
         }
 
-        # 5. Optional full historical archive
+        # 5. Weather Cache (Open-Meteo & Solcast CSVs)
+        $weatherPath = Join-Path $LocalProgramData "weather"
+        if (Test-Path $weatherPath) {
+            Write-Info "Copying historical weather files (*.csv)..."
+            scp -r "$weatherPath\*.csv" "${RemoteTarget}:${DataDir}/programdata/weather/"
+            Write-Success "Weather cache copied to programdata/weather/"
+        }
+
+        # 6. Forecast Snapshots & Contexts
+        $snapshotPath = Join-Path $LocalProgramData "forecast\snapshots"
+        if (Test-Path $snapshotPath) {
+            Write-Info "Copying forecast context snapshots (*.json)..."
+            scp -r "$snapshotPath\*.json" "${RemoteTarget}:${DataDir}/programdata/forecast/snapshots/"
+            Write-Success "Forecast snapshots copied"
+        }
+
+        # 7. Optional full historical archive (27 GB dataset)
         if ($IncludeArchive) {
             $archivePath = Join-Path $LocalProgramData "archive"
             if (Test-Path $archivePath) {
