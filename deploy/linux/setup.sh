@@ -114,6 +114,9 @@ apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
   curl wget git build-essential ufw chrony \
   python3 python3-venv python3-dev python3-pip \
+  python3-numpy python3-pandas python3-sklearn python3-joblib \
+  python3-fastapi python3-uvicorn python3-pydantic python3-requests python3-serial \
+  python3-setuptools python3-wheel \
   ffmpeg sqlite3 libsqlite3-dev \
   pkg-config libopenblas-dev gfortran \
   tzdata ca-certificates hdparm lsof
@@ -226,16 +229,17 @@ if $SKIP_PYTHON; then
   skip "Python virtualenv"
 else
   if [[ ! -f "${VENV}/bin/activate" ]]; then
-    info "Creating Python virtualenv at ${VENV}..."
-    python3 -m venv "${VENV}"
+    info "Creating Python virtualenv with system site packages at ${VENV}..."
+    python3 -m venv --system-site-packages "${VENV}"
   else
-    info "Virtualenv already exists at ${VENV}"
+    info "Virtualenv already exists at ${VENV} — ensuring system site packages enabled..."
+    python3 -m venv --system-site-packages "${VENV}" || true
   fi
   info "Upgrading pip, setuptools, and wheel..."
   "${VENV}/bin/pip" install --upgrade pip setuptools wheel -q
   if [[ -f "${APP_DIR}/requirements.txt" ]]; then
-    info "Installing from requirements.txt..."
-    "${VENV}/bin/pip" install -r "${APP_DIR}/requirements.txt"
+    info "Installing Python dependencies (preferring pre-compiled binary wheels)..."
+    "${VENV}/bin/pip" install --prefer-binary -r "${APP_DIR}/requirements.txt"
     success "Python dependencies installed"
   else
     warn "requirements.txt not found at ${APP_DIR}/requirements.txt"
