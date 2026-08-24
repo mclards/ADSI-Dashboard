@@ -4481,34 +4481,21 @@ function isRemoteSnapshotRetainedClient(healthRaw = null) {
 }
 
 function syncDayAheadGeneratorAvailability() {
-  const isClient = isClientModeActive();
   const input = $("genDayCount");
   const btn = document.querySelector(".analytics-gen-btn");
   const res = $("genDayResult");
   if (input) {
-    input.disabled = isClient;
-    input.readOnly = isClient;
-    input.title = isClient
-      ? "Day-ahead generation is available only in Gateway mode."
-      : "";
+    input.disabled = false;
+    input.readOnly = false;
+    input.title = "Number of days ahead to generate (1..31)";
   }
   if (btn) {
-    btn.disabled = isClient;
-    btn.setAttribute("aria-disabled", isClient ? "true" : "false");
-    btn.title = isClient
-      ? "Unavailable in Remote mode. Use the gateway workstation to generate the day-ahead forecast."
-      : "";
+    btn.disabled = false;
+    btn.setAttribute("aria-disabled", "false");
+    btn.title = "Generate day-ahead forecast via active gateway engine";
   }
-  if (res) {
-    if (isClient) {
-      res.className = "exp-result";
-      res.textContent = "Unavailable in Remote mode — run from gateway.";
-    } else if (
-      res.textContent &&
-      /unavailable in Remote mode/i.test(String(res.textContent))
-    ) {
-      res.textContent = "";
-    }
+  if (res && res.textContent && /unavailable in Remote mode/i.test(String(res.textContent))) {
+    res.textContent = "";
   }
 }
 
@@ -23203,19 +23190,6 @@ function getAnalyticsForecastExportResolution() {
 
 
 async function runDayAheadGeneration() {
-  if (isClientModeActive()) {
-    const resBlocked = $("genDayResult");
-    if (resBlocked) {
-      resBlocked.className = "exp-result error";
-      resBlocked.textContent = "✗ Unavailable in Remote mode — run from gateway.";
-    }
-    showToast(
-      "Day-ahead generation is unavailable in Remote mode. Please generate it from the gateway workstation.",
-      "warning",
-      4200,
-    );
-    return;
-  }
   await persistExportUiState().catch(() => {});
   const dayCount = Math.min(
     31,

@@ -10936,13 +10936,27 @@ async function fetchHourlyWeatherToday() {
   }
 }
 
+function resolvePythonBinary(baseDir = ROOT_DIR) {
+  if (process.env.PYTHON && fs.existsSync(process.env.PYTHON)) return process.env.PYTHON;
+  const candidates = [
+    path.join(baseDir, "venv", "bin", "python"),
+    path.join(baseDir, "venv", "bin", "python3"),
+    "/opt/adsi-dashboard/venv/bin/python",
+    path.join(baseDir, "venv", "Scripts", "python.exe"),
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c;
+  }
+  return "python";
+}
+
 function resolveForecastLaunch() {
   const explicit = String(process.env.IM_FORECAST_PATH || "").trim();
   if (explicit && fs.existsSync(explicit)) {
     const ext = path.extname(explicit).toLowerCase();
     if (ext === ".py") {
       return {
-        cmd: process.env.PYTHON || "python",
+        cmd: resolvePythonBinary(path.dirname(explicit)),
         args: [explicit],
         cwd: path.dirname(explicit),
       };
@@ -10964,14 +10978,14 @@ function resolveForecastLaunch() {
     if (fs.existsSync(p)) return { cmd: p, args: [], cwd: path.dirname(p) };
   }
 
-  const scriptBaseDirs = [ROOT_DIR, process.cwd()];
+  const scriptBaseDirs = [ROOT_DIR, process.cwd(), "/opt/adsi-dashboard"];
   const scriptCandidates = FORECAST_SCRIPT_NAMES.flatMap((name) =>
     scriptBaseDirs.map((dir) => path.join(dir, name)),
   );
   for (const p of scriptCandidates) {
     if (fs.existsSync(p)) {
       return {
-        cmd: process.env.PYTHON || "python",
+        cmd: resolvePythonBinary(path.dirname(p)),
         args: [p],
         cwd: path.dirname(p),
       };
@@ -16407,7 +16421,7 @@ async function _disableReactiveForCompliance(ip, slave) {
 }
 
 app.post("/api/compliance/run/start", express.json(), async (req, res) => {
-  if (isRemoteMode()) return res.status(400).json({ ok: false, error: "Compliance runs must be started on the gateway." });
+  if (isRemoteMode()) return proxyToRemote(req, res);
   const b = req.body || {};
   // Bulk-control auth required (adsiMM) — same gate as APC operations.
   if (!isAuthorizedPlantWideControl(b, req)) {
@@ -16501,7 +16515,7 @@ app.post("/api/compliance/run/start", express.json(), async (req, res) => {
 });
 
 app.post("/api/compliance/run/:run_id/abort", express.json(), (req, res) => {
-  if (isRemoteMode()) return res.status(400).json({ ok: false, error: "Gateway only." });
+  if (isRemoteMode()) return proxyToRemote(req, res);
   if (!isAuthorizedPlantWideControl(req.body || {}, req)) {
     return res.status(403).json({ ok: false, error: "Unauthorized." });
   }
@@ -16559,7 +16573,7 @@ app.get("/api/compliance/runs", (req, res) => {
 });
 
 app.post("/api/compliance/run/:run_id/report", express.json(), async (req, res) => {
-  if (isRemoteMode()) return res.status(400).json({ ok: false, error: "Gateway only." });
+  if (isRemoteMode()) return proxyToRemote(req, res);
   // Bulk-control auth required (adsiMM) — same gate as POST /run/start.
   // PDF generation launches puppeteer which is heavy; without auth a LAN
   // attacker could DoS the gateway by hammering this endpoint.
@@ -16572,16 +16586,6 @@ app.post("/api/compliance/run/:run_id/report", express.json(), async (req, res) 
     const steps = listComplianceSteps(run.run_id);
     const samples = listComplianceSamples(run.run_id);
     const out = [];
-    // v2.11.x — `format` controls which artifacts get built. Operators were
-    // hitting the PDF button and getting BOTH CSV + PDF on disk, which
-    // cluttered the artifact catalog. Now the buttons are 1:1 with the
-    // outputs:
-    //   "xlsx" → Excel workbook only (3 sheets, styled — operator default)
-    //   "csv"  → legacy plain CSV (kept for external scripts/CI)
-    //   "pdf"  → printable witness PDF only
-    //   "both" → CSV + PDF (bundle for batch evidence pulls; backward compat)
-    // Default "csv" preserves the legacy contract for any external caller
-    // that omits the field.
     const format = String(req.body?.format || "csv").toLowerCase();
     const wantXlsx = (format === "xlsx");
     const wantCsv  = (format === "csv"  || format === "both");
@@ -16616,8 +16620,6 @@ app.post("/api/compliance/run/:run_id/report", express.json(), async (req, res) 
         });
         out.push({ kind: "pdf", ...pdf });
       } catch (err) {
-        // PDF failure is non-fatal when bundled with CSV; surfaces as a
-        // per-artifact error in the response so the UI can toast it.
         out.push({ kind: "pdf", error: err.message });
       }
     }
@@ -16628,7 +16630,7 @@ app.post("/api/compliance/run/:run_id/report", express.json(), async (req, res) 
 });
 
 app.get("/api/compliance/run/:run_id/artifact", (req, res) => {
-  if (isRemoteMode()) return res.status(400).json({ ok: false, error: "Gateway only." });
+  if (isRemoteMode()) return proxyToRemote(req, res);
   // Bulk-control auth required. GET endpoint accepts the authKey/authToken
   // via query string OR x-auth-key / x-auth-token headers so the UI can
   // build a plain `<a href>` download link with the rotating key as a
@@ -23434,13 +23436,7 @@ let _lastForecastRequestTime = 0;
 const FORECAST_COOLDOWN_MS = 30 * 1000; // 30 seconds between requests
 
 app.post("/api/forecast/generate", async (req, res) => {
-  if (isRemoteMode()) {
-    return res.status(403).json({
-      ok: false,
-      error:
-        "Day-ahead generation is disabled in Client mode. Generate on the Gateway server.",
-    });
-  }
+  if (isRemoteMode()) return proxyToRemote(req, res);
   // FIX-13: Cooldown rate limiting
   const now = Date.now();
   if (now - _lastForecastRequestTime < FORECAST_COOLDOWN_MS) {
@@ -23534,6 +23530,7 @@ app.post("/api/forecast/generate", async (req, res) => {
 });
 
 app.get("/api/forecast/generate/status/:jobId", (req, res) => {
+  if (isRemoteMode()) return proxyToRemote(req, res);
   const { jobId } = req.params;
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(jobId)) {
     return res.status(400).json({ ok: false, error: "Invalid job ID format." });
