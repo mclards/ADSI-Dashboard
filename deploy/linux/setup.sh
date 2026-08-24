@@ -323,18 +323,29 @@ else
   fi
 fi
 
-# Create a minimal go2rtc.yaml if none exists (prevents crash-loop on first start)
+# Install go2rtc.yaml configuration from repository template
 GO2RTC_CFG="${DATA_DIR}/programdata/go2rtc/go2rtc.yaml"
-if [[ ! -f "$GO2RTC_CFG" ]]; then
+REPO_GO2RTC_CFG="${APP_DIR}/server/go2rtc/go2rtc.yaml"
+if [[ -f "$REPO_GO2RTC_CFG" ]]; then
+  cp "$REPO_GO2RTC_CFG" "$GO2RTC_CFG"
+  chown adsi:adsi "$GO2RTC_CFG"
+  chmod 640 "$GO2RTC_CFG"
+  success "Installed go2rtc.yaml from repo template → ${GO2RTC_CFG}"
+elif [[ ! -f "$GO2RTC_CFG" ]]; then
   cat > "$GO2RTC_CFG" <<'YAML'
-# go2rtc configuration — ADSI Dashboard
-# Add RTSP camera streams here. Example:
-# streams:
-#   plant_cam: rtsp://admin:password@192.168.1.200:554/stream1
+streams:
+  tapo_cam:
+    - rtsp://Adsicamera:sacups2026@192.168.4.211:554/stream1
+
 api:
   listen: ":1984"
+  origin: "*"
+
 webrtc:
   listen: ":8555"
+  ice_servers:
+    - urls:
+        - stun:stun.l.google.com:19302
 YAML
   chown adsi:adsi "$GO2RTC_CFG"
   chmod 640 "$GO2RTC_CFG"
