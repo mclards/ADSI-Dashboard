@@ -770,3 +770,13 @@ This plan provides an exhaustive, mathematically verified, and production-harden
 - 🔒 **Deterministic port locking** across all internal and external communication interfaces (3500, 9100, 9200, 1984, 8555).
 - 🔄 **Dual-mode flexibility** (optional headless server or full native desktop app).
 - 🛡️ **Zero code modifications**, guaranteeing 100% preservation and stability of the existing Windows version.
+
+
+## Future Enhancements: Automated Linux Packaging
+
+To eliminate the need for manual bash scripts and 'bare-metal' command-line installations, the next major milestone for Linux deployment is to utilize **Electron-Builder** to create a self-contained, double-clickable \.deb\ or \.AppImage\ installer.
+
+### Objectives:
+- **Single Executable:** Package the Node.js server, Python virtual environment, SQLite binaries, and all pre-compiled ML dependencies into one distributable package.
+- **Zero-Touch Setup:** The .deb installer will automatically scaffold the /var/lib/adsi-dashboard directories, create the dsi system user, and register/enable the Systemd services upon installation.
+- **Unified Codebase:** Ensures the Windows and Linux installation experience is identical for end-users, bypassing manual pt-get and pip install commands entirely.
