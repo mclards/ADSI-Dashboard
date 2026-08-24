@@ -282,7 +282,7 @@ async function _spawnProcess() {
  * @returns {Promise<{ok:boolean, pid?:number, already?:boolean, error?:string}>}
  */
 async function start(enableAutoRestart = true) {
-  // Already running
+  // Already running as child process
   if (go2rtcProcess && go2rtcProcess.exitCode === null) {
     return { ok: true, already: true, pid: go2rtcProcess.pid };
   }
@@ -291,9 +291,18 @@ async function start(enableAutoRestart = true) {
   _stoppingIntentional = false;
   crashCount = 0;
 
+  // Check if already running via Systemd service or external process
+  const alreadyHealthy = await checkHealth();
+  if (alreadyHealthy) {
+    status = "running";
+    startHealthLoop();
+    return { ok: true, already: true, external: true };
+  }
+
   // Port checks
   const apiPortFree = await isPortFree(API_PORT);
   if (!apiPortFree) {
+    // If port is occupied but checkHealth didn't respond, report status
     status = "error";
     return { ok: false, error: `Port ${API_PORT} (go2rtc API) already in use` };
   }
@@ -386,5 +395,15 @@ function getStatus() {
 function isRunning() {
   return go2rtcProcess !== null && go2rtcProcess.exitCode === null;
 }
+
+// Auto-detect running systemd instance on gateway boot
+setTimeout(async () => {
+  const alive = await checkHealth();
+  if (alive) {
+    status = "running";
+    lastHealthTs = Date.now();
+    startHealthLoop();
+  }
+}, 1500).unref();
 
 module.exports = { start, stop, getStatus, isRunning };

@@ -355,6 +355,7 @@ else
 
   # ADSI locked ports
   ufw allow 3500/tcp  comment 'ADSI Dashboard Gateway (LOCKED)'
+  ufw allow 1984/tcp  comment 'go2rtc API / WebRTC signaling (LOCKED)'
   ufw allow 8555/tcp  comment 'go2rtc WebRTC TCP (LOCKED)'
   ufw allow 8555/udp  comment 'go2rtc WebRTC UDP (LOCKED)'
 
@@ -364,10 +365,9 @@ else
   # Explicit external block for internal-only engine ports
   ufw deny 9100/tcp   comment 'Block external: Inverter Engine (loopback only)'
   ufw deny 9200/tcp   comment 'Block external: Calibrator Engine (loopback only)'
-  ufw deny 1984/tcp   comment 'Block external: go2rtc API (loopback only)'
 
   ufw --force enable  > /dev/null
-  success "UFW enabled — ports 3500 & 8555 open; 9100, 9200, 1984 blocked externally"
+  success "UFW enabled — ports 3500, 1984 & 8555 open; 9100, 9200 blocked externally"
   ufw status numbered
 fi
 
