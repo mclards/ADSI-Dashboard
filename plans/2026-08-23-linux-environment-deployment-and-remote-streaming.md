@@ -716,22 +716,66 @@ In **either Headless or GUI mode**, remote devices connect to the locked port `3
 
 ---
 
-## 11. Data Migration Procedure (Windows to Linux)
+## 11. Data Migration & One-Click Deployment Procedure
+
+### Option A: One-Click Automated Deployment from Windows (Recommended)
+
+Run the included PowerShell assistant from Windows PowerShell:
+
+```powershell
+# Automated end-to-end deployment (code setup, data sync, permissions, service start):
+.\deploy\windows\deploy-to-linux.ps1 -LinuxHost 192.168.1.13
+
+# Or double-click deploy\windows\deploy-to-linux.bat
+```
+
+### Option B: Manual Data Migration (Windows to Linux)
 
 ```bash
-# 1. Stop Windows services
-# 2. Copy databases and ML models from Windows to Linux:
-scp "%PROGRAMDATA%\InverterDashboard\db\adsi.db" user@linux-host:/var/lib/adsi-dashboard/db/
-scp -r "%PROGRAMDATA%\InverterDashboard\db\backups\*" user@linux-host:/var/lib/adsi-dashboard/db/backups/
-scp -r "%PROGRAMDATA%\InverterDashboard\archive\*" user@linux-host:/var/lib/adsi-dashboard/archive/
-scp -r "%PROGRAMDATA%\InverterDashboard\forecast\*.joblib" user@linux-host:/var/lib/adsi-dashboard/forecast/
-scp "%PROGRAMDATA%\InverterDashboard\config\ipconfig.json" user@linux-host:/var/lib/adsi-dashboard/config/
+# 1. Stop services on both sides before copy
+sudo systemctl stop adsi.target
 
-# 3. Set ownership and permissions on Linux:
+# 2. Complete storage hierarchy sync on Linux:
+# — Active Database & 2-Hour Rotating Backups
+sudo mkdir -p /var/lib/adsi-dashboard/db/backups
+sudo cp -f /var/lib/adsi-dashboard/programdata/db/adsi.db* /var/lib/adsi-dashboard/db/ 2>/dev/null || true
+sudo cp -f /var/lib/adsi-dashboard/programdata/adsi.db* /var/lib/adsi-dashboard/db/ 2>/dev/null || true
+sudo cp -rf /var/lib/adsi-dashboard/programdata/db/backups/* /var/lib/adsi-dashboard/db/backups/ 2>/dev/null || true
+
+# — Monthly Historical Archives (27 GB dataset) & Alarms
+sudo mkdir -p /var/lib/adsi-dashboard/db/archive
+sudo cp -f /var/lib/adsi-dashboard/programdata/archive/* /var/lib/adsi-dashboard/db/archive/ 2>/dev/null || true
+sudo cp -f /var/lib/adsi-dashboard/programdata/202*.db* /var/lib/adsi-dashboard/db/archive/ 2>/dev/null || true
+sudo ln -sf /var/lib/adsi-dashboard/db/archive /var/lib/adsi-dashboard/archive 2>/dev/null || true
+
+# — Weather History & Forecast Cache (Open-Meteo & Solcast)
+sudo mkdir -p /var/lib/adsi-dashboard/programdata/weather /var/lib/adsi-dashboard/weather
+sudo cp -f /var/lib/adsi-dashboard/programdata/*.csv /var/lib/adsi-dashboard/programdata/weather/ 2>/dev/null || true
+sudo cp -f /var/lib/adsi-dashboard/programdata/*.csv /var/lib/adsi-dashboard/weather/ 2>/dev/null || true
+
+# — AI Forecasting Models, State & Snapshots
+sudo mkdir -p /var/lib/adsi-dashboard/programdata/forecast/snapshots /var/lib/adsi-dashboard/programdata/forecast/locks
+sudo cp -f /var/lib/adsi-dashboard/programdata/*.joblib /var/lib/adsi-dashboard/programdata/forecast/ 2>/dev/null || true
+sudo cp -f /var/lib/adsi-dashboard/programdata/ml_train_state.json /var/lib/adsi-dashboard/programdata/forecast/ 2>/dev/null || true
+sudo cp -f /var/lib/adsi-dashboard/programdata/global.json /var/lib/adsi-dashboard/programdata/forecast/ 2>/dev/null || true
+sudo cp -f /var/lib/adsi-dashboard/programdata/202*.json /var/lib/adsi-dashboard/programdata/forecast/snapshots/ 2>/dev/null || true
+sudo cp -f /var/lib/adsi-dashboard/programdata/*.lock /var/lib/adsi-dashboard/programdata/forecast/locks/ 2>/dev/null || true
+
+# — Inverter Topology, Licenses & Auth
+sudo mkdir -p /var/lib/adsi-dashboard/config /var/lib/adsi-dashboard/auth /var/lib/adsi-dashboard/license
+sudo cp -f /var/lib/adsi-dashboard/programdata/ipconfig.json /var/lib/adsi-dashboard/config/ 2>/dev/null || \
+sudo cp -f /var/lib/adsi-dashboard/programdata/config/ipconfig.json /var/lib/adsi-dashboard/config/ 2>/dev/null || \
+sudo cp -f /var/lib/adsi-dashboard/programdata/db/ipconfig.json /var/lib/adsi-dashboard/config/ 2>/dev/null || true
+
+sudo cp -f /var/lib/adsi-dashboard/programdata/license* /var/lib/adsi-dashboard/license/ 2>/dev/null || true
+sudo cp -f /var/lib/adsi-dashboard/programdata/cloud_tokens.enc /var/lib/adsi-dashboard/auth/ 2>/dev/null || true
+sudo cp -f /var/lib/adsi-dashboard/programdata/.token-keyring /var/lib/adsi-dashboard/auth/ 2>/dev/null || true
+
+# 3. Set strict ownership and permissions on Linux:
 sudo chown -R adsi:adsi /var/lib/adsi-dashboard
 sudo chmod -R 750 /var/lib/adsi-dashboard
 
-# 4. Start Linux services:
+# 4. Start all Linux services:
 sudo systemctl start adsi.target
 ```
 
