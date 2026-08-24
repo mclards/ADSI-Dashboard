@@ -2,105 +2,127 @@
 
 **Date:** 2026-08-24  
 **Status:** PROPOSED (Awaiting Operator Approval)  
-**Goal:** Unify the ADSI Dashboard into a clean, standard **Client-Server Architecture**. Eliminate legacy dual-mode boilerplate while establishing **Strict Inverter Control Arbitration** and **Server Single Source of Truth**.
+**Goal:** Unify the ADSI Dashboard into a clean, secure **Client-Server Architecture**. Implement **Secure Device Identification (`deviceId`)**, **Server-Side Personalization Profiles**, **Strict Single-Writer Inverter Control Arbitration**, and **Server Single Source of Truth**.
 
 ---
 
 ## User Review Required
 
 > [!IMPORTANT]
-> ### ðŸ—„ï¸ Server as the Single Source of Truth (DATA & CONFIG PRESERVATION INVARIANT)
-> To prevent configuration drift and split-brain data fragmentation:
-> 1. **100% Authoritative Server Storage:** All configurations (`ipconfig.json`, `settings` table, `credentials.json`, `go2rtc.yaml`), operational data (`adsi.db`, multi-year `archive/*.db`), AI models (`.joblib`, `ml_train_state.json`), weather CSVs, and audit logs reside **exclusively on the server** (e.g. `/var/lib/adsi-dashboard/`).
-> 2. **Stateless Clients:** Web browsers, mobile devices, and Electron viewer windows are purely clients. They will **never** store separate local database fragments or divergent config files.
-> 3. **Direct Config Persistence:** Any setting or topology edit saved by an operator is sent directly to the server API and committed directly to the server's master storage.
+> ### ðŸ” Secure Device Identification & Personalization Registry (NEW SECURITY LAYER)
+> Every connecting device (browser, phone, tablet, Electron app) will receive a unique cryptographic **`deviceId`** stored in persistent storage:
+> 1. **Server-Side Profile & Preferences:**
+>    - The server maintains a `client_devices` table in `adsi.db`.
+>    - UI personalizations (Dark/Light theme, active layout, chart color schemes, favorite inverter views, audio alarm toggles) are mapped to that `device_id` and saved directly on the server.
+>    - When a device connects, the server recognizes its `device_id` and restores its personalized profile.
+> 2. **Complete Inverter Control Audit Accountability:**
+>    - Every write action (setpoint change, inverter stop/start, plant cap schedule) logs the exact `device_id`, custom friendly name (e.g. `"Engr. M Laptop"`), and IP address in `audit_log`.
+> 3. **Device Authorization & Control Whitelisting:**
+>    - Devices can be named and granted roles (`Viewer`, `Operator`, `Admin`) by the administrator on the server.
+
+> [!IMPORTANT]
+> ### ðŸ—„ï¸ Server as the Single Source of Truth (DATA & CONFIG PRESERVATION)
+> - All master configurations (`ipconfig.json`, settings table, `credentials.json`, `go2rtc.yaml`), database telemetry (`adsi.db`, multi-year `archive/*.db`), AI models (`.joblib`, `ml_train_state.json`), weather CSVs, and audit logs reside **exclusively on the server** (`/var/lib/adsi-dashboard/` or Windows server directory).
+> - Connected clients are lightweight and stateless â€” they never maintain divergent local DB fragments.
 
 > [!IMPORTANT]
 > ### ðŸ›¡ï¸ Inverter Control Safety & Single-Writer Arbitration
-> While **data telemetry, charts, and camera streams** are open to unlimited concurrent viewers (browsers, mobile, desktop), **Inverter Control Actions** (APC Setpoints, %P, Power Factor, Reactive kVAr, Start/Stop, Plant Cap Schedules, Compliance Tests) are strictly protected against multi-operator collisions:
-> 1. **Centralized Control Lock (Server-Enforced):** A control session lease is granted to one active operator at a time (authenticated via `adsiMM` / session lease token).
-> 2. **Visual Busy Indicator:** Other connected clients immediately see a status pill: `ðŸ”’ Controlled by Operator (<Client-IP>) â€” Locked`.
-> 3. **Conflict Rejection (HTTP 423 Locked):** Simultaneous competing commands from another device are safely rejected while a control sequence is in flight.
-> 4. **Hardware-Level Modbus Serialization:** `inverter_engine.py` enforces a single-thread Modbus write queue (FIFO with bus locking) so hardware is never bombarded by parallel write requests.
+> - **Multi-Client Read:** Unlimited simultaneous viewers for telemetry, charts, and camera feeds.
+> - **Single-Writer Control Lease:** Only one authorized operator can issue Inverter commands at any given time (60-second sliding lease).
+> - **Conflict Rejection (HTTP 423):** Competing write commands from another device while a control action is active are rejected with a visual lock banner: `ðŸ”’ Controlled by <DeviceName> (<IP>) â€” Busy`.
 
 ---
 
-## 1. Target Architecture Overview
+## 1. Unified System Architecture
 
 ```
- â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
- â”‚                     ADSI Server Backend                     â”‚
- â”‚          (Linux Server / Dedicated Gateway / Local)         â”‚
- â”‚   - Express API & WebSockets Gateway (Port 3500)            â”‚
- â”‚   - Inverter Modbus Engine (Port 9100)                      â”‚
- â”‚   - Solar AI Day-Ahead Engine (Python venv)                 â”‚
- â”‚   - go2rtc RTSP/WebRTC Streaming (Ports 1984, 8555)         â”‚
- â”‚   - Single Authoritative Storage (/var/lib/adsi-dashboard)  â”‚
- â”‚     â”œâ”€ db/adsi.db & db/archive/*.db (27.5 GB Telemetry)     â”‚
- â”‚     â”œâ”€ config/ipconfig.json & auth/credentials.json         â”‚
- â”‚     â””â”€ programdata/forecast/*.joblib & weather/*.csv        â”‚
- â”‚   - [CONTROL ARBITER]: Single-Writer Lease & Mutex Guard    â”‚
- â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
-                                â”‚
-        â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
-        â”‚ Read Streams (Multi)  â”‚ Control Actions (1-At-A-Time)
-        â–¼                       â–¼                       â–¼
-â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”         â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”         â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
-â”‚ Web Browsers â”‚         â”‚ Electron App â”‚         â”‚ Mobile / PWA â”‚
-â”‚  (Read-Only  â”‚         â”‚(Active Masterâ”‚         â”‚  (Read-Only  â”‚
-â”‚  Live View)  â”‚         â”‚ Control Leaseâ”‚         â”‚  Live View)  â”‚
-â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜         â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜         â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+ â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+ â”‚                           ADSI Server Backend                           â”‚
+ â”‚               (Linux Server / Dedicated Gateway Appliance)              â”‚
+ â”‚                                                                         â”‚
+ â”‚   - Express API & WebSockets Gateway (Port 3500)                        â”‚
+ â”‚   - Inverter Modbus Engine (Port 9100)                                  â”‚
+ â”‚   - Solar AI Day-Ahead Engine (Python venv)                             â”‚
+ â”‚   - go2rtc RTSP/WebRTC Streaming (Ports 1984, 8555)                     â”‚
+ â”‚   - Authoritative Master Storage (/var/lib/adsi-dashboard/)             â”‚
+ â”‚                                                                         â”‚
+ â”‚   â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ SECURITY CORE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”   â”‚
+ â”‚   â”‚ â€¢ Device Registry (`client_devices` table in adsi.db)           â”‚   â”‚
+ â”‚   â”‚ â€¢ Per-Device Personalization (Themes, Layouts, Chart Views)     â”‚   â”‚
+ â”‚   â”‚ â€¢ Single-Writer Control Arbiter & Modbus Write Queue Lock       â”‚   â”‚
+ â”‚   â”‚ â€¢ Audit Logger (Records Device ID, Device Name, IP, Action)     â”‚   â”‚
+ â”‚   â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜   â”‚
+ â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+                                      â”‚
+            â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+            â”‚ Telemetry Streams (All) â”‚ Control Actions (1-At-A-Time)
+            â–¼                         â–¼                         â–¼
+   â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”      â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”      â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+   â”‚   Web Browser    â”‚      â”‚   Electron App   â”‚      â”‚   Mobile / PWA   â”‚
+   â”‚  "Office Chrome" â”‚      â”‚ "Engr. M Laptop" â”‚      â”‚  "Plant Tablet"  â”‚
+   â”‚ Device: 4f8a-... â”‚      â”‚ Device: 9b2c-... â”‚      â”‚ Device: e31d-... â”‚
+   â”‚ Theme: Dark Navy â”‚      â”‚ (Active Control) â”‚      â”‚ Theme: High Con. â”‚
+   â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜      â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜      â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
 ```
 
 ---
 
 ## 2. Phase-by-Phase Implementation
 
-### Phase 1: Inverter Control Arbitration & Single-Writer Guard
+### Phase 1: Device Identification & Personalization Registry
+- **Server Device Registry (`server/deviceRegistry.js`):**
+  - Create table `client_devices (device_id TEXT PRIMARY KEY, device_name TEXT, ip_address TEXT, role TEXT, preferences_json TEXT, last_seen_ts INTEGER)`.
+  - Provide endpoints:
+    - `POST /api/device/register` â€” Register/handshake device, return saved preferences.
+    - `POST /api/device/preferences` â€” Save personalized theme, layout zoom, active tabs to server.
+    - `GET /api/devices` â€” View connected devices list (Admin view).
+- **Client Device Identity (`public/js/app.js`):**
+  - Generate UUID `deviceId` in `localStorage` on first visit.
+  - Prompt user on first run for a friendly name (e.g. `"Engr. M Laptop"` or `"Control Room Tablet"`).
+  - Include `X-Device-Id` and `X-Device-Name` headers in all HTTP API and WebSocket handshakes.
+  - Automatically sync theme (Dark/Light/Cyberpunk) and UI custom preferences with the server.
+
+### Phase 2: Inverter Control Arbitration & Audit Enforcement
 - **Server Control Arbiter (`server/controlArbiter.js`):**
-  - Manage a lightweight control session lease (e.g. 60-second sliding expiration).
-  - Gate all destructive or setpoint endpoints (`/api/write`, `/api/plant-cap/apply`, `/api/compliance/run/start`, `/api/plant-cap/schedule/save`).
-  - Broadcast active controller state via WebSocket (`{ type: "control_lock", lockedBy: "operator@100.114.7.50", expiresTs: 1771829000 }`).
-- **Frontend Lock Indicators (`public/js/app.js`):**
-  - Display non-intrusive lock badge on APC and Plant Cap tabs when another operator is commanding the fleet.
-  - Require single-click confirmation before claiming control.
+  - Manage a single-writer control lease (60s sliding expiration).
+  - Gate all setpoints and commands (`/api/write`, `/api/plant-cap/apply`, `/api/compliance/run/start`, `/api/plant-cap/schedule/save`).
+  - Broadcast active lock state via WebSockets (`{ type: "control_lock", lockedByDevice: "Engr. M Laptop", ip: "100.114.7.50", expiresTs: 1771829000 }`).
+  - Log every single control action to `audit_log` with device identity.
+- **Client Lock UI:**
+  - Display non-intrusive lock badge on APC and Plant Cap tabs when another device holds the control lease.
 
-### Phase 2: Frontend Simplification (`public/js/app.js` & `public/index.html`)
-- **Remove Mode Checks:** Strip `isClientModeActive()`, `getActiveOperationModeClient()`, `getSelectedOperationModeClient()`, and `normalizeOperationModeValue()`.
-- **Remove Remote Health & Fallback Banners:** Remove `State.remoteHealth`, `normalizeRemoteHealthClient()`, stale-data warnings, and remote status indicators.
-- **Universal Feature Access:** Ensure all analytics, reports, exports, QA scoring, and DLS upload tools are open to all connected clients.
-- **Bust Cache:** Increment CSS and JS version in `public/index.html` (Golden Rule 3).
+### Phase 3: Frontend Simplification & Mode Elimination (`public/js/app.js`)
+- **Rip Out Legacy Modes:** Strip `isClientModeActive()`, `getActiveOperationModeClient()`, `getSelectedOperationModeClient()`, and `normalizeOperationModeValue()`.
+- **Remove Fake Status Banners:** Remove `State.remoteHealth`, `normalizeRemoteHealthClient()`, and stale-data warnings.
+- **Universal Feature Access:** Ensure all forms, buttons, and tools (Day-Ahead generation, QA scoring, DLS upload, grid compliance tests, exports) execute standard API calls directly to the server.
+- **Bust Cache:** Increment CSS and JS query version in `public/index.html` (Golden Rule 3).
 
-### Phase 3: Server Decoupling & Proxy Removal (`server/index.js`)
+### Phase 4: Server Decoupling & Proxy Removal (`server/index.js`)
 - **Eliminate Reverse-Proxying:** Remove `proxyToRemote()`, `proxyWebSocketToRemote()`, and `shouldProxyApiPath()`.
 - **Remove Remote Polling Bridges:** Remove `_startRemotePollingBridge()`, `_stopRemotePollingBridge()`, `remoteBridgeState`, and `remoteChatBridgeState`.
-- **Simplify Route Handlers:** Convert all routes (compliance runs, forecast generation, QA backfill, calibration, alarms) to direct local handlers on the server without `if (isRemoteMode())` conditionals.
+- **Clean Route Handlers:** Convert all routes to direct local handlers on the server without `if (isRemoteMode())` conditionals.
 - **Clean Subsystem Modules:** Strip `isRemoteMode` from `server/calibrationRoutes.js`, `server/alarmsDiagnostic.js`, and `server/cloudBackup.js`.
 
-### Phase 4: Settings & Configuration Clean-up (`public/global-config.html` & `server/db.js`)
-- **Settings Schema Streamlining:** Deprecate and remove obsolete settings: `operationMode`, `remoteGatewayUrl`, `remoteApiToken`, `remoteViewerMode`.
-- **UI Settings Modal Clean-up:** Remove "Operation Mode: Gateway vs Remote" toggle and token inputs from `global-config.html` and UI modals.
-
-### Phase 5: Electron Client Streamlining (`electron/main.js`)
-- **Flexible Electron Startup:**
-  - Remote viewer: Simply loads `http://<server-ip>:3500` as a webview window.
-  - Standalone local: Spawns local services and loads `http://localhost:3500`.
+### Phase 5: Settings & Electron Client Streamlining
+- **Settings Schema Clean-up:** Deprecate and remove obsolete settings (`operationMode`, `remoteGatewayUrl`, `remoteApiToken`, `remoteViewerMode`).
+- **Global Config Modal:** Remove "Operation Mode" toggle from `global-config.html`.
+- **Electron Native Client:** Provide a clean server connection dialog (`http://<server-ip>:3500`) with connection test and persistent `deviceId` handoff.
 
 ---
 
 ## 3. Verification Plan
 
-### Automated & Concurrency Tests
-1. **Multi-Client Read Test:** Connect simulated WebSocket and HTTP clients simultaneously â€” verify zero performance drop in telemetry.
-2. **Concurrent Write Lock Test:** Send simultaneous conflicting setpoints from Client A and Client B:
-   - Verify Client A obtains lease and applies setpoint.
-   - Verify Client B receives `423 Locked: Control session active by Client A`.
-3. **Lease Expiration Test:** Verify lease cleanly releases after timeout or manual release.
-4. **Config Persistence Test:** Update settings/IP configuration from client â†’ verify change is written directly to server storage.
+### Automated & Security Tests
+1. **Device Identity Handshake Test:** Connect new client â†’ verify `device_id` is registered in `client_devices` table and default preferences are returned.
+2. **Preference Persistence Test:** Change theme from Dark to Cyberpunk on Device A â†’ restart browser â†’ verify server restores Cyberpunk theme for Device A.
+3. **Control Arbitration & Audit Test:**
+   - Device A commands inverter %P setpoint â†’ verify lease is claimed.
+   - Device B sends competing setpoint â†’ verify HTTP 423 rejection.
+   - Inspect `audit_log` table â†’ verify entry records Device A's friendly name, UUID, and IP.
 
 ### Manual Verification
 1. **Dual Device Verification:** Open dashboard on Laptop and Phone simultaneously:
-   - Verify both show synchronized live data and charts.
-   - Send setpoint on Laptop â†’ Verify Phone shows "Controlled by Operator" lock badge.
+   - Verify both have independent personalized themes (e.g. Laptop in Dark, Phone in Solar Amber).
+   - Verify live telemetry and cameras stream in real time on both.
 2. **Desktop & Mobile UI Invariants:** Verify 1440px desktop view and 360px mobile view remain 100% compliant with Golden Rules 1, 2, 4, 5.
 
