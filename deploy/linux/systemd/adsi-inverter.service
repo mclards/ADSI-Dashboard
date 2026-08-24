@@ -1,6 +1,7 @@
 [Unit]
 Description=ADSI Inverter Modbus Engine & Telemetry Poller (Port 9100)
 After=network.target
+PartOf=adsi.target
 StartLimitIntervalSec=60
 StartLimitBurst=5
 

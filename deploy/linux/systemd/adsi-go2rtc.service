@@ -1,6 +1,7 @@
 [Unit]
 Description=ADSI go2rtc Camera Media Streaming (Gap 1 Standalone Workaround)
-After=network.target adsi-server.service
+After=network.target
+PartOf=adsi.target
 StartLimitIntervalSec=60
 StartLimitBurst=5
 

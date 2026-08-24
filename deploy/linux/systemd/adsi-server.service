@@ -1,7 +1,7 @@
 [Unit]
 Description=ADSI Dashboard Express & WebSockets Backend Gateway (Port 3500)
-After=network.target adsi-inverter.service adsi-forecast.service
-Requires=adsi-inverter.service
+After=network.target
+PartOf=adsi.target
 StartLimitIntervalSec=60
 StartLimitBurst=5
 

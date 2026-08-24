@@ -1,6 +1,7 @@
 [Unit]
 Description=ADSI Solar Power Day-Ahead Forecasting Engine
-After=network.target adsi-inverter.service
+After=network.target
+PartOf=adsi.target
 StartLimitIntervalSec=60
 StartLimitBurst=5
 
