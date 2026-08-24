@@ -167,8 +167,9 @@ usermod -a -G dialout adsi 2>/dev/null && \
   success "User 'adsi' added to 'dialout' group (RS-485 serial access)" || true
 
 # ── Step 5: Storage directories ───────────────────────────────────────────────
-step "5 / 17  Storage directories"
-mkdir -p "${DATA_DIR}"/{db,db/backups,archive,forecast,weather,config,cloud_backups}
+step "5 / 17  Create core data directories"
+mkdir -p "${DATA_DIR}"/{db,db/backups,archive,config,cloud_backups}
+mkdir -p "${DATA_DIR}/programdata"/{forecast,history,weather,go2rtc}
 mkdir -p "${DATA_DIR}/programdata/go2rtc"
 mkdir -p "${DATA_DIR}/lifecycle"
 mkdir -p "${LOG_DIR}"
@@ -216,9 +217,9 @@ if $SKIP_NPM; then
 elif [[ -f "${APP_DIR}/package.json" ]]; then
   cd "${APP_DIR}"
   info "Running npm install --omit=dev..."
-  npm install --omit=dev 2>&1 | tail -5
+  npm install --omit=dev
   info "Rebuilding better-sqlite3 native binding for Node.js ABI..."
-  npm rebuild better-sqlite3 2>&1 | tail -3
+  npm rebuild better-sqlite3
   success "npm install + native rebuild complete"
 else
   warn "package.json not found at ${APP_DIR}"
@@ -443,7 +444,7 @@ echo -e "  ${YELLOW}scp -r \"%PROGRAMDATA%\\InverterDashboard\\db\\backups\\*\" 
 echo -e "  ${YELLOW}    adsi@<linux-ip>:${DATA_DIR}/db/backups/${NC}"
 echo ""
 echo -e "  ${YELLOW}scp -r \"%PROGRAMDATA%\\InverterDashboard\\forecast\\*.joblib\" \\${NC}"
-echo -e "  ${YELLOW}    adsi@<linux-ip>:${DATA_DIR}/forecast/${NC}"
+echo -e "  ${YELLOW}    adsi@<linux-ip>:${DATA_DIR}/programdata/forecast/${NC}"
 echo ""
 echo -e "  ${YELLOW}scp \"%PROGRAMDATA%\\InverterDashboard\\config\\ipconfig.json\" \\${NC}"
 echo -e "  ${YELLOW}    adsi@<linux-ip>:${DATA_DIR}/config/${NC}"
