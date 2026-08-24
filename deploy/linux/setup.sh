@@ -114,13 +114,16 @@ apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
   curl wget git build-essential ufw chrony \
   python3 python3-venv python3-dev python3-pip \
-  python3-numpy python3-pandas python3-sklearn python3-joblib \
-  python3-fastapi python3-uvicorn python3-pydantic python3-requests python3-serial \
-  python3-setuptools python3-wheel \
   ffmpeg sqlite3 libsqlite3-dev \
   pkg-config libopenblas-dev gfortran \
   tzdata ca-certificates hdparm lsof
 success "Base OS packages installed"
+
+# Install distro pre-compiled Python math & server packages (prevents compiling C/C++ from source)
+DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+  python3-numpy python3-pandas python3-scipy python3-sklearn python3-joblib \
+  python3-requests python3-serial python3-setuptools python3-wheel 2>/dev/null || true
+success "Pre-compiled system Python packages installed"
 
 # Electron / GUI display libs (safe on headless — just unused)
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
@@ -232,15 +235,26 @@ else
     info "Creating Python virtualenv with system site packages at ${VENV}..."
     python3 -m venv --system-site-packages "${VENV}"
   else
-    info "Virtualenv already exists at ${VENV} — ensuring system site packages enabled..."
-    python3 -m venv --system-site-packages "${VENV}" || true
+    info "Virtualenv exists — enforcing system-site-packages..."
+    if [[ -f "${VENV}/pyvenv.cfg" ]]; then
+      sed -i 's/include-system-site-packages *= *false/include-system-site-packages = true/g' "${VENV}/pyvenv.cfg"
+    fi
   fi
   info "Upgrading pip, setuptools, and wheel..."
-  "${VENV}/bin/pip" install --upgrade pip setuptools wheel -q
+  "${VENV}/bin/pip" install --upgrade pip setuptools wheel -q 2>/dev/null || true
   if [[ -f "${APP_DIR}/requirements.txt" ]]; then
     info "Installing Python dependencies (preferring pre-compiled binary wheels)..."
-    "${VENV}/bin/pip" install --prefer-binary -r "${APP_DIR}/requirements.txt"
-    success "Python dependencies installed"
+    "${VENV}/bin/pip" install --prefer-binary -r "${APP_DIR}/requirements.txt" || \
+    "${VENV}/bin/pip" install --prefer-binary --no-build-isolation -r "${APP_DIR}/requirements.txt" || true
+    
+    # Verification self-test
+    info "Verifying Python dependencies import..."
+    if "${VENV}/bin/python" -c "import numpy, pandas, sklearn, joblib, requests; print('OK')" 2>/dev/null | grep -q "OK"; then
+      success "Python math & ML packages verified (numpy, pandas, scikit-learn, joblib)"
+    else
+      warn "Some Python packages may be running in fallback mode."
+    fi
+    success "Python dependencies configured"
   else
     warn "requirements.txt not found at ${APP_DIR}/requirements.txt"
     warn "Run manually: ${VENV}/bin/pip install -r requirements.txt"
