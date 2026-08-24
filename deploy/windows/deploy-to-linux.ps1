@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     ADSI Dashboard — One-Click Windows to Linux Deployment & Data Migration Script
 .DESCRIPTION
@@ -213,8 +213,9 @@ if ($Mode -in @("Full", "DataOnly")) {
             $archivePath = Join-Path $LocalProgramData "archive"
             if (Test-Path $archivePath) {
                 Write-Info "Copying full historical monthly archive (this may take a while)..."
-                scp -r "$archivePath\*" "${RemoteTarget}:${DataDir}/archive/"
-                Write-Success "Historical archive copied"
+                scp -r "$archivePath\*" "${RemoteTarget}:${DataDir}/db/archive/"
+                ssh $RemoteTarget "sudo ln -sf ${DataDir}/db/archive ${DataDir}/archive 2>/dev/null || true"
+                Write-Success "Historical archive copied to db/archive/"
             }
         }
     }

@@ -170,9 +170,14 @@ usermod -a -G dialout adsi 2>/dev/null && \
 
 # ── Step 5: Storage directories ───────────────────────────────────────────────
 step "5 / 18  Create core data directories"
-mkdir -p "${DATA_DIR}"/{db,db/backups,archive,config,cloud_backups}
+mkdir -p "${DATA_DIR}"/{db,db/backups,db/archive,archive,config,cloud_backups}
 mkdir -p "${DATA_DIR}/programdata"/{forecast,history,weather,go2rtc}
 mkdir -p "${DATA_DIR}/programdata/go2rtc"
+# Create symlink so both /var/lib/adsi-dashboard/archive and /var/lib/adsi-dashboard/db/archive resolve identical data
+if [[ ! -L "${DATA_DIR}/archive" ]] && [[ -d "${DATA_DIR}/archive" ]] && [[ -z "$(ls -A "${DATA_DIR}/archive" 2>/dev/null)" ]]; then
+  rm -rf "${DATA_DIR}/archive"
+  ln -sf "${DATA_DIR}/db/archive" "${DATA_DIR}/archive"
+fi
 mkdir -p "${DATA_DIR}/lifecycle"
 mkdir -p "${LOG_DIR}"
 chown -R adsi:adsi "${DATA_DIR}" "${LOG_DIR}"
