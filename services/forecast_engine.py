@@ -87,12 +87,17 @@ PORTABLE_ROOT_RAW = str(
     or os.getenv("ADSI_PORTABLE_DATA_DIR")
     or ""
 ).strip()
+if not PORTABLE_ROOT_RAW and sys.platform.startswith("linux") and Path("/var/lib/adsi-dashboard").exists():
+    PORTABLE_ROOT_RAW = "/var/lib/adsi-dashboard"
+
 PORTABLE_ROOT = Path(PORTABLE_ROOT_RAW) if PORTABLE_ROOT_RAW else None
 EXPLICIT_DATA_DIR = str(
     os.getenv("IM_DATA_DIR")
     or os.getenv("ADSI_DATA_DIR")
     or ""
 ).strip()
+if not EXPLICIT_DATA_DIR and sys.platform.startswith("linux") and Path("/var/lib/adsi-dashboard/db").exists():
+    EXPLICIT_DATA_DIR = "/var/lib/adsi-dashboard/db"
 
 if PORTABLE_ROOT is not None:
     BASE = PORTABLE_ROOT / "programdata"
