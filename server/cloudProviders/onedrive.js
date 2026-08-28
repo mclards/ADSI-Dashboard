@@ -13,7 +13,7 @@
  * Copy the Application (client) ID into the Cloud Backup settings.
  */
 
-const fetch = require("node-fetch");
+const _nodeFetch = require("node-fetch");
 const fs = require("fs");
 const crypto = require("crypto");
 const zlib = require("zlib");
@@ -21,6 +21,17 @@ const { pipeline } = require("stream");
 const { promisify } = require("util");
 
 const pipelineAsync = promisify(pipeline);
+
+// BR-M3 (audit 2026-05-28 §3) — bound every Graph request so a network
+// partition or unreachable endpoint can't block the backup mutex forever.
+// node-fetch v2's `timeout` aborts a request that takes longer than N ms.
+// 120 s is generous enough for a 5 MB resumable chunk on a slow-but-alive
+// link while still capping a true partition. Callers that pass their own
+// `timeout` keep it.
+const REQUEST_TIMEOUT_MS = 120000;
+function fetch(url, opts = {}) {
+  return _nodeFetch(url, opts.timeout ? opts : { ...opts, timeout: REQUEST_TIMEOUT_MS });
+}
 
 const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
 const TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token";

@@ -4,7 +4,12 @@ node_modules/
 # Build outputs
 dist/
 release/
-build/
+build/*/
+!build/*.nsh
+services/forecast-build-info.json
+
+# Vendor doc archives (too large for GitHub; kept locally)
+docs/*.zip
 __pycache__/
 *.pyc
 *.pyo
@@ -27,7 +32,28 @@ services/__pycache__/
 
 # Throwaway test / stale files
 test-electron.js
-d*ADSI-Dashboardtest-electron.js
+
+# Smoke harness output (T7.3)
+scripts/.smoke-summary.json
+scripts/.smoke-pytest-junit.xml
+
+# Temporary planning / implementation docs
+SOLCAST_TRI_BAND_*.md
+IMPLEMENTATION_*.md
+IMPLEMENTATION_*.txt
+# Private operational and vendor materials must never be committed or packaged.
+docs/Fire-Incident/
+docs/hik-cctv-camera/
+docs/Ingecon_*.docx
+docs/Ingecon_*.csv
+docs/Ingecon_*.xlsx
+docs/Inverter - Manual.pdf
+test-results/
+.tmp/
+release_pre_*/
+release_prev_*/
+release_full_*/
+folder_structure.txt
 
 # Local-only licensing tools
 LICENSE-GENERATOR.md
@@ -46,13 +72,37 @@ private/
 *.key
 *.p12
 *.pfx
+*.cer
+
+# Code signing private artifacts (explicit guard)
+build/private/
+build/private/**
 
 # Local runtime / auth / customer artifacts
 cloud_backups/
 auth/
 userData/
 *.lic
+.claude/settings.local.json
+
+# Local machine IP config (do not commit)
+ipconfig.json
+server/ipconfig.json
+.vscode/settings.json
+.vscode/.tmp/
+.agents/
+
+# Bundled binaries (too large for git — download during build)
+server/ffmpeg/ffmpeg.exe
+server/ffmpeg/*.zip
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Research / reverse-engineering scratch (per dirty-code-audit 2026-04-28)
+/_*.py
+/_spike/
+/_ism/
+/ism_frames.txt
+/release-notes-v*.md

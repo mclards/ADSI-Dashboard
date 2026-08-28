@@ -14,8 +14,17 @@
  * app), but is required by Google's OAuth implementation for this flow.
  */
 
-const fetch = require("node-fetch");
+const _nodeFetch = require("node-fetch");
 const fs = require("fs");
+
+// BR-M3 (audit 2026-05-28 §3) — bound every Drive request so a network
+// partition or unreachable endpoint can't block the backup mutex forever.
+// node-fetch v2's `timeout` aborts a request that exceeds N ms; 120 s caps a
+// true partition while leaving room for a slow-but-alive resumable chunk.
+const REQUEST_TIMEOUT_MS = 120000;
+function fetch(url, opts = {}) {
+  return _nodeFetch(url, opts.timeout ? opts : { ...opts, timeout: REQUEST_TIMEOUT_MS });
+}
 
 const DRIVE_BASE = "https://www.googleapis.com/drive/v3";
 const DRIVE_UPLOAD_BASE = "https://www.googleapis.com/upload/drive/v3";

@@ -1,0 +1,47 @@
+{
+  "exclude": [
+    ".tmp",
+    "test-results",
+    "node_modules",
+    "release",
+    "dist",
+    "**/__pycache__",
+    "**/*.pyc"
+  ],
+  "permissions": {
+    "allow": [
+      "Bash(cat:*)",
+      "Bash(ls:*)",
+      "Bash(npm run *)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Edit(/src/**)",
+      "Bash(node:*)",
+      "Bash(grep:*)",
+      "Bash(git:*)",
+      "Bash(node -e \"console.log\\(require\\(''./package.json''\\).version\\)\")",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(npm start)",
+      "Bash(python3 -c \":*)",
+      "Bash(npm version:*)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''services/forecast_engine.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''OK''\\)\")",
+      "Bash(python -c \"import sys,json; data=json.load\\(sys.stdin\\); print\\(data[0][''''text'''']\\)\")",
+      "Bash(tasklist /FI \"IMAGENAME eq ForecastCoreService.exe\")"
+    ],
+    "deny": [
+      "Bash(npm install *)",
+      "Bash(npm uninstall *)",
+      "Bash(yarn add *)",
+      "Bash(pip install *)",
+      "Bash(rm *)",
+      "Bash(rm -rf *)",
+      "Bash(rmdir *)",
+      "Bash(curl *)",
+      "Bash(wget *)",
+      "Bash(ssh *)",
+      "Bash(scp *)"
+    ]
+  }
+}

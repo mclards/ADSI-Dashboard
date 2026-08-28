@@ -1,0 +1,22 @@
+[Unit]
+Description=ADSI go2rtc Camera Media Streaming (Gap 1 Standalone Workaround)
+After=network.target
+PartOf=adsi.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=adsi
+Group=adsi
+ExecStart=/opt/adsi-dashboard/server/go2rtc/go2rtc_linux_amd64 \
+  -c /var/lib/adsi-dashboard/programdata/go2rtc/go2rtc.yaml
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+StandardOutput=append:/var/log/adsi-dashboard/go2rtc.log
+StandardError=append:/var/log/adsi-dashboard/go2rtc.log
+
+[Install]
+WantedBy=multi-user.target
+
